@@ -76,6 +76,10 @@ def build_time_series_folds(train_df: pd.DataFrame, n_splits: int = 3) -> list[F
     return folds
 
 
+def _has_both_classes(values: pd.Series) -> bool:
+    return values.nunique(dropna=True) >= 2
+
+
 def get_available_feature_columns(dataset: pd.DataFrame) -> list[str]:
     return [column for column in FEATURE_COLUMNS if not dataset[column].isna().all()]
 
@@ -113,11 +117,19 @@ def cross_validate_params(
     feature_columns: list[str],
 ) -> dict[str, int | float]:
     folds = build_time_series_folds(train_df)
+    valid_folds = [
+        fold
+        for fold in folds
+        if _has_both_classes(train_df.iloc[fold.train_idx]["target"])
+        and _has_both_classes(train_df.iloc[fold.val_idx]["target"])
+    ]
+    if not valid_folds:
+        return parameter_grid[0]
     best_score = float("-inf")
     best_params = parameter_grid[0]
     for params in parameter_grid:
         fold_scores: list[float] = []
-        for fold in folds:
+        for fold in valid_folds:
             fold_train = train_df.iloc[fold.train_idx]
             fold_val = train_df.iloc[fold.val_idx]
             prepared = prepare_features(fold_train, fold_val, feature_columns)
@@ -130,6 +142,8 @@ def cross_validate_params(
             model.fit(prepared.x_train, fold_train["target"])
             probabilities = model.predict_proba(prepared.x_test)[:, 1]
             fold_scores.append(roc_auc_score(fold_val["target"], probabilities))
+        if not fold_scores:
+            continue
         mean_score = float(np.mean(fold_scores))
         if mean_score > best_score:
             best_score = mean_score
