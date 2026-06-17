@@ -1,8 +1,24 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import date
+
 from psycopg2.extensions import connection as PgConnection
 
 from ..models import FighterRecord
+
+
+@dataclass(frozen=True)
+class FighterMatchRecord:
+    id: int
+    name: str
+    nickname: str | None
+    nationality: str | None
+    birth_date: date | None
+    height_cm: float | None
+    reach_cm: float | None
+    weight_grams: int | None
+    stance: str | None
 
 
 def upsert_fighter(connection: PgConnection, fighter: FighterRecord) -> int:
@@ -57,3 +73,85 @@ def get_fighter_id_by_source(connection: PgConnection, source: str, source_id: s
         )
         row = cursor.fetchone()
         return int(row[0]) if row else None
+
+
+def get_all_fighters(connection: PgConnection) -> list[FighterMatchRecord]:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id, name, nickname, nationality, birth_date, height_cm, reach_cm, weight_grams, stance
+            FROM fighters
+            """
+        )
+        rows = cursor.fetchall()
+    return [
+        FighterMatchRecord(
+            id=int(row[0]),
+            name=row[1],
+            nickname=row[2],
+            nationality=row[3],
+            birth_date=row[4],
+            height_cm=float(row[5]) if row[5] is not None else None,
+            reach_cm=float(row[6]) if row[6] is not None else None,
+            weight_grams=int(row[7]) if row[7] is not None else None,
+            stance=row[8],
+        )
+        for row in rows
+    ]
+
+
+def update_fighter_enrichment(
+    connection: PgConnection,
+    fighter_id: int,
+    *,
+    nickname: str | None = None,
+    nationality: str | None = None,
+    birth_date: date | None = None,
+    height_cm: float | None = None,
+    reach_cm: float | None = None,
+    weight_grams: int | None = None,
+    stance: str | None = None,
+) -> bool:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE fighters
+            SET
+                nickname = COALESCE(NULLIF(nickname, ''), %s),
+                nationality = COALESCE(NULLIF(nationality, ''), %s),
+                birth_date = COALESCE(birth_date, %s),
+                height_cm = COALESCE(height_cm, %s),
+                reach_cm = COALESCE(reach_cm, %s),
+                weight_grams = COALESCE(weight_grams, %s),
+                stance = COALESCE(NULLIF(stance, ''), %s),
+                updated_at = NOW()
+            WHERE id = %s
+              AND (
+                (NULLIF(nickname, '') IS NULL AND %s IS NOT NULL)
+                OR (NULLIF(nationality, '') IS NULL AND %s IS NOT NULL)
+                OR (birth_date IS NULL AND %s IS NOT NULL)
+                OR (height_cm IS NULL AND %s IS NOT NULL)
+                OR (reach_cm IS NULL AND %s IS NOT NULL)
+                OR (weight_grams IS NULL AND %s IS NOT NULL)
+                OR (NULLIF(stance, '') IS NULL AND %s IS NOT NULL)
+              )
+            """,
+            (
+                nickname,
+                nationality,
+                birth_date,
+                height_cm,
+                reach_cm,
+                weight_grams,
+                stance,
+                fighter_id,
+                nickname,
+                nationality,
+                birth_date,
+                height_cm,
+                reach_cm,
+                weight_grams,
+                stance,
+            ),
+        )
+        return cursor.rowcount > 0

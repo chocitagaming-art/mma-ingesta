@@ -6,6 +6,7 @@ from string import ascii_lowercase
 
 from .config import get_settings
 from .db import connect
+from .espn import scrape_and_enrich
 from .http import UfcStatsClient
 from .logging_config import configure_logging
 from .models import FightRecord
@@ -255,6 +256,12 @@ def main() -> None:
     configure_logging()
     counts = scrape_all()
     LOGGER.info("Scrape complete: %s", dict(counts))
+
+
+def enrich_from_espn() -> None:
+    configure_logging()
+    counts = scrape_and_enrich()
+    LOGGER.info("ESPN enrichment complete: %s", dict(counts))
 
 
 if __name__ == "__main__":
