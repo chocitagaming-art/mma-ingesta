@@ -8,6 +8,7 @@ from datetime import date
 class FighterRecord:
     name: str
     nickname: str | None
+    headshot_url: str | None
     nationality: str | None
     birth_date: date | None
     height_cm: float | None

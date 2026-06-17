@@ -91,6 +91,7 @@ def scrape_and_enrich(max_pages: int | None = None) -> Counter:
                             connection,
                             matched_fighter.id,
                             nickname=athlete.nickname,
+                            headshot_url=athlete.headshot_url,
                             nationality=athlete.nationality,
                             birth_date=athlete.birth_date,
                             height_cm=athlete.height_cm,
@@ -236,6 +237,7 @@ def _to_fighter_record(athlete: EspnAthlete) -> FighterRecord:
     return FighterRecord(
         name=athlete.full_name,
         nickname=athlete.nickname,
+        headshot_url=athlete.headshot_url,
         nationality=athlete.nationality,
         birth_date=athlete.birth_date,
         height_cm=athlete.height_cm,

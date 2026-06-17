@@ -11,6 +11,7 @@ CREATE TABLE fighters (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
     nickname TEXT,
+    headshot_url TEXT,
     nationality TEXT,
     birth_date DATE,
     height_cm NUMERIC,

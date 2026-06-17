@@ -26,14 +26,15 @@ def upsert_fighter(connection: PgConnection, fighter: FighterRecord) -> int:
         cursor.execute(
             """
             INSERT INTO fighters (
-                name, nickname, nationality, birth_date, height_cm, reach_cm, stance,
+                name, nickname, headshot_url, nationality, birth_date, height_cm, reach_cm, stance,
                 weight_grams, wins, losses, draws, source, source_id
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (source, source_id)
             DO UPDATE SET
                 name = EXCLUDED.name,
                 nickname = EXCLUDED.nickname,
+                headshot_url = EXCLUDED.headshot_url,
                 nationality = EXCLUDED.nationality,
                 birth_date = EXCLUDED.birth_date,
                 height_cm = EXCLUDED.height_cm,
@@ -49,6 +50,7 @@ def upsert_fighter(connection: PgConnection, fighter: FighterRecord) -> int:
             (
                 fighter.name,
                 fighter.nickname,
+                fighter.headshot_url,
                 fighter.nationality,
                 fighter.birth_date,
                 fighter.height_cm,
@@ -105,6 +107,7 @@ def update_fighter_enrichment(
     fighter_id: int,
     *,
     nickname: str | None = None,
+    headshot_url: str | None = None,
     nationality: str | None = None,
     birth_date: date | None = None,
     height_cm: float | None = None,
@@ -118,6 +121,7 @@ def update_fighter_enrichment(
             UPDATE fighters
             SET
                 nickname = COALESCE(NULLIF(nickname, ''), %s),
+                headshot_url = COALESCE(NULLIF(headshot_url, ''), %s),
                 nationality = COALESCE(NULLIF(nationality, ''), %s),
                 birth_date = COALESCE(birth_date, %s),
                 height_cm = COALESCE(height_cm, %s),
@@ -128,6 +132,7 @@ def update_fighter_enrichment(
             WHERE id = %s
               AND (
                 (NULLIF(nickname, '') IS NULL AND %s IS NOT NULL)
+                OR (NULLIF(headshot_url, '') IS NULL AND %s IS NOT NULL)
                 OR (NULLIF(nationality, '') IS NULL AND %s IS NOT NULL)
                 OR (birth_date IS NULL AND %s IS NOT NULL)
                 OR (height_cm IS NULL AND %s IS NOT NULL)
@@ -138,6 +143,7 @@ def update_fighter_enrichment(
             """,
             (
                 nickname,
+                headshot_url,
                 nationality,
                 birth_date,
                 height_cm,
@@ -146,6 +152,7 @@ def update_fighter_enrichment(
                 stance,
                 fighter_id,
                 nickname,
+                headshot_url,
                 nationality,
                 birth_date,
                 height_cm,
