@@ -7,3 +7,5 @@ pandas
 numpy
 scikit-learn
 xgboost
+feedparser
+anthropic
