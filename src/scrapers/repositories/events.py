@@ -5,6 +5,26 @@ from psycopg2.extensions import connection as PgConnection
 from ..models import EventRecord
 
 
+def get_event_id(
+    connection: PgConnection,
+    event: EventRecord,
+) -> int | None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id
+            FROM events
+            WHERE name = %s
+              AND event_date IS NOT DISTINCT FROM %s
+              AND location IS NOT DISTINCT FROM %s
+              AND promotion_id = %s
+            """,
+            (event.name, event.event_date, event.location, event.promotion_id),
+        )
+        row = cursor.fetchone()
+        return int(row[0]) if row else None
+
+
 def upsert_event(connection: PgConnection, event: EventRecord) -> int:
     with connection.cursor() as cursor:
         cursor.execute(
