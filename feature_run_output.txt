@@ -1,0 +1,14 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\gpico\Projects\mma-ingesta\src\prediction\features.py", line 572, in <module>
+    main()
+  File "C:\Users\gpico\Projects\mma-ingesta\src\prediction\features.py", line 565, in main
+    raise RuntimeError("No eligible training samples were generated.")
+RuntimeError: No eligible training samples were generated.
+Total fights seen: 212
+Total samples: 0
+Feature count: 0
+Class balance: {}
+Exclusions: {'no_target': 4, 'missing_history': 207, 'missing_stats': 1}
+Spot checks:

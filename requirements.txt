@@ -3,3 +3,7 @@ python-dotenv
 requests
 beautifulsoup4
 lxml
+pandas
+numpy
+scikit-learn
+xgboost
