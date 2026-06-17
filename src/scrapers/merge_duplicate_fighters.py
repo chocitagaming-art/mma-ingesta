@@ -60,7 +60,7 @@ def _choose_keeper(rows: list[FighterRow]) -> FighterRow:
     return max(rows, key=_score)
 
 
-def _merge_group(connection, rows: list[FighterRow], dry_run: bool) -> dict[str, Any]:
+def _merge_group(connection, rows: list[FighterRow]) -> dict[str, Any]:
     keeper = _choose_keeper(rows)
     duplicates = [row for row in rows if row.id != keeper.id]
 
@@ -144,11 +144,6 @@ def _merge_group(connection, rows: list[FighterRow], dry_run: bool) -> dict[str,
             )
             cursor.execute("DELETE FROM fighters WHERE id = %s", (duplicate_id,))
 
-    if dry_run:
-        connection.rollback()
-    else:
-        connection.commit()
-
     return {"kept_id": keeper.id, "deleted_ids": deleted_ids}
 
 
@@ -209,7 +204,7 @@ def merge_duplicates(dry_run: bool = False) -> dict[str, Any]:
         for normalized_name, group in grouped.items():
             if len(group) < 2:
                 continue
-            result = _merge_group(connection, group, dry_run=dry_run)
+            result = _merge_group(connection, group)
             summary["groups_merged"] += 1
             summary["fighters_deleted"] += len(result["deleted_ids"])
             merged_groups.append(
@@ -221,14 +216,16 @@ def merge_duplicates(dry_run: bool = False) -> dict[str, Any]:
                 }
             )
 
+        if dry_run:
+            connection.rollback()
+        else:
+            connection.commit()
+
         with connection.cursor() as cursor:
             cursor.execute("SELECT COUNT(*) FROM fighters")
             summary["fighters_total"] = int(cursor.fetchone()[0])
             cursor.execute("SELECT COUNT(*) FROM fighters WHERE headshot_url IS NOT NULL")
             summary["fighters_with_headshots"] = int(cursor.fetchone()[0])
-
-        if dry_run:
-            connection.rollback()
 
     return {
         "dry_run": dry_run,
