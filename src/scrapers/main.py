@@ -15,7 +15,15 @@ from .parsers.fighters import parse_fighter_detail, parse_fighter_index
 from .parsers.fights import build_fight_stats_record, parse_event_fights, parse_fight_stats
 from .repositories.events import get_event_id, upsert_event
 from .repositories.fighters import get_fighter_id_by_source, upsert_fighter
-from .repositories.fights import upsert_fight, upsert_fight_stats
+from .repositories.fights import (
+    get_fight_corner_assignment,
+    list_fights_for_winner_repair,
+    swap_fight_corners,
+    update_fight_winner,
+    upsert_fight,
+    upsert_fight_stats,
+)
+from .utils import clean_text, source_id_from_url
 
 
 LOGGER = logging.getLogger(__name__)
@@ -60,6 +68,60 @@ def scrape_all(
             max_events=max_events,
             max_fights_per_event=max_fights_per_event,
         )
+    return counts
+
+
+def repair_fight_winners() -> Counter:
+    settings = get_settings()
+    client = UfcStatsClient(settings)
+    counts: Counter = Counter()
+    with connect(settings.database_url) as connection:
+        fights = list_fights_for_winner_repair(connection)
+        for fight_id, source_id in fights:
+            detail_url = f"http://ufcstats.com{source_id}" if source_id.startswith("/") else f"http://ufcstats.com/fight-details/{source_id}"
+            try:
+                LOGGER.info("Repairing fight winner from %s", detail_url)
+                fight_page = client.fetch(detail_url)
+                fighter_links = fight_page.soup.select(".b-fight-details__person-name a[href*='/fighter-details/']")
+                if len(fighter_links) < 2:
+                    counts["repair_skipped_unparsed"] += 1
+                    continue
+                page_red_source_id = source_id_from_url(fighter_links[0].get("href")) if fighter_links[0].get("href") else None
+                page_blue_source_id = source_id_from_url(fighter_links[1].get("href")) if fighter_links[1].get("href") else None
+                winner_corner = None
+                statuses = [
+                    clean_text(node.get_text(" ", strip=True)).lower()
+                    for node in fight_page.soup.select(".b-fight-details__person-status")
+                    if clean_text(node.get_text(" ", strip=True))
+                ]
+                if len(statuses) >= 2:
+                    if statuses[0] == "w" and statuses[1] == "l":
+                        winner_corner = "red"
+                    elif statuses[0] == "l" and statuses[1] == "w":
+                        winner_corner = "blue"
+                page_red_id = _resolve_fighter_id(connection, {}, settings.source_name, page_red_source_id)
+                page_blue_id = _resolve_fighter_id(connection, {}, settings.source_name, page_blue_source_id)
+                stored_red_id, stored_blue_id = get_fight_corner_assignment(connection, fight_id)
+                if stored_red_id == page_blue_id and stored_blue_id == page_red_id:
+                    swap_fight_corners(connection, fight_id)
+                    counts["repair_swapped_corners"] += 1
+                    stored_red_id, stored_blue_id = get_fight_corner_assignment(connection, fight_id)
+                elif stored_red_id != page_red_id or stored_blue_id != page_blue_id:
+                    counts["repair_skipped_mismatch"] += 1
+                    connection.rollback()
+                    continue
+                winner_id = None
+                if winner_corner == "red":
+                    winner_id = stored_red_id
+                elif winner_corner == "blue":
+                    winner_id = stored_blue_id
+                update_fight_winner(connection, fight_id, winner_id)
+                connection.commit()
+                counts["repair_updated"] += 1
+            except Exception as exc:
+                connection.rollback()
+                counts["repair_errors"] += 1
+                LOGGER.exception("Failed to repair fight %s: %s", detail_url, exc)
     return counts
 
 

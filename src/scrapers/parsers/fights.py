@@ -140,14 +140,28 @@ def build_fight_stats_record(fight_id: int, fighter_id: int, parsed: ParsedFight
 
 def _parse_winner_corner(row: BeautifulSoup) -> str | None:
     first_cell = row.select_one("td")
+    if not first_cell:
+        return None
+    values = [value.lower() for value in _extract_column_values(first_cell)]
+    if len(values) >= 2:
+        red_result = values[0]
+        blue_result = values[1]
+        if red_result == "w" and blue_result == "l":
+            return "red"
+        if red_result == "l" and blue_result == "w":
+            return "blue"
+        if {red_result, blue_result} & {"d", "draw", "nc"}:
+            return None
     text = clean_text(first_cell.get_text(" ", strip=True) if first_cell else None)
     if not text:
         return None
-    values = [value.lower() for value in text.split() if value]
-    if "win" in values:
+    normalized = [value.lower() for value in text.split() if value]
+    if normalized[:2] == ["w", "l"]:
         return "red"
-    if "loss" in values:
+    if normalized[:2] == ["l", "w"]:
         return "blue"
+    if any(value in {"d", "draw", "nc"} for value in normalized):
+        return None
     return None
 
 

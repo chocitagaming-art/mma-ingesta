@@ -84,3 +84,57 @@ def upsert_fight_stats(connection: PgConnection, stats: FightStatsRecord) -> Non
                 stats.knockdowns,
             ),
         )
+
+
+def list_fights_for_winner_repair(connection: PgConnection) -> list[tuple[int, str]]:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id, source_id
+            FROM fights
+            WHERE source = 'ufcstats'
+            ORDER BY id ASC
+            """
+        )
+        return [(int(row[0]), str(row[1])) for row in cursor.fetchall()]
+
+
+def update_fight_winner(connection: PgConnection, fight_id: int, winner_id: int | None) -> None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE fights
+            SET winner_id = %s,
+                updated_at = NOW()
+            WHERE id = %s
+            """,
+            (winner_id, fight_id),
+        )
+
+
+def get_fight_corner_assignment(connection: PgConnection, fight_id: int) -> tuple[int, int]:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT fighter_red_id, fighter_blue_id
+            FROM fights
+            WHERE id = %s
+            """,
+            (fight_id,),
+        )
+        row = cursor.fetchone()
+        return int(row[0]), int(row[1])
+
+
+def swap_fight_corners(connection: PgConnection, fight_id: int) -> None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE fights
+            SET fighter_red_id = fighter_blue_id,
+                fighter_blue_id = fighter_red_id,
+                updated_at = NOW()
+            WHERE id = %s
+            """,
+            (fight_id,),
+        )

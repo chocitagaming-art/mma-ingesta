@@ -51,6 +51,40 @@ class DatasetBuildResult:
     excluded_missing_stats: int
 
 
+FEATURE_COLUMNS = [
+    "height_cm_diff",
+    "reach_cm_diff",
+    "age_diff",
+    "sig_strikes_landed_per_fight_diff",
+    "sig_strike_accuracy_diff",
+    "knockdowns_per_fight_diff",
+    "takedowns_landed_per_fight_diff",
+    "takedown_accuracy_diff",
+    "submission_attempts_per_fight_diff",
+    "control_time_seconds_per_fight_diff",
+    "win_streak_diff",
+    "wins_last_5_diff",
+    "total_prior_fights_diff",
+    "total_rounds_fought_diff",
+    "pct_wins_by_ko_diff",
+    "pct_wins_by_submission_diff",
+    "pct_wins_by_decision_diff",
+    "scheduled_rounds",
+    "days_since_last_fight_diff",
+    "ranking_position_diff",
+]
+
+
+def orient_feature_row(feature_row: dict[str, Any], target: int) -> dict[str, Any]:
+    oriented_row = {}
+    for key, value in feature_row.items():
+        if key.endswith("_diff") and value is not None and target == 0:
+            oriented_row[key] = -value
+        else:
+            oriented_row[key] = value
+    return oriented_row
+
+
 def load_base_dataframe(database_url: str) -> pd.DataFrame:
     query = """
         SELECT
@@ -377,72 +411,77 @@ def build_training_dataset(fights_df: pd.DataFrame, rankings_df: pd.DataFrame) -
         red_age = compute_age(row["red_birth_date"], row["event_date"])
         blue_age = compute_age(row["blue_birth_date"], row["event_date"])
 
+        base_row = {
+            "fight_id": row["fight_id"],
+            "event_date": row["event_date"],
+            "height_cm_diff": diff(row["red_height_cm"], row["blue_height_cm"]),
+            "reach_cm_diff": diff(row["red_reach_cm"], row["blue_reach_cm"]),
+            "age_diff": diff(red_age, blue_age),
+            "sig_strikes_landed_per_fight_diff": diff(
+                red_history.sig_strikes_landed_per_fight,
+                blue_history.sig_strikes_landed_per_fight,
+            ),
+            "sig_strike_accuracy_diff": diff(
+                red_history.sig_strike_accuracy,
+                blue_history.sig_strike_accuracy,
+            ),
+            "knockdowns_per_fight_diff": diff(
+                red_history.knockdowns_per_fight,
+                blue_history.knockdowns_per_fight,
+            ),
+            "takedowns_landed_per_fight_diff": diff(
+                red_history.takedowns_landed_per_fight,
+                blue_history.takedowns_landed_per_fight,
+            ),
+            "takedown_accuracy_diff": diff(
+                red_history.takedown_accuracy,
+                blue_history.takedown_accuracy,
+            ),
+            "submission_attempts_per_fight_diff": diff(
+                red_history.submission_attempts_per_fight,
+                blue_history.submission_attempts_per_fight,
+            ),
+            "control_time_seconds_per_fight_diff": diff(
+                red_history.control_time_seconds_per_fight,
+                blue_history.control_time_seconds_per_fight,
+            ),
+            "win_streak_diff": diff(red_history.win_streak, blue_history.win_streak),
+            "wins_last_5_diff": diff(red_history.wins_last_5, blue_history.wins_last_5),
+            "total_prior_fights_diff": diff(
+                red_history.total_prior_fights,
+                blue_history.total_prior_fights,
+            ),
+            "total_rounds_fought_diff": diff(
+                red_history.total_rounds_fought,
+                blue_history.total_rounds_fought,
+            ),
+            "pct_wins_by_ko_diff": diff(
+                red_history.pct_wins_by_ko,
+                blue_history.pct_wins_by_ko,
+            ),
+            "pct_wins_by_submission_diff": diff(
+                red_history.pct_wins_by_submission,
+                blue_history.pct_wins_by_submission,
+            ),
+            "pct_wins_by_decision_diff": diff(
+                red_history.pct_wins_by_decision,
+                blue_history.pct_wins_by_decision,
+            ),
+            "scheduled_rounds": row["scheduled_rounds"],
+            "days_since_last_fight_diff": diff(
+                red_history.days_since_last_fight,
+                blue_history.days_since_last_fight,
+            ),
+            "ranking_position_diff": diff(
+                red_history.ranking_position,
+                blue_history.ranking_position,
+            ),
+        }
         dataset_rows.append(
             {
+                **orient_feature_row(base_row, target),
                 "fight_id": row["fight_id"],
                 "event_date": row["event_date"],
-                "height_cm_diff": diff(row["red_height_cm"], row["blue_height_cm"]),
-                "reach_cm_diff": diff(row["red_reach_cm"], row["blue_reach_cm"]),
-                "age_diff": diff(red_age, blue_age),
-                "sig_strikes_landed_per_fight_diff": diff(
-                    red_history.sig_strikes_landed_per_fight,
-                    blue_history.sig_strikes_landed_per_fight,
-                ),
-                "sig_strike_accuracy_diff": diff(
-                    red_history.sig_strike_accuracy,
-                    blue_history.sig_strike_accuracy,
-                ),
-                "knockdowns_per_fight_diff": diff(
-                    red_history.knockdowns_per_fight,
-                    blue_history.knockdowns_per_fight,
-                ),
-                "takedowns_landed_per_fight_diff": diff(
-                    red_history.takedowns_landed_per_fight,
-                    blue_history.takedowns_landed_per_fight,
-                ),
-                "takedown_accuracy_diff": diff(
-                    red_history.takedown_accuracy,
-                    blue_history.takedown_accuracy,
-                ),
-                "submission_attempts_per_fight_diff": diff(
-                    red_history.submission_attempts_per_fight,
-                    blue_history.submission_attempts_per_fight,
-                ),
-                "control_time_seconds_per_fight_diff": diff(
-                    red_history.control_time_seconds_per_fight,
-                    blue_history.control_time_seconds_per_fight,
-                ),
-                "win_streak_diff": diff(red_history.win_streak, blue_history.win_streak),
-                "wins_last_5_diff": diff(red_history.wins_last_5, blue_history.wins_last_5),
-                "total_prior_fights_diff": diff(
-                    red_history.total_prior_fights,
-                    blue_history.total_prior_fights,
-                ),
-                "total_rounds_fought_diff": diff(
-                    red_history.total_rounds_fought,
-                    blue_history.total_rounds_fought,
-                ),
-                "pct_wins_by_ko_diff": diff(
-                    red_history.pct_wins_by_ko,
-                    blue_history.pct_wins_by_ko,
-                ),
-                "pct_wins_by_submission_diff": diff(
-                    red_history.pct_wins_by_submission,
-                    blue_history.pct_wins_by_submission,
-                ),
-                "pct_wins_by_decision_diff": diff(
-                    red_history.pct_wins_by_decision,
-                    blue_history.pct_wins_by_decision,
-                ),
-                "scheduled_rounds": row["scheduled_rounds"],
-                "days_since_last_fight_diff": diff(
-                    red_history.days_since_last_fight,
-                    blue_history.days_since_last_fight,
-                ),
-                "ranking_position_diff": diff(
-                    red_history.ranking_position,
-                    blue_history.ranking_position,
-                ),
                 "target": target,
             }
         )
@@ -500,7 +539,7 @@ def create_output_table(database_url: str, dataset: pd.DataFrame) -> None:
     column_definitions = []
     for column in dataset.columns:
         if column == "fight_id":
-            column_definitions.append(f"{column} INTEGER PRIMARY KEY")
+            column_definitions.append(f"{column} INTEGER")
         elif column == "event_date":
             column_definitions.append(f"{column} DATE NOT NULL")
         elif column == "target":
