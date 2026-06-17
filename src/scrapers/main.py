@@ -30,20 +30,23 @@ def scrape_all(
     max_events: int | None = None,
     max_fights_per_event: int | None = None,
     skip_events: bool = False,
+    skip_fighters: bool = False,
 ) -> Counter:
     settings = get_settings()
     client = UfcStatsClient(settings)
     counts: Counter = Counter()
     with connect(settings.database_url) as connection:
         letters = fighter_letters or ascii_lowercase
-        fighter_id_by_source = scrape_fighters(
-            connection=connection,
-            client=client,
-            settings=settings,
-            counts=counts,
-            fighter_letters=letters,
-            max_fighters_per_letter=max_fighters_per_letter,
-        )
+        fighter_id_by_source: dict[str, int] = {}
+        if not skip_fighters:
+            fighter_id_by_source = scrape_fighters(
+                connection=connection,
+                client=client,
+                settings=settings,
+                counts=counts,
+                fighter_letters=letters,
+                max_fighters_per_letter=max_fighters_per_letter,
+            )
 
         if skip_events:
             return counts
