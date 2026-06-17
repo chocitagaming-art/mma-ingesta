@@ -34,6 +34,7 @@ def parse_fighter_index(soup: BeautifulSoup) -> list[str]:
 def parse_fighter_detail(soup: BeautifulSoup, url: str, settings: Settings) -> FighterRecord:
     name = _extract_name(soup)
     nickname = _extract_value_by_label(soup, {"Nickname:", "Nickname"})
+    headshot_url = None
     nationality = _extract_value_by_label(soup, {"Nationality:", "Nationality"})
     birth_date = parse_date(_extract_value_by_label(soup, {"DOB:", "DOB", "Date of Birth:"}))
     height_cm = parse_height_to_cm(_extract_value_by_label(soup, {"Height:", "Height"}))
@@ -44,6 +45,7 @@ def parse_fighter_detail(soup: BeautifulSoup, url: str, settings: Settings) -> F
     return FighterRecord(
         name=name,
         nickname=nickname,
+        headshot_url=headshot_url,
         nationality=nationality,
         birth_date=birth_date,
         height_cm=height_cm,
