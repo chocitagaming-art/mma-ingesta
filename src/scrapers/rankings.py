@@ -86,6 +86,13 @@ BROWSER_HEADERS = {
 # Sentinel stored in rank_change for fighters that (re-)entered the ranking ("NR"/NEW).
 RANK_CHANGE_NEW = 999
 
+# Scraped display name (normalized) -> canonical name in the fighters table, for cases
+# where ufc.com embeds a nickname in the official name. Used only to resolve fighter_id;
+# the contract's fighter_name column always stores the scraped name verbatim.
+NAME_ALIASES: dict[str, str] = {
+    "michael venom page": "Michael Page",
+}
+
 # Canonical division slugs (the data contract the frontend reads). Keyed by the
 # cleaned, lowercased division header from ufc.com.
 DIVISION_SLUGS: dict[str, str] = {
@@ -321,9 +328,10 @@ def _build_records(
     records: list[RankingRecord] = []
 
     def make_record(name: str, rank_position: int, is_champion: bool, rank_change: int | None) -> RankingRecord:
-        match = _match_fighter(name, exact_index, normalized_index)
+        lookup = NAME_ALIASES.get(_normalize_name(name), name)
+        match = _match_fighter(lookup, exact_index, normalized_index)
         if match is None:
-            match = _match_fighter_folded(name, folded_index)
+            match = _match_fighter_folded(lookup, folded_index)
             if match is not None:
                 counts["matched_folded"] += 1
         if match is None:
