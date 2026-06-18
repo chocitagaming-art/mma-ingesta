@@ -212,11 +212,7 @@ def _parse_detail(soup: BeautifulSoup, event: ParsedEvent) -> None:
     event.name = _build_event_name(soup, event.headliner)
     event.tagline = _meta_content(soup, "og:description")
     event.image_url = _parse_detail_image(soup)
-    # NOTE: ufc.com does not expose a reliable per-event broadcaster in static HTML
-    # (the detail page has no how-to-watch section and the listing modal can't be
-    # associated to its card by id). We leave broadcast NULL rather than store a wrong
-    # value (e.g. "UFC Fight Pass" on a PPV). ticket_url + start_time cover "how/when".
-    event.broadcast = None
+    event.broadcast = _derive_broadcast(event.name)
     event.bouts = _parse_bouts(soup, event.source_id)
 
 
@@ -227,6 +223,17 @@ def _build_event_name(soup: BeautifulSoup, headliner: str | None) -> str | None:
         return series
     headliner_vs = re.sub(r"\bvs\b(?!\.)", "vs.", headliner)
     return f"{series}: {headliner_vs}"
+
+
+def _derive_broadcast(name: str | None) -> str | None:
+    """ufc.com exposes no reliable per-event broadcaster in static HTML, so apply UFC's
+    standard model: numbered events ("UFC 329") are pay-per-view; everything else
+    (Fight Night, UFC on ESPN/ABC) streams on ESPN+/Fight Pass."""
+    if not name:
+        return None
+    if re.search(r"\bUFC\s+\d+\b", name):
+        return "PPV"
+    return "ESPN+ / Fight Pass"
 
 
 def _meta_content(soup: BeautifulSoup, prop: str) -> str | None:
