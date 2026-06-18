@@ -1,0 +1,17 @@
+.git
+.gitignore
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.env
+.venv
+venv/
+*.md
+*.output
+*.html
+*.json
+_*.py
+node_modules/
+db/
+tests/

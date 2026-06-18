@@ -25,6 +25,12 @@ load_dotenv()
 MODEL_PATH = Path("src/prediction/model.joblib")
 
 
+class InsufficientHistoryError(RuntimeError):
+    """Raised when two fighters lack enough fight history to build prediction features.
+    Subclasses RuntimeError so existing CLI behaviour is unchanged; the HTTP service
+    maps it to a 422 response."""
+
+
 @dataclass(frozen=True)
 class FighterPredictionProfile:
     id: int
@@ -137,7 +143,7 @@ def _get_latest_matchup_context(fights_df: pd.DataFrame, red_id: int, blue_id: i
         | (fights_df["fighter_blue_id"].isin([red_id, blue_id]))
     ].sort_values(["event_date", "fight_id"], ascending=[False, False])
     if latest.empty:
-        raise RuntimeError("Unable to determine matchup context from fight history.")
+        raise InsufficientHistoryError("Unable to determine matchup context from fight history.")
     row = latest.iloc[0]
     return row["event_date"], row["weight_class"]
 
@@ -170,7 +176,7 @@ def _build_feature_row(
     red_history = compute_fighter_history(red_id, matchup_date, history_df, rankings_df, weight_class)
     blue_history = compute_fighter_history(blue_id, matchup_date, history_df, rankings_df, weight_class)
     if red_history is None or blue_history is None:
-        raise RuntimeError("Insufficient fighter history to generate prediction features.")
+        raise InsufficientHistoryError("Insufficient fighter history to generate prediction features.")
 
     red_age = compute_age(red_birth_date, matchup_date)
     blue_age = compute_age(blue_birth_date, matchup_date)
@@ -232,11 +238,21 @@ def _compute_top_features(
     return contributions[:5]
 
 
-def predict(red_fighter_id: int, blue_fighter_id: int) -> dict[str, Any]:
+def predict(
+    red_fighter_id: int,
+    blue_fighter_id: int,
+    *,
+    bundle: dict[str, Any] | None = None,
+    fights_df: pd.DataFrame | None = None,
+    rankings_df: pd.DataFrame | None = None,
+) -> dict[str, Any]:
     settings = get_settings()
-    bundle = _load_model_bundle()
-    fights_df = load_base_dataframe(settings.database_url)
-    rankings_df = load_rankings_dataframe(settings.database_url)
+    if bundle is None:
+        bundle = _load_model_bundle()
+    if fights_df is None:
+        fights_df = load_base_dataframe(settings.database_url)
+    if rankings_df is None:
+        rankings_df = load_rankings_dataframe(settings.database_url)
     feature_row, context = _build_feature_row(fights_df, rankings_df, red_fighter_id, blue_fighter_id)
     feature_columns = bundle["feature_columns"]
     imputer = bundle["imputer"]
