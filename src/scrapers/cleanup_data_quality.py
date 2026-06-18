@@ -5,9 +5,12 @@ import json
 import re
 from collections import Counter
 from dataclasses import asdict, dataclass
+from difflib import SequenceMatcher
 from html import unescape
 from typing import Any
 from urllib.parse import urlparse
+
+import requests
 
 from .config import get_settings
 from .db import connect
@@ -55,6 +58,9 @@ NAME_STOPWORDS = {
 }
 ESPN_HEADSHOT_HOST = "a.espncdn.com"
 ESPN_HEADSHOT_PATH_FRAGMENT = "/i/headshots/mma/players/"
+ESPN_ATHLETE_API_TEMPLATE = "https://sports.core.api.espn.com/v2/sports/mma/leagues/ufc/athletes/{athlete_id}"
+ESPN_NAME_MATCH_THRESHOLD = 0.85
+HEADSHOT_ID_PATTERN = re.compile(r"/players/(?:full/)?(\d+)\.(?:png|jpg|jpeg)(?:$|\?)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -77,6 +83,8 @@ class AuditSummary:
     headshots_before: int
     headshots_nullified: int
     headshots_after: int
+    espn_headshot_name_checks: int
+    espn_headshot_name_mismatches: int
     weird_name_count_before: int
     weird_name_count_after: int
     duplicate_name_groups_after: int
@@ -86,6 +94,7 @@ class AuditSummary:
     long_names_before: list[dict[str, Any]]
     suspicious_rows_before: list[dict[str, Any]]
     name_changes: list[dict[str, Any]]
+    headshot_name_mismatches: list[dict[str, Any]]
     weird_names_before: list[dict[str, Any]]
     weird_names_after: list[dict[str, Any]]
     duplicate_names_after: list[dict[str, Any]]
@@ -145,6 +154,33 @@ def _is_valid_espn_headshot(url: str) -> bool:
     if parsed.netloc.casefold() != ESPN_HEADSHOT_HOST:
         return False
     return parsed.path.casefold().startswith(ESPN_HEADSHOT_PATH_FRAGMENT)
+
+
+def _extract_athlete_id_from_headshot(url: str) -> str | None:
+    match = HEADSHOT_ID_PATTERN.search(url)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _normalize_name_for_match(name: str) -> str:
+    return " ".join(
+        re.sub(r"[^a-z0-9 ]+", " ", unescape(name).casefold()).split()
+    )
+
+
+def _name_similarity(left: str, right: str) -> float:
+    return SequenceMatcher(None, _normalize_name_for_match(left), _normalize_name_for_match(right)).ratio()
+
+
+def _fetch_espn_athlete_name(session: requests.Session, athlete_id: str) -> str | None:
+    response = session.get(ESPN_ATHLETE_API_TEMPLATE.format(athlete_id=athlete_id), timeout=30)
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    payload = response.json()
+    full_name = str(payload.get("fullName") or payload.get("displayName") or "").strip()
+    return full_name or None
 
 
 def _fetch_count(cursor, query: str, params: tuple[Any, ...] = ()) -> int:
@@ -232,6 +268,13 @@ def _fetch_duplicate_names(cursor) -> list[dict[str, Any]]:
 
 def cleanup_data_quality(dry_run: bool = False) -> AuditSummary:
     settings = get_settings()
+    session = requests.Session()
+    session.headers.update(
+        {
+            "Accept": "application/json",
+            "User-Agent": settings.user_agent.replace("ufcstats.com", "espn.com"),
+        }
+    )
 
     with connect(settings.database_url) as connection:
         with connection.cursor() as cursor:
@@ -245,6 +288,7 @@ def cleanup_data_quality(dry_run: bool = False) -> AuditSummary:
 
             name_changes: list[NameChange] = []
             deleted_ids: list[int] = []
+            headshot_name_mismatches: list[dict[str, Any]] = []
 
             for fighter_id, old_name in suspicious_rows:
                 extracted_name = _extract_real_name(old_name)
@@ -283,13 +327,11 @@ def cleanup_data_quality(dry_run: bool = False) -> AuditSummary:
 
             cursor.execute("SELECT id, headshot_url FROM fighters WHERE headshot_url IS NOT NULL")
             invalid_headshot_ids: list[int] = []
-            invalid_patterns: Counter[str] = Counter()
             for fighter_id, headshot_url in cursor.fetchall():
                 url = str(headshot_url)
                 if _is_valid_espn_headshot(url):
                     continue
                 invalid_headshot_ids.append(int(fighter_id))
-                invalid_patterns[urlparse(url).netloc.casefold() or "(blank)"] += 1
 
             if invalid_headshot_ids:
                 cursor.execute(
@@ -299,6 +341,45 @@ def cleanup_data_quality(dry_run: bool = False) -> AuditSummary:
                     WHERE id = ANY(%s)
                     """,
                     (invalid_headshot_ids,),
+                )
+
+            cursor.execute("SELECT id, name, headshot_url FROM fighters WHERE headshot_url IS NOT NULL ORDER BY id")
+            mismatch_ids: list[int] = []
+            athlete_name_cache: dict[str, str | None] = {}
+            espn_headshot_name_checks = 0
+            for fighter_id, fighter_name, headshot_url in cursor.fetchall():
+                athlete_id = _extract_athlete_id_from_headshot(str(headshot_url))
+                if athlete_id is None:
+                    continue
+                if athlete_id not in athlete_name_cache:
+                    athlete_name_cache[athlete_id] = _fetch_espn_athlete_name(session, athlete_id)
+                athlete_name = athlete_name_cache[athlete_id]
+                if not athlete_name:
+                    continue
+                similarity = _name_similarity(str(fighter_name), athlete_name)
+                espn_headshot_name_checks += 1
+                if similarity >= ESPN_NAME_MATCH_THRESHOLD:
+                    continue
+                mismatch_ids.append(int(fighter_id))
+                headshot_name_mismatches.append(
+                    {
+                        "fighter_id": int(fighter_id),
+                        "fighter_name": str(fighter_name),
+                        "headshot_url": str(headshot_url),
+                        "espn_athlete_id": athlete_id,
+                        "espn_athlete_name": athlete_name,
+                        "similarity": round(similarity, 4),
+                    }
+                )
+
+            if mismatch_ids:
+                cursor.execute(
+                    """
+                    UPDATE fighters
+                    SET headshot_url = NULL, updated_at = NOW()
+                    WHERE id = ANY(%s)
+                    """,
+                    (mismatch_ids,),
                 )
 
             fighters_after = _fetch_count(cursor, "SELECT COUNT(*) FROM fighters")
@@ -322,6 +403,8 @@ def cleanup_data_quality(dry_run: bool = False) -> AuditSummary:
         headshots_before=headshots_before,
         headshots_nullified=len(invalid_headshot_ids),
         headshots_after=headshots_after,
+        espn_headshot_name_checks=espn_headshot_name_checks,
+        espn_headshot_name_mismatches=len(headshot_name_mismatches),
         weird_name_count_before=len(weird_names_before),
         weird_name_count_after=len(weird_names_after),
         duplicate_name_groups_after=len(duplicate_names_after),
@@ -331,6 +414,7 @@ def cleanup_data_quality(dry_run: bool = False) -> AuditSummary:
         long_names_before=long_names_before,
         suspicious_rows_before=suspicious_rows_before,
         name_changes=[asdict(change) for change in name_changes],
+        headshot_name_mismatches=headshot_name_mismatches,
         weird_names_before=weird_names_before,
         weird_names_after=weird_names_after,
         duplicate_names_after=duplicate_names_after,
