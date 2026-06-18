@@ -16,6 +16,7 @@ class NewsArticleRecord:
     fighter_id: int | None
     category: str
     relevance: int
+    image_url: str | None = None
 
 
 def get_existing_news_urls(connection: PgConnection) -> set[str]:
@@ -29,9 +30,9 @@ def upsert_news_article(connection: PgConnection, article: NewsArticleRecord) ->
         cursor.execute(
             """
             INSERT INTO news (
-                headline, summary, source, url, published_at, fighter_id, category, relevance
+                headline, summary, source, url, published_at, fighter_id, category, relevance, image_url
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (url)
             DO UPDATE SET
                 headline = EXCLUDED.headline,
@@ -40,7 +41,8 @@ def upsert_news_article(connection: PgConnection, article: NewsArticleRecord) ->
                 published_at = EXCLUDED.published_at,
                 fighter_id = EXCLUDED.fighter_id,
                 category = EXCLUDED.category,
-                relevance = EXCLUDED.relevance
+                relevance = EXCLUDED.relevance,
+                image_url = COALESCE(EXCLUDED.image_url, news.image_url)
             RETURNING id
             """,
             (
@@ -52,6 +54,7 @@ def upsert_news_article(connection: PgConnection, article: NewsArticleRecord) ->
                 article.fighter_id,
                 article.category,
                 article.relevance,
+                article.image_url,
             ),
         )
         return int(cursor.fetchone()[0])

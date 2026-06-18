@@ -11,6 +11,7 @@ from difflib import SequenceMatcher, get_close_matches
 from email.utils import parsedate_to_datetime
 
 import feedparser
+import requests
 from anthropic import Anthropic
 
 from .config import get_settings
@@ -48,6 +49,7 @@ class FeedArticle:
     summary: str | None
     url: str
     published_at: datetime | None
+    image_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +86,7 @@ def scrape_news(max_articles: int = 100) -> Counter:
                 fighter_id=fighter_id,
                 category=classification.category,
                 relevance=_calculate_relevance(classification.category, fighter_id),
+                image_url=article.image_url or fetch_og_image(article.url),
             )
             upsert_news_article(connection, record)
             connection.commit()
@@ -174,7 +177,90 @@ def _entry_to_article(source: str, entry) -> FeedArticle | None:
         or getattr(entry, "updated", None)
         or getattr(entry, "pubDate", None)
     )
-    return FeedArticle(source=source, title=title, summary=summary, url=url, published_at=published_at)
+    return FeedArticle(
+        source=source,
+        title=title,
+        summary=summary,
+        url=url,
+        published_at=published_at,
+        image_url=_extract_image_url(entry),
+    )
+
+
+IMAGE_EXT_RE = re.compile(r"\.(?:jpe?g|png|webp|gif|avif)(?:\?|$)", re.IGNORECASE)
+IMG_TAG_RE = re.compile(r"""<img[^>]+src=["']([^"']+)["']""", re.IGNORECASE)
+
+
+def _is_http_url(url: object) -> bool:
+    return isinstance(url, str) and url.startswith(("http://", "https://"))
+
+
+def _looks_like_image(url: object) -> bool:
+    return isinstance(url, str) and IMAGE_EXT_RE.search(url) is not None
+
+
+def _extract_image_url(entry) -> str | None:
+    """Best-effort image extraction from an RSS entry across the common feed shapes."""
+    candidates: list[tuple[object, object]] = []
+    for media in getattr(entry, "media_content", None) or []:
+        if isinstance(media, dict):
+            candidates.append((media.get("url"), media.get("type")))
+    for thumb in getattr(entry, "media_thumbnail", None) or []:
+        if isinstance(thumb, dict):
+            candidates.append((thumb.get("url"), "image/"))
+    for link in getattr(entry, "links", None) or []:
+        if isinstance(link, dict):
+            candidates.append((link.get("href"), link.get("type")))
+    for enclosure in getattr(entry, "enclosures", None) or []:
+        if isinstance(enclosure, dict):
+            candidates.append((enclosure.get("href") or enclosure.get("url"), enclosure.get("type")))
+    for url, mime in candidates:
+        if not _is_http_url(url):
+            continue
+        if (isinstance(mime, str) and mime.startswith("image/")) or _looks_like_image(url):
+            return url  # type: ignore[return-value]
+    # Fallback: first <img> in the content/summary HTML.
+    html = ""
+    content = getattr(entry, "content", None)
+    if isinstance(content, (list, tuple)) and content and isinstance(content[0], dict):
+        html = content[0].get("value", "") or ""
+    if not html:
+        html = getattr(entry, "summary", None) or getattr(entry, "description", None) or ""
+    match = IMG_TAG_RE.search(html)
+    if match and _is_http_url(match.group(1)):
+        return match.group(1)
+    return None
+
+
+OG_IMAGE_RES = (
+    re.compile(
+        r"""<meta[^>]+(?:property|name)=["'](?:og:image(?::url)?|twitter:image(?::src)?)["'][^>]*\scontent=["']([^"']+)["']""",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"""<meta[^>]+content=["']([^"']+)["'][^>]*(?:property|name)=["'](?:og:image(?::url)?|twitter:image(?::src)?)["']""",
+        re.IGNORECASE,
+    ),
+)
+_OG_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; mma-ingesta/1.0; +https://ufcstats.com)"}
+
+
+def fetch_og_image(url: str, timeout: int = 10) -> str | None:
+    """Fetch an article page and return its og:image / twitter:image, if any."""
+    if not _is_http_url(url):
+        return None
+    try:
+        response = requests.get(url, headers=_OG_HEADERS, timeout=timeout)
+        response.raise_for_status()
+        html = response.text[:300_000]
+    except Exception as exc:  # noqa: BLE001 - network/parse issues are non-fatal
+        LOGGER.debug("og:image fetch failed for %s: %s", url, exc)
+        return None
+    for pattern in OG_IMAGE_RES:
+        match = pattern.search(html)
+        if match and _is_http_url(match.group(1)):
+            return match.group(1)
+    return None
 
 
 def _parse_published_at(value: str | None) -> datetime | None:
