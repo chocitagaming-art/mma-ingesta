@@ -152,7 +152,9 @@ def load_rankings_dataframe(database_url: str) -> pd.DataFrame:
 
 
 def classify_win_method(method: str | None) -> str | None:
-    if not method:
+    # NULL methods arrive from the DB as float NaN (e.g. upcoming fights with no
+    # result). `not NaN` is False, so guard on type to avoid AttributeError.
+    if not isinstance(method, str) or not method:
         return None
     lowered = method.lower()
     if "ko" in lowered or "tko" in lowered:
