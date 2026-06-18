@@ -221,18 +221,28 @@ def _parse_rankings(html: str, counts: Counter) -> list[ParsedDivision]:
 
         entries: list[RankedEntry] = []
         for row in grouping.select("table tbody tr"):
-            rank_cell = row.select_one("td.views-field-weight-class-rank")
             name_cell = row.select_one("td.views-field-title")
-            change_cell = row.select_one("td.views-field-weight-class-rank-change")
-            if rank_cell is None or name_cell is None:
+            if name_cell is None:
                 continue
             name = name_cell.get_text(strip=True)
-            rank_text = rank_cell.get_text(strip=True)
-            if not name or not rank_text.isdigit():
+            if not name:
                 continue
+            change_cell = row.select_one("td.views-field-weight-class-rank-change")
+            # Rank is derived from DOM row order, which is authoritative. The page's
+            # printed number is unreliable (ufc.com has duplicated e.g. "6" twice and
+            # skipped "7" in some women's divisions); we only use it to flag mismatches.
+            position = len(entries) + 1
+            rank_cell = row.select_one("td.views-field-weight-class-rank")
+            page_rank = rank_cell.get_text(strip=True) if rank_cell else ""
+            if page_rank.isdigit() and int(page_rank) != position:
+                counts["rank_mismatches"] += 1
+                LOGGER.warning(
+                    "Division %s: page rank %s != row position %s for %r; using row position",
+                    slug, page_rank, position, name,
+                )
             entries.append(
                 RankedEntry(
-                    rank_position=int(rank_text),
+                    rank_position=position,
                     fighter_name=name,
                     rank_change=_parse_rank_change(change_cell),
                 )
@@ -384,7 +394,7 @@ def _build_summary(counts: Counter) -> str:
     keys = [
         "snapshot_date", "source_url", "divisions", "champions", "ranked",
         "total_rows", "matched", "matched_folded", "unmatched", "fighters_in_db",
-        "unmapped_divisions", "deleted_existing", "written",
+        "unmapped_divisions", "rank_mismatches", "deleted_existing", "written",
     ]
     return json.dumps({key: counts.get(key, 0) for key in keys}, indent=2)
 
