@@ -75,16 +75,6 @@ FEATURE_COLUMNS = [
 ]
 
 
-def orient_feature_row(feature_row: dict[str, Any], target: int) -> dict[str, Any]:
-    oriented_row = {}
-    for key, value in feature_row.items():
-        if key.endswith("_diff") and value is not None and target == 0:
-            oriented_row[key] = -value
-        else:
-            oriented_row[key] = value
-    return oriented_row
-
-
 def load_base_dataframe(database_url: str) -> pd.DataFrame:
     query = """
         SELECT
@@ -477,11 +467,12 @@ def build_training_dataset(fights_df: pd.DataFrame, rankings_df: pd.DataFrame) -
                 blue_history.ranking_position,
             ),
         }
+        # Raw red-blue diffs (NOT oriented by target). Orienting by target
+        # canonicalizes every row to winner-loser diffs, which makes the label
+        # unlearnable and mismatches inference (api.py uses raw red-blue diffs).
         dataset_rows.append(
             {
-                **orient_feature_row(base_row, target),
-                "fight_id": row["fight_id"],
-                "event_date": row["event_date"],
+                **base_row,
                 "target": target,
             }
         )
