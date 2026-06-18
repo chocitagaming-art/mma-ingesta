@@ -6,3 +6,6 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Scrape cache (reproducible artifact from recover_winners_eventpage.py)
+winners_scraped.json
