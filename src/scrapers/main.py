@@ -28,7 +28,7 @@ from .utils import clean_text, source_id_from_url
 
 LOGGER = logging.getLogger(__name__)
 FIGHTERS_URL_TEMPLATE = "http://ufcstats.com/statistics/fighters?char={letter}&page=all"
-EVENTS_URL = "http://ufcstats.com/statistics/events/completed?page=all"
+EVENTS_URL = "http://ufcstats.com/statistics/events/completed"
 FIGHTER_DETAIL_URL_TEMPLATE = "http://ufcstats.com/fighter-details/{fighter_id}"
 
 
@@ -136,14 +136,23 @@ def scrape_events(
 ) -> Counter:
     fighter_id_by_source = fighter_id_by_source or {}
     LOGGER.info("Scraping events index %s", EVENTS_URL)
-    events_page = client.fetch(EVENTS_URL)
-    parsed_events = parse_events_index(events_page.soup, settings)
-    historical_event_records = [
-        event_record
-        for event_record in parsed_events
-        if event_record.event.event_date and event_record.event.event_date.year <= 2025
-    ]
-    event_records = historical_event_records or parsed_events
+    event_records = []
+    for events_page in client.fetch_all_pages(EVENTS_URL):
+        parsed_events = parse_events_index(events_page.soup, settings)
+        historical_event_records = [
+            event_record
+            for event_record in parsed_events
+            if event_record.event.event_date and event_record.event.event_date.year <= 2025
+        ]
+        event_records.extend(historical_event_records or parsed_events)
+    deduped_event_records = []
+    seen_event_urls: set[str] = set()
+    for event_record in event_records:
+        if event_record.detail_url in seen_event_urls:
+            continue
+        seen_event_urls.add(event_record.detail_url)
+        deduped_event_records.append(event_record)
+    event_records = deduped_event_records
     if max_events is not None:
         event_records = event_records[:max_events]
     for event_record in event_records:
