@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from difflib import SequenceMatcher, get_close_matches
 from email.utils import parsedate_to_datetime
+from html import unescape
 
 import feedparser
 import requests
@@ -33,12 +34,11 @@ CATEGORIES = {
     "transfer",
     "other",
 }
+# Spanish-language source (matches the Spanish UI). ESPN Deportes ships a clean
+# RSS with images; ufc.com/rss/news is English and image-less, so it's not used
+# for news — ufc.com is used elsewhere only for athlete photos.
 RSS_FEEDS = (
-    ("MMAFighting", "https://www.mmafighting.com/rss/current"),
-    ("MMAJunkie", "https://mmajunkie.usatoday.com/feed"),
-    ("Sherdog", "https://www.sherdog.com/rss/news.xml"),
-    ("Cageside Press", "https://cagesidepress.com/feed/"),
-    ("LowKick MMA", "https://www.lowkickmma.com/feed/"),
+    ("ESPN Deportes", "https://espndeportes.espn.com/espn/rss/mma/news"),
 )
 
 
@@ -125,7 +125,7 @@ class NewsClassifier:
             f"Summary: {article.summary or ''}"
         )
         response = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=200,
             temperature=0,
             messages=[{"role": "user", "content": prompt}],
@@ -199,6 +199,16 @@ def _looks_like_image(url: object) -> bool:
     return isinstance(url, str) and IMAGE_EXT_RE.search(url) is not None
 
 
+def _clean_image_url(raw: object) -> str | None:
+    """Decode HTML entities (e.g. ``&amp;`` in og:image query params) and keep
+    only absolute http(s) URLs. Browsers don't decode entities inside an <img>
+    src that arrives as an attribute string, so an un-decoded URL would 404."""
+    if not isinstance(raw, str):
+        return None
+    cleaned = unescape(raw).strip()
+    return cleaned if _is_http_url(cleaned) else None
+
+
 def _extract_image_url(entry) -> str | None:
     """Best-effort image extraction from an RSS entry across the common feed shapes."""
     candidates: list[tuple[object, object]] = []
@@ -218,7 +228,7 @@ def _extract_image_url(entry) -> str | None:
         if not _is_http_url(url):
             continue
         if (isinstance(mime, str) and mime.startswith("image/")) or _looks_like_image(url):
-            return url  # type: ignore[return-value]
+            return _clean_image_url(url)
     # Fallback: first <img> in the content/summary HTML.
     html = ""
     content = getattr(entry, "content", None)
@@ -227,8 +237,8 @@ def _extract_image_url(entry) -> str | None:
     if not html:
         html = getattr(entry, "summary", None) or getattr(entry, "description", None) or ""
     match = IMG_TAG_RE.search(html)
-    if match and _is_http_url(match.group(1)):
-        return match.group(1)
+    if match:
+        return _clean_image_url(match.group(1))
     return None
 
 
@@ -258,8 +268,10 @@ def fetch_og_image(url: str, timeout: int = 10) -> str | None:
         return None
     for pattern in OG_IMAGE_RES:
         match = pattern.search(html)
-        if match and _is_http_url(match.group(1)):
-            return match.group(1)
+        if match:
+            cleaned = _clean_image_url(match.group(1))
+            if cleaned:
+                return cleaned
     return None
 
 
