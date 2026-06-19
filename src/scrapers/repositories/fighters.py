@@ -162,3 +162,33 @@ def update_fighter_enrichment(
             ),
         )
         return cursor.rowcount > 0
+
+
+def update_fighter_record(
+    connection: PgConnection,
+    fighter_id: int,
+    *,
+    wins: int,
+    losses: int,
+    draws: int,
+) -> bool:
+    """Fill a fighter's W-L-D only when the stored record is empty (0-0-0 / NULL).
+
+    Never overwrites an already-populated record, and never writes an all-zero
+    record (which would be a no-op anyway). Returns True if a row was updated.
+    """
+    if wins == 0 and losses == 0 and draws == 0:
+        return False
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE fighters
+            SET wins = %s, losses = %s, draws = %s, updated_at = NOW()
+            WHERE id = %s
+              AND COALESCE(wins, 0) = 0
+              AND COALESCE(losses, 0) = 0
+              AND COALESCE(draws, 0) = 0
+            """,
+            (wins, losses, draws, fighter_id),
+        )
+        return cursor.rowcount > 0
