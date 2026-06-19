@@ -122,33 +122,53 @@ def _get_upcoming_gap_fighters(connection) -> list[tuple[int, str]]:
         return [(int(row[0]), str(row[1])) for row in cursor.fetchall()]
 
 
-def enrich(dry_run: bool = False) -> Counter:
+def _get_all_gap_fighters(connection) -> list[tuple[int, str]]:
+    """Every fighter missing a photo, not just upcoming-event ones (~2.6k rows)."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id, name
+            FROM fighters
+            WHERE (headshot_url IS NULL OR headshot_url = '')
+              AND name IS NOT NULL AND name <> ''
+            ORDER BY name
+            """
+        )
+        return [(int(row[0]), str(row[1])) for row in cursor.fetchall()]
+
+
+def enrich(dry_run: bool = False, scope: str = "upcoming", limit: int | None = None) -> Counter:
     settings = get_settings()
     session = requests.Session()
     counts: Counter = Counter()
     with connect(settings.database_url) as connection:
-        gaps = _get_upcoming_gap_fighters(connection)
-        counts["gap_fighters"] = len(gaps)
-        LOGGER.info("Upcoming-event fighters missing a photo: %d", len(gaps))
-        for fighter_id, name in gaps:
+        gaps = _get_all_gap_fighters(connection) if scope == "all" else _get_upcoming_gap_fighters(connection)
+        LOGGER.info("Total fighters missing a photo (scope=%s): %d", scope, len(gaps))
+        if limit is not None:
+            gaps = gaps[:limit]
+        total = len(gaps)
+        counts["gap_fighters"] = total
+        LOGGER.info("Processing %d this run", total)
+        for idx, (fighter_id, name) in enumerate(gaps, 1):
             headshot = resolve_headshot(session, name)
             time.sleep(REQUEST_DELAY_SECONDS)
             if not headshot:
                 counts["unresolved"] += 1
-                LOGGER.info("No UFC photo for %r", name)
                 continue
             counts["resolved"] += 1
-            if dry_run:
-                continue
-            if update_fighter_enrichment(connection, fighter_id, headshot_url=headshot):
+            if not dry_run and update_fighter_enrichment(connection, fighter_id, headshot_url=headshot):
                 connection.commit()
                 counts["updated"] += 1
+            if idx % 50 == 0:
+                LOGGER.info("Progress %d/%d — resolved=%d updated=%d", idx, total, counts["resolved"], counts["updated"])
     return counts
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fill missing fighter headshots from UFC athlete pages.")
     parser.add_argument("--dry-run", action="store_true", help="Resolve + report but do not write.")
+    parser.add_argument("--all", action="store_true", dest="all_fighters", help="Process ALL fighters missing a photo (~2.6k), not just upcoming-event ones.")
+    parser.add_argument("--limit", type=int, default=None, help="Process at most this many fighters (for partial passes).")
     parser.add_argument("--probe", nargs="+", metavar="NAME", help="Test resolution for given names (no DB).")
     args = parser.parse_args()
     configure_logging()
@@ -160,7 +180,8 @@ def main() -> None:
             print(json.dumps({"name": name, "slug": slugify(name), "headshot": url}))
         return
 
-    counts = enrich(dry_run=args.dry_run)
+    scope = "all" if args.all_fighters else "upcoming"
+    counts = enrich(dry_run=args.dry_run, scope=scope, limit=args.limit)
     keys = ["gap_fighters", "resolved", "unresolved", "updated"]
     print(json.dumps({key: counts.get(key, 0) for key in keys}, indent=2))
 
