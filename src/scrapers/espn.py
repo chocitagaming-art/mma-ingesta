@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -214,16 +215,22 @@ def _nested_text(value: Any) -> str | None:
     return None
 
 
+_NOPHOTO_RE = re.compile(r"nophoto|silhouette|no-photo", re.IGNORECASE)
+
+
 def _extract_headshot_url(payload: dict[str, Any]) -> str | None:
+    url: str | None = None
     headshot = payload.get("headshot")
     if isinstance(headshot, dict):
-        return _clean_text(headshot.get("href"))
-    images = payload.get("images")
-    if isinstance(images, list) and images:
-        first_image = images[0]
-        if isinstance(first_image, dict):
-            return _clean_text(first_image.get("href"))
-    return None
+        url = _clean_text(headshot.get("href"))
+    if url is None:
+        images = payload.get("images")
+        if isinstance(images, list) and images and isinstance(images[0], dict):
+            url = _clean_text(images[0].get("href"))
+    # ESPN serves a generic "nophoto" silhouette when a real headshot is missing.
+    if url and _NOPHOTO_RE.search(url):
+        return None
+    return url
 
 
 def _clean_text(value: Any) -> str | None:

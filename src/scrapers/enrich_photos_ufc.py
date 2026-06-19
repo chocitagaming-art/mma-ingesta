@@ -71,6 +71,12 @@ _NAME_SUFFIXES = {"JR", "SR", "II", "III", "IV"}
 OG_IMAGE_RE = re.compile(
     r"""<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']""", re.IGNORECASE
 )
+_PLACEHOLDER_RE = re.compile(r"silhouette|nophoto|no-photo|default[-_]?(athlete|headshot)", re.IGNORECASE)
+
+
+def _is_placeholder_image(url: str | None) -> bool:
+    """UFC/ESPN serve a generic silhouette for fighters with no real photo."""
+    return bool(url) and _PLACEHOLDER_RE.search(url) is not None
 
 
 @dataclass(frozen=True)
@@ -109,10 +115,13 @@ def _extract_headshot(html: str, name: str) -> str | None:
             upper = path.upper()
             if first in upper and last in upper:
                 return UFC_IMAGE_BASE + path
-    # Fallback: og:image is the canonical profile image for this athlete.
+    # Fallback: og:image is the canonical profile image for this athlete —
+    # but UFC serves a generic SILHOUETTE.png for fighters with no real photo.
     og_match = OG_IMAGE_RE.search(html)
-    if og_match and og_match.group(1).startswith("http"):
-        return og_match.group(1)
+    if og_match:
+        og = og_match.group(1)
+        if og.startswith("http") and not _is_placeholder_image(og):
+            return og
     return None
 
 
