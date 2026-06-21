@@ -1,16 +1,17 @@
 """Orchestrate the upcoming-event refresh pipeline end to end.
 
-Keeping the live site current when cards are announced or dates pass takes four
+Keeping the live site current when cards are announced or dates pass takes five
 separate scrapers, run in a fixed order. This module chains them so a single
 command does the whole refresh:
 
-  1. upcoming_events     - re-scrape ufc.com/events (events + bouts; drops stale)
+  1. upcoming_events     - re-scrape ufc.com/events (events + bouts; complete past ones)
   2. link_upcoming       - create + link name-only bout fighters from ESPN
   3. enrich_upcoming     - ESPN photo / nationality / measures for upcoming gaps
   4. enrich_records_espn - fill any remaining 0-0-0 records from ESPN
+  5. backfill_results    - fill winner/method/round onto bouts of events that just finished
 
 Each step writes on its own DB connection and commits before the next starts, so
-ordering dependencies (step 2 needs step 1's events; steps 3-4 need step 2's
+ordering dependencies (step 2 needs step 1's events; steps 3-5 need step 2's
 fighters) hold. Steps are independent failures: if one raises, it is logged and
 the pipeline continues — later steps still maintain existing data. A combined
 per-step summary is printed at the end and the process exits non-zero if any
@@ -33,6 +34,7 @@ import logging
 import sys
 import time
 
+from .backfill_results import backfill
 from .enrich_records_espn import enrich_records
 from .enrich_upcoming import enrich_upcoming_fighters
 from .link_upcoming_fighters import link_upcoming
@@ -64,6 +66,7 @@ def refresh(dry_run: bool = False, records_limit: int | None = None) -> dict:
         ("link_upcoming", lambda: link_upcoming(dry_run=dry_run)),
         ("enrich_upcoming", lambda: enrich_upcoming_fighters(dry_run=dry_run)),
         ("enrich_records_espn", lambda: enrich_records(dry_run=dry_run, limit=records_limit)),
+        ("backfill_results", lambda: backfill(dry_run=dry_run)),
     ]
     summary: dict[str, dict] = {}
     for name, step in steps:
