@@ -359,8 +359,17 @@ def _make_matcher(fighters):
 # ----------------------------------------------------------------------- load
 
 
-def _delete_dropped_upcoming(connection, current_source_ids: set[str]) -> int:
-    """Remove ufc.com events (and their bouts) that are no longer listed as upcoming."""
+def _complete_dropped_upcoming(connection, current_source_ids: set[str]) -> int:
+    """Mark ufc.com events that have dropped off the upcoming list as completed.
+
+    An event leaves ufc.com's upcoming list once it has happened. The frontend splits
+    events by DATE for "Pasados" (event_date < today) and by STATUS for "Próximos"
+    (status = 'upcoming'), so flipping status 'upcoming' -> 'completed' moves a finished
+    event out of Próximos and into Pasados on its own. The previous behaviour DELETED the
+    event (and its bouts), so any 2026+ event the user had seen vanished forever — the
+    ufcstats re-importer never brings it back (its year<=2025 cutoff drops it). Bouts are
+    preserved with NULL results; a separate results backfill can fill winner/method later.
+    """
     with connection.cursor() as cursor:
         cursor.execute(
             "SELECT id, source_id FROM events WHERE source = %s AND status = 'upcoming'",
@@ -369,8 +378,7 @@ def _delete_dropped_upcoming(connection, current_source_ids: set[str]) -> int:
         rows = cursor.fetchall()
         stale_ids = [int(r[0]) for r in rows if str(r[1]) not in current_source_ids]
         for event_id in stale_ids:
-            cursor.execute("DELETE FROM fights WHERE event_id = %s AND source = %s", (event_id, SOURCE))
-            cursor.execute("DELETE FROM events WHERE id = %s", (event_id,))
+            cursor.execute("UPDATE events SET status = 'completed' WHERE id = %s", (event_id,))
         return len(stale_ids)
 
 
@@ -412,7 +420,7 @@ def scrape_upcoming_events(dry_run: bool = False) -> Counter:
             return counts
 
         current_ids = {e.source_id for e in events}
-        counts["stale_removed"] = _delete_dropped_upcoming(connection, current_ids)
+        counts["stale_completed"] = _complete_dropped_upcoming(connection, current_ids)
         connection.commit()
 
         for event in events:
@@ -474,7 +482,7 @@ def _build_summary(counts: Counter) -> str:
     keys = [
         "events_found", "details_fetched", "detail_errors", "bouts_parsed",
         "fighters_in_db", "bouts_red_matched", "bouts_blue_matched",
-        "stale_removed", "events_written", "bouts_written", "write_errors",
+        "stale_completed", "events_written", "bouts_written", "write_errors",
     ]
     return json.dumps({key: counts.get(key, 0) for key in keys}, indent=2)
 
