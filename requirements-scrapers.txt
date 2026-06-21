@@ -1,0 +1,11 @@
+# Lean dependency set for the scraper cron jobs (GitHub Actions).
+# The scrapers (refresh_upcoming, rankings, news) only need these; the heavy ML
+# stack (pandas/numpy/scikit-learn/xgboost) in requirements.txt is for the
+# prediction model only, so CI installs this instead and starts much faster.
+psycopg2-binary
+python-dotenv
+requests
+beautifulsoup4
+lxml
+feedparser
+anthropic

@@ -1,0 +1,31 @@
+name: Refresh news
+
+# Pulls the latest MMA news from the ESPN Deportes RSS feed, grabs each article's
+# image (og:image) and classifies it with Claude. Needs ANTHROPIC_API_KEY for the
+# classification step in addition to the DB. Writes to Neon.
+on:
+  schedule:
+    - cron: "0 8 * * *" # daily at 08:00 UTC
+  workflow_dispatch: {}
+
+concurrency:
+  group: refresh-news
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+      - run: pip install -r requirements-scrapers.txt
+      - name: Run news scraper
+        run: python -m src.scrapers.news
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

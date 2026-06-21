@@ -1,0 +1,31 @@
+name: Refresh rankings
+
+# Re-scrapes ufc.com/rankings (P4P + divisions + champions) into a fresh dated
+# snapshot. Weekly is enough — UFC updates rankings once a week. Writes to Neon.
+# Each run is a NEW snapshot_date, which also builds the historical series the
+# prediction model needs (see roadmap #12).
+on:
+  schedule:
+    - cron: "0 14 * * 3" # Wednesdays at 14:00 UTC (after UFC's weekly update)
+  workflow_dispatch: {}
+
+concurrency:
+  group: refresh-rankings
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+      - run: pip install -r requirements-scrapers.txt
+      - name: Run rankings scraper
+        run: python -m src.scrapers.rankings
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
