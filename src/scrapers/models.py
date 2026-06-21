@@ -59,3 +59,17 @@ class FightStatsRecord:
     submission_attempts: int | None
     control_time_seconds: int | None
     knockdowns: int | None
+    # Significant-strike breakdown (summed across rounds). NULL when the fight
+    # page has no per-target table (very old fights) — see migration 005.
+    sig_str_head_landed: int | None = None
+    sig_str_head_attempted: int | None = None
+    sig_str_body_landed: int | None = None
+    sig_str_body_attempted: int | None = None
+    sig_str_leg_landed: int | None = None
+    sig_str_leg_attempted: int | None = None
+    sig_str_distance_landed: int | None = None
+    sig_str_distance_attempted: int | None = None
+    sig_str_clinch_landed: int | None = None
+    sig_str_clinch_attempted: int | None = None
+    sig_str_ground_landed: int | None = None
+    sig_str_ground_attempted: int | None = None

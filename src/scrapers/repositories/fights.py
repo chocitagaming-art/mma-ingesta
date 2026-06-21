@@ -128,9 +128,16 @@ def upsert_fight_stats(connection: PgConnection, stats: FightStatsRecord) -> Non
             INSERT INTO fight_stats (
                 fight_id, fighter_id, sig_strikes_landed, sig_strikes_attempted,
                 takedowns_landed, takedowns_attempted, submission_attempts,
-                control_time_seconds, knockdowns
+                control_time_seconds, knockdowns,
+                sig_str_head_landed, sig_str_head_attempted,
+                sig_str_body_landed, sig_str_body_attempted,
+                sig_str_leg_landed, sig_str_leg_attempted,
+                sig_str_distance_landed, sig_str_distance_attempted,
+                sig_str_clinch_landed, sig_str_clinch_attempted,
+                sig_str_ground_landed, sig_str_ground_attempted
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (fight_id, fighter_id)
             DO UPDATE SET
                 sig_strikes_landed = EXCLUDED.sig_strikes_landed,
@@ -139,7 +146,19 @@ def upsert_fight_stats(connection: PgConnection, stats: FightStatsRecord) -> Non
                 takedowns_attempted = EXCLUDED.takedowns_attempted,
                 submission_attempts = EXCLUDED.submission_attempts,
                 control_time_seconds = EXCLUDED.control_time_seconds,
-                knockdowns = EXCLUDED.knockdowns
+                knockdowns = EXCLUDED.knockdowns,
+                sig_str_head_landed = EXCLUDED.sig_str_head_landed,
+                sig_str_head_attempted = EXCLUDED.sig_str_head_attempted,
+                sig_str_body_landed = EXCLUDED.sig_str_body_landed,
+                sig_str_body_attempted = EXCLUDED.sig_str_body_attempted,
+                sig_str_leg_landed = EXCLUDED.sig_str_leg_landed,
+                sig_str_leg_attempted = EXCLUDED.sig_str_leg_attempted,
+                sig_str_distance_landed = EXCLUDED.sig_str_distance_landed,
+                sig_str_distance_attempted = EXCLUDED.sig_str_distance_attempted,
+                sig_str_clinch_landed = EXCLUDED.sig_str_clinch_landed,
+                sig_str_clinch_attempted = EXCLUDED.sig_str_clinch_attempted,
+                sig_str_ground_landed = EXCLUDED.sig_str_ground_landed,
+                sig_str_ground_attempted = EXCLUDED.sig_str_ground_attempted
             """,
             (
                 stats.fight_id,
@@ -151,6 +170,18 @@ def upsert_fight_stats(connection: PgConnection, stats: FightStatsRecord) -> Non
                 stats.submission_attempts,
                 stats.control_time_seconds,
                 stats.knockdowns,
+                stats.sig_str_head_landed,
+                stats.sig_str_head_attempted,
+                stats.sig_str_body_landed,
+                stats.sig_str_body_attempted,
+                stats.sig_str_leg_landed,
+                stats.sig_str_leg_attempted,
+                stats.sig_str_distance_landed,
+                stats.sig_str_distance_attempted,
+                stats.sig_str_clinch_landed,
+                stats.sig_str_clinch_attempted,
+                stats.sig_str_ground_landed,
+                stats.sig_str_ground_attempted,
             ),
         )
 
