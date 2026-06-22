@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -91,22 +92,39 @@ def get_event_id(
         return int(row[0]) if row else None
 
 
+# Tokens shared by ~every UFC card; useless for telling two cards apart, so they
+# are dropped before comparing names (only headliner surnames / the card number
+# remain as the discriminating signal).
+_EVENT_STOPWORDS = {
+    "ufc", "fight", "night", "on", "espn", "abc", "fox", "fx", "fuel", "tv",
+    "vs", "the", "presents", "dana", "white", "s", "contender", "series", "tuf",
+}
+
+
 def _name_tokens(name: str) -> set[str]:
-    return set(re.sub(r"[^a-z0-9 ]", " ", (name or "").lower()).split())
+    folded = unicodedata.normalize("NFKD", (name or "").lower())
+    folded = "".join(c for c in folded if not unicodedata.combining(c))
+    return set(re.sub(r"[^a-z0-9 ]", " ", folded).split())
+
+
+def _significant_tokens(name: str) -> set[str]:
+    return _name_tokens(name) - _EVENT_STOPWORDS
 
 
 def find_existing_event_id(connection: PgConnection, event: EventRecord) -> int | None:
     """Existing event id for this card, tolerant of cross-source name/location drift.
 
-    ufc.com and ufcstats name and locate the same card differently (e.g. ufcstats
-    'UFC on ESPN 64' vs ufc.com 'UFC Fight Night: A vs B', plus different location
-    strings), so the exact (name, date, location, promotion) match used by
-    get_event_id misses the twin and a fresh INSERT would create a DUPLICATE event.
-    Strategy: exact match first; otherwise match by (date, promotion) — UFC runs
-    ~one card per day, so a single same-date event IS the same card; with several
-    same-date events, pick the best name-token overlap. Used by both the historical
-    importer (main.scrape_events) and the catch-up (import_recent_events) so neither
-    path can insert its own copy.
+    ufc.com and ufcstats name and locate the same card differently (different
+    location strings, 'vs' vs 'vs.', occasionally a numbered alias), so the exact
+    (name, date, location, promotion) match used by get_event_id misses the twin and
+    a fresh INSERT would create a DUPLICATE event. Fallback: among same-(date,
+    promotion) events, match the one sharing a MEANINGFUL name token (a headliner
+    surname or the card number, after dropping the ubiquitous 'ufc/fight/night/...'
+    stopwords). A shared date alone is NOT enough — every UFC event has
+    promotion_id=1 and the UFC can run two distinct cards on one date, so requiring a
+    real name overlap lets the cross-source twin match while a genuinely different
+    same-day card stays unmatched and gets imported. Used by both the historical
+    importer (main.scrape_events) and the catch-up (import_recent_events).
     """
     exact = get_event_id(connection, event)
     if exact is not None:
@@ -115,17 +133,23 @@ def find_existing_event_id(connection: PgConnection, event: EventRecord) -> int 
         return None
     with connection.cursor() as cursor:
         cursor.execute(
-            "SELECT id, name FROM events WHERE event_date = %s AND promotion_id = %s",
+            "SELECT id, name FROM events WHERE event_date = %s AND promotion_id = %s ORDER BY id",
             (event.event_date, event.promotion_id),
         )
         rows = cursor.fetchall()
     if not rows:
         return None
-    if len(rows) == 1:
-        return int(rows[0][0])
-    target = _name_tokens(event.name)
-    best = max(rows, key=lambda row: len(target & _name_tokens(row[1])))
-    return int(best[0])
+    target = _significant_tokens(event.name)
+    if not target:
+        return None  # nothing distinctive to match on -> treat as a new card
+    best_id, best_overlap = None, 0
+    for row_id, row_name in rows:  # ordered by id -> deterministic
+        overlap = len(target & _significant_tokens(row_name))
+        if overlap > best_overlap:
+            best_overlap, best_id = overlap, int(row_id)
+    # Require >=2 shared meaningful tokens (typically both headliner surnames). One
+    # shared token can be coincidental; zero means a different card -> import it.
+    return best_id if best_overlap >= 2 else None
 
 
 def upsert_event(connection: PgConnection, event: EventRecord) -> int:
