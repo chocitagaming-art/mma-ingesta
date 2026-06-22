@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
+from datetime import date
 from string import ascii_lowercase
 
 from .config import get_settings
@@ -136,15 +137,20 @@ def scrape_events(
 ) -> Counter:
     fighter_id_by_source = fighter_id_by_source or {}
     LOGGER.info("Scraping events index %s", EVENTS_URL)
+    today = date.today()
     event_records = []
     for events_page in client.fetch_all_pages(EVENTS_URL):
         parsed_events = parse_events_index(events_page.soup, settings)
-        historical_event_records = [
+        # Keep events that have already happened. The completed index lists the
+        # next upcoming event(s) at the top with a FUTURE date and no stats yet;
+        # exclude only those. (Previously a hardcoded year<=2025 filter silently
+        # dropped every 2026+ event -> all current-year fights went missing.)
+        completed_event_records = [
             event_record
             for event_record in parsed_events
-            if event_record.event.event_date and event_record.event.event_date.year <= 2025
+            if event_record.event.event_date and event_record.event.event_date <= today
         ]
-        event_records.extend(historical_event_records or parsed_events)
+        event_records.extend(completed_event_records or parsed_events)
     deduped_event_records = []
     seen_event_urls: set[str] = set()
     for event_record in event_records:
