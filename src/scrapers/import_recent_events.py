@@ -38,18 +38,12 @@ from .main import _ensure_fighter_present, _resolve_fighter_id
 from .models import FightRecord
 from .parsers.events import parse_events_index
 from .parsers.fights import build_fight_stats_record, parse_event_fights, parse_fight_stats
-from .repositories.events import upsert_event
+from .repositories.events import find_existing_event_id, upsert_event
 from .repositories.fights import upsert_fight, upsert_fight_stats
 from .utils import clean_text, source_id_from_url
 
 LOGGER = logging.getLogger(__name__)
 EVENTS_URL = "http://ufcstats.com/statistics/events/completed?page={page}"
-
-
-def _existing_event_keys(connection) -> set[tuple[str, object]]:
-    with connection.cursor() as cursor:
-        cursor.execute("SELECT LOWER(name), event_date FROM events WHERE event_date IS NOT NULL")
-        return {(row[0], row[1]) for row in cursor.fetchall()}
 
 
 def _winner_source_id(soup) -> str | None:
@@ -73,7 +67,6 @@ def import_recent_events(
 ) -> Counter:
     counts: Counter = Counter()
     today = date.today()
-    existing = _existing_event_keys(connection)
     fighter_id_by_source: dict[str, int] = {}
 
     # Collect candidate events from the most-recent index pages.
@@ -88,7 +81,7 @@ def import_recent_events(
             seen_urls.add(record.detail_url)
             if not ev.event_date or ev.event_date > today:
                 continue  # upcoming / not yet happened
-            if (ev.name.lower(), ev.event_date) in existing:
+            if find_existing_event_id(connection, ev) is not None:
                 counts["events_already_present"] += 1
                 continue
             candidates.append(record)
@@ -105,12 +98,15 @@ def import_recent_events(
             fights = parse_event_fights(event_page.soup, settings)
             event_id = upsert_event(connection, record.event) if not dry_run else -1
             for parsed_fight in fights:
-                _ensure_fighter_present(
-                    connection, client, settings, counts, fighter_id_by_source, parsed_fight.red_source_id
-                )
-                _ensure_fighter_present(
-                    connection, client, settings, counts, fighter_id_by_source, parsed_fight.blue_source_id
-                )
+                # _ensure_fighter_present writes (upsert + commit), so in --dry-run we
+                # only RESOLVE existing fighters; unknown ones leave the fight skipped.
+                if not dry_run:
+                    _ensure_fighter_present(
+                        connection, client, settings, counts, fighter_id_by_source, parsed_fight.red_source_id
+                    )
+                    _ensure_fighter_present(
+                        connection, client, settings, counts, fighter_id_by_source, parsed_fight.blue_source_id
+                    )
                 red_id = _resolve_fighter_id(connection, fighter_id_by_source, settings.source_name, parsed_fight.red_source_id)
                 blue_id = _resolve_fighter_id(connection, fighter_id_by_source, settings.source_name, parsed_fight.blue_source_id)
                 if red_id is None or blue_id is None:
@@ -123,6 +119,13 @@ def import_recent_events(
                     winner_id = red_id
                 elif winner_src == parsed_fight.blue_source_id:
                     winner_id = blue_id
+                elif winner_src is not None:
+                    # A decided fight whose winner maps to neither corner -> don't
+                    # silently store NULL (looks like a draw); surface it instead.
+                    counts["winner_unmatched"] += 1
+                    LOGGER.warning(
+                        "winner %s matched neither corner on fight %s", winner_src, parsed_fight.detail_url
+                    )
                 fight = FightRecord(
                     event_id=event_id,
                     fighter_red_id=red_id,

@@ -87,12 +87,18 @@ def _get_events_needing_results(connection, limit: int | None) -> list[tuple[int
             WHERE e.source = %s
               AND e.event_date IS NOT NULL
               AND e.event_date < CURRENT_DATE
+              -- Only retry recently-finished cards. ufcstats publishes results/stats
+              -- within a day or two; bounding the window stops a permanently
+              -- unmatchable bout (name divergence) from re-qualifying forever and
+              -- growing the daily cron's work without bound.
+              AND e.event_date >= CURRENT_DATE - INTERVAL '60 days'
               AND EXISTS (
                 SELECT 1 FROM fights fi
                 WHERE fi.event_id = e.id
                   AND (
                     fi.method IS NULL
-                    OR NOT EXISTS (SELECT 1 FROM fight_stats fs WHERE fs.fight_id = fi.id)
+                    -- a real bout has 2 fighters -> needs both stat rows
+                    OR (SELECT COUNT(*) FROM fight_stats fs WHERE fs.fight_id = fi.id) < 2
                   )
               )
             ORDER BY e.event_date DESC
@@ -112,7 +118,7 @@ def _get_bouts(connection, event_id: int) -> list[_Bout]:
                    COALESCE(red.name, fi.fighter_red_name) AS red_name,
                    COALESCE(blue.name, fi.fighter_blue_name) AS blue_name,
                    fi.method,
-                   EXISTS (SELECT 1 FROM fight_stats fs WHERE fs.fight_id = fi.id) AS has_stats
+                   (SELECT COUNT(*) FROM fight_stats fs WHERE fs.fight_id = fi.id) >= 2 AS has_stats
             FROM fights fi
             LEFT JOIN fighters red ON red.id = fi.fighter_red_id
             LEFT JOIN fighters blue ON blue.id = fi.fighter_blue_id
@@ -196,7 +202,9 @@ def _fill_event(connection, client, settings, event_id, bouts, detail_url, count
             continue
         # One fetch of the fight's own detail page serves both the result and the stats.
         fight_page = client.fetch(fight.detail_url)
-        if needs_result:
+        # Only fill a result when ufcstats actually has a method; writing NULL over
+        # NULL is a no-op that re-qualifies the bout forever and inflates the count.
+        if needs_result and fight.method is not None:
             winner_name = _winner_name_from_soup(fight_page.soup)
             winner_id = _winner_id_for(bout, winner_name)
             LOGGER.info(
@@ -220,9 +228,19 @@ def _fill_event(connection, client, settings, event_id, bouts, detail_url, count
                         counts["bouts_filled"] += 1
         if needs_stats:
             for fighter_stats in parse_fight_stats(fight_page.soup):
+                # A fighter whose stats didn't parse at all (sig strikes None) would
+                # otherwise write a hollow row that marks the bout done and hides the
+                # failure; skip it so the bout stays "needs stats" and is retried.
+                if fighter_stats.stats.get("sig_strikes_attempted") is None:
+                    counts["stats_empty"] += 1
+                    continue
                 fighter_id = bout.fighter_id_for(fighter_stats.fighter_name)
                 if fighter_id is None:
                     counts["stats_unmatched"] += 1
+                    LOGGER.warning(
+                        "  unmatched stats fighter %r on bout %s (%s vs %s)",
+                        fighter_stats.fighter_name, bout.id, bout.red_name, bout.blue_name,
+                    )
                     continue
                 if not dry_run:
                     upsert_fight_stats(connection, build_fight_stats_record(bout.id, fighter_id, fighter_stats))
@@ -272,7 +290,7 @@ def main() -> None:
     counts = backfill(dry_run=args.dry_run, limit=args.limit)
     keys = [
         "events_candidate", "events_matched", "events_unmatched",
-        "bouts_filled", "bouts_unmatched", "stats_rows", "stats_unmatched", "event_errors",
+        "bouts_filled", "bouts_unmatched", "stats_rows", "stats_unmatched", "stats_empty", "event_errors",
     ]
     print(json.dumps({k: counts.get(k, 0) for k in keys}, indent=2))
 

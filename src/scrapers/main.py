@@ -14,7 +14,7 @@ from .models import FightRecord
 from .parsers.events import parse_events_index
 from .parsers.fighters import parse_fighter_detail, parse_fighter_index
 from .parsers.fights import build_fight_stats_record, parse_event_fights, parse_fight_stats
-from .repositories.events import get_event_id, upsert_event
+from .repositories.events import find_existing_event_id, upsert_event
 from .repositories.fighters import get_fighter_id_by_source, upsert_fighter
 from .repositories.fights import (
     get_fight_corner_assignment,
@@ -163,7 +163,7 @@ def scrape_events(
         event_records = event_records[:max_events]
     for event_record in event_records:
         try:
-            existing_event_id = get_event_id(connection, event_record.event)
+            existing_event_id = find_existing_event_id(connection, event_record.event)
             if existing_event_id is not None:
                 counts["events_skipped_existing"] += 1
                 continue
