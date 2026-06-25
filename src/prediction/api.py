@@ -371,15 +371,25 @@ def predict(
     imputer = bundle["imputer"]
     model = bundle["model"]
 
-    # Corner symmetry: the model was trained on raw red-blue diffs, so the bare
-    # P(red wins) is not invariant to which fighter is labelled "red". We average
-    # the forward estimate with the mirror estimate (the swapped row, where every
-    # diff is negated). With red_sym = (p_forward + (1 - p_swapped)) / 2 the
-    # prediction satisfies redProbability(A, B) == blueProbability(B, A) exactly,
-    # so predict(A, B) and predict(B, A) sum to 1.
-    forward_red_prob, transformed = _red_win_probability(feature_row, imputer, model, feature_columns)
+    # Probability calibration (#17): when the bundle carries a fitted
+    # `calibrator` (a prefit CalibratedClassifierCV over the frozen base model,
+    # see calibrate.py) use it for the reported probabilities so they reflect the
+    # observed win frequencies. Fall back to the raw model when no calibrator is
+    # present (e.g. an older bundle). Feature importances still come from the base
+    # model below. The calibrator is monotonic in the base score, so the corner
+    # symmetry below is preserved exactly.
+    proba_estimator = bundle.get("calibrator") or model
+
+    # Corner symmetry (#26): the model was trained on raw red-blue diffs, so the
+    # bare P(red wins) is not invariant to which fighter is labelled "red". We
+    # average the forward estimate with the mirror estimate (the swapped row,
+    # where every diff is negated). With red_sym = (p_forward + (1 - p_swapped)) /
+    # 2 the prediction satisfies redProbability(A, B) == blueProbability(B, A)
+    # exactly, so predict(A, B) and predict(B, A) sum to 1. Both terms pass
+    # through the same estimator, so calibration keeps this identity.
+    forward_red_prob, transformed = _red_win_probability(feature_row, imputer, proba_estimator, feature_columns)
     swapped_red_prob, _ = _red_win_probability(
-        _swap_corners(feature_row), imputer, model, feature_columns
+        _swap_corners(feature_row), imputer, proba_estimator, feature_columns
     )
     red_probability = (forward_red_prob + (1.0 - swapped_red_prob)) / 2.0
     blue_probability = 1.0 - red_probability
