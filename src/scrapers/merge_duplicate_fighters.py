@@ -8,6 +8,7 @@ from typing import Any
 
 from .config import get_settings
 from .db import connect
+from .matching import casefold_name as _normalize_name
 
 
 @dataclass(frozen=True)
@@ -27,10 +28,6 @@ class FighterRow:
     draws: int
     source: str | None
     source_id: str | None
-
-
-def _normalize_name(name: str) -> str:
-    return " ".join(name.casefold().split())
 
 
 def _score(row: FighterRow) -> tuple[int, int, int, int, int]:

@@ -7,7 +7,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from difflib import SequenceMatcher, get_close_matches
+from difflib import get_close_matches
 from email.utils import parsedate_to_datetime
 from html import unescape
 
@@ -18,12 +18,15 @@ from anthropic import Anthropic
 from .config import get_settings
 from .db import connect
 from .logging_config import configure_logging
+from .matching import IDENTITY_THRESHOLD, alnum_name as _normalize_name, ratio
 from .repositories.fighters import FighterMatchRecord, get_all_fighters
 from .repositories.news import NewsArticleRecord, get_existing_news_urls, upsert_news_article
 
 
 LOGGER = logging.getLogger(__name__)
-FUZZY_MATCH_THRESHOLD = 0.92
+# Identity matching: tagging an article with the wrong fighter_id, so keep the
+# strict cutoff. See src/scrapers/matching.py for the threshold policy.
+FUZZY_MATCH_THRESHOLD = IDENTITY_THRESHOLD
 MAX_SUMMARY_LENGTH = 4000
 CATEGORIES = {
     "fight_announcement",
@@ -356,14 +359,10 @@ def _match_fighter(
     if not candidates:
         return None
     candidate_name = candidates[0]
-    similarity = SequenceMatcher(None, normalized_name, candidate_name).ratio()
+    similarity = ratio(normalized_name, candidate_name)
     if similarity < FUZZY_MATCH_THRESHOLD:
         return None
     return normalized_name_index[candidate_name]
-
-
-def _normalize_name(name: str) -> str:
-    return " ".join(re.sub(r"[^a-z0-9]+", " ", name.casefold()).split())
 
 
 def _clean_text(value: object) -> str | None:

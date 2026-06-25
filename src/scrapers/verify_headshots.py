@@ -5,18 +5,20 @@ import json
 import re
 import time
 from dataclasses import asdict, dataclass
-from difflib import SequenceMatcher
 
 import psycopg2
 import requests
 
 from .config import get_settings
 from .db import connect
+from .matching import DEFAULT_THRESHOLD, alnum_name, ratio
 
 
 ESPN_ATHLETE_API_TEMPLATE = "https://sports.core.api.espn.com/v2/sports/mma/leagues/ufc/athletes/{athlete_id}"
 HEADSHOT_ID_PATTERN = re.compile(r"/players/full/(\d+)\.(?:png|jpg|jpeg)(?:$|\?)", re.IGNORECASE)
-MATCH_THRESHOLD = 0.80
+# Headshot verification (not DB identity linking): canonical compromise cutoff.
+# See src/scrapers/matching.py for the threshold policy.
+MATCH_THRESHOLD = DEFAULT_THRESHOLD
 REQUEST_DELAY_SECONDS = 0.5
 
 
@@ -47,11 +49,11 @@ def _extract_athlete_id(headshot_url: str) -> str | None:
 
 
 def _normalize_name(name: str) -> str:
-    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", name.casefold()).split())
+    return alnum_name(name)
 
 
 def _similarity(left: str, right: str) -> float:
-    return SequenceMatcher(None, _normalize_name(left), _normalize_name(right)).ratio()
+    return ratio(_normalize_name(left), _normalize_name(right))
 
 
 def _fetch_espn_name(session: requests.Session, athlete_id: str) -> str | None:

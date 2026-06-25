@@ -5,7 +5,6 @@ import json
 import re
 from collections import Counter
 from dataclasses import asdict, dataclass
-from difflib import SequenceMatcher
 from html import unescape
 from typing import Any
 from urllib.parse import urlparse
@@ -14,6 +13,7 @@ import requests
 
 from .config import get_settings
 from .db import connect
+from .matching import DEFAULT_THRESHOLD, alnum_name, ratio
 
 
 SUSPICIOUS_KEYWORDS = (
@@ -59,7 +59,9 @@ NAME_STOPWORDS = {
 ESPN_HEADSHOT_HOST = "a.espncdn.com"
 ESPN_HEADSHOT_PATH_FRAGMENT = "/i/headshots/mma/players/"
 ESPN_ATHLETE_API_TEMPLATE = "https://sports.core.api.espn.com/v2/sports/mma/leagues/ufc/athletes/{athlete_id}"
-ESPN_NAME_MATCH_THRESHOLD = 0.85
+# Audit/repair heuristic (not DB identity linking): canonical compromise cutoff.
+# See src/scrapers/matching.py for the threshold policy.
+ESPN_NAME_MATCH_THRESHOLD = DEFAULT_THRESHOLD
 HEADSHOT_ID_PATTERN = re.compile(r"/players/(?:full/)?(\d+)\.(?:png|jpg|jpeg)(?:$|\?)", re.IGNORECASE)
 
 
@@ -164,13 +166,11 @@ def _extract_athlete_id_from_headshot(url: str) -> str | None:
 
 
 def _normalize_name_for_match(name: str) -> str:
-    return " ".join(
-        re.sub(r"[^a-z0-9 ]+", " ", unescape(name).casefold()).split()
-    )
+    return alnum_name(unescape(name))
 
 
 def _name_similarity(left: str, right: str) -> float:
-    return SequenceMatcher(None, _normalize_name_for_match(left), _normalize_name_for_match(right)).ratio()
+    return ratio(_normalize_name_for_match(left), _normalize_name_for_match(right))
 
 
 def _fetch_espn_athlete_name(session: requests.Session, athlete_id: str) -> str | None:

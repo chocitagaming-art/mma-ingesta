@@ -21,16 +21,15 @@ import json
 import logging
 import re
 import time
-import unicodedata
 from collections import Counter
-from difflib import SequenceMatcher
 
 import requests
 
 from .config import Settings, get_settings
 from .db import connect
-from .espn import EspnAthlete, _fetch_athlete, _normalize_name
+from .espn import EspnAthlete, _fetch_athlete
 from .logging_config import configure_logging
+from .matching import DEFAULT_THRESHOLD, fold as _fold, fold_ratio as _similar
 from .repositories.fighters import (
     get_fighter_id_by_source,
     update_fighter_enrichment,
@@ -49,7 +48,9 @@ ESPN_ATHLETE_DETAIL_URLS = [
     "https://sports.core.api.espn.com/v2/sports/mma/athletes/{id}",
 ]
 UID_ID_PATTERN = re.compile(r"a:(\d+)")
-NAME_MATCH_THRESHOLD = 0.85
+# Enrichment (not DB identity linking): use the canonical compromise cutoff.
+# See src/scrapers/matching.py for the threshold policy.
+NAME_MATCH_THRESHOLD = DEFAULT_THRESHOLD
 REQUEST_DELAY_SECONDS = 0.35
 
 
@@ -62,16 +63,6 @@ def _build_session(settings: Settings) -> requests.Session:
         }
     )
     return session
-
-
-def _fold(name: str) -> str:
-    decomposed = unicodedata.normalize("NFKD", name)
-    without_marks = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
-    return _normalize_name(without_marks)
-
-
-def _similar(a: str, b: str) -> float:
-    return SequenceMatcher(None, _fold(a), _fold(b)).ratio()
 
 
 def _search_espn_athlete(session: requests.Session, name: str) -> tuple[str, str] | None:

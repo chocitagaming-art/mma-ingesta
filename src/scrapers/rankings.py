@@ -26,11 +26,10 @@ import json
 import logging
 import re
 import time
-import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
-from difflib import SequenceMatcher, get_close_matches
+from difflib import get_close_matches
 
 import requests
 from bs4 import BeautifulSoup
@@ -45,6 +44,7 @@ from .espn import (
     _normalize_name,
 )
 from .logging_config import configure_logging
+from .matching import fold as _fold, ratio
 from .repositories.fighters import get_all_fighters
 from .repositories.rankings import (
     RankingRecord,
@@ -262,14 +262,6 @@ def _parse_rankings(html: str, counts: Counter) -> list[ParsedDivision]:
 # --------------------------------------------------------------------------- build + load
 
 
-def _fold(name: str) -> str:
-    """Diacritic-insensitive form of a name (NFKD, drop combining marks) reusing
-    espn.py's normalization. Lets 'Jiří Procházka' match DB 'Jiri Prochazka'."""
-    decomposed = unicodedata.normalize("NFKD", name)
-    without_marks = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
-    return _normalize_name(without_marks)
-
-
 def _build_folded_index(fighters) -> dict[str, object]:
     """Map diacritic-folded name -> fighter. Folded keys that map to more than one
     distinct fighter (e.g. 'Jung-Yeob Lee' vs 'Jung Yeob Lee' both fold to the same
@@ -306,7 +298,7 @@ def _match_fighter_folded(name: str, folded_index: dict[str, object]):
     if not candidates:
         return None
     candidate = candidates[0]
-    if SequenceMatcher(None, key, candidate).ratio() < FUZZY_MATCH_THRESHOLD:
+    if ratio(key, candidate) < FUZZY_MATCH_THRESHOLD:
         return None
     key_tokens = key.split()
     candidate_tokens = candidate.split()

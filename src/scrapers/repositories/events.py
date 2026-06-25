@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
 
 from psycopg2.extensions import connection as PgConnection
 
+from ..matching import strip_accents
 from ..models import EventRecord
 
 
@@ -102,8 +102,7 @@ _EVENT_STOPWORDS = {
 
 
 def _name_tokens(name: str) -> set[str]:
-    folded = unicodedata.normalize("NFKD", (name or "").lower())
-    folded = "".join(c for c in folded if not unicodedata.combining(c))
+    folded = strip_accents((name or "").lower())
     return set(re.sub(r"[^a-z0-9 ]", " ", folded).split())
 
 

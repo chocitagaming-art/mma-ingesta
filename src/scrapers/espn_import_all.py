@@ -7,7 +7,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime
-from difflib import SequenceMatcher, get_close_matches
+from difflib import get_close_matches
 from typing import Any
 
 import requests
@@ -15,6 +15,7 @@ import requests
 from .config import get_settings
 from .db import connect
 from .logging_config import configure_logging
+from .matching import IDENTITY_THRESHOLD, normalize_name as _normalize_name, ratio
 from .models import FighterRecord
 from .repositories.fighters import FighterMatchRecord, get_all_fighters, upsert_fighter
 
@@ -24,7 +25,9 @@ ESPN_SOURCE = "espn"
 ESPN_ATHLETES_URL = "https://sports.core.api.espn.com/v2/sports/mma/leagues/ufc/athletes"
 ESPN_REQUEST_DELAY_SECONDS = 0.3
 ESPN_PAGE_SIZE = 100
-FUZZY_MATCH_THRESHOLD = 0.92
+# Identity matching: a false positive welds the wrong fighter's data, so keep the
+# strict cutoff. See src/scrapers/matching.py for the threshold policy.
+FUZZY_MATCH_THRESHOLD = IDENTITY_THRESHOLD
 
 
 @dataclass(frozen=True)
@@ -163,14 +166,10 @@ def _match_fighter(
     if not candidates:
         return None
     candidate_name = candidates[0]
-    similarity = SequenceMatcher(None, normalized_name, candidate_name).ratio()
+    similarity = ratio(normalized_name, candidate_name)
     if similarity < FUZZY_MATCH_THRESHOLD:
         return None
     return normalized_name_index[candidate_name]
-
-
-def _normalize_name(name: str) -> str:
-    return " ".join(name.casefold().replace(".", " ").replace("-", " ").split())
 
 
 def _parse_birth_date(value: str | None) -> date | None:
