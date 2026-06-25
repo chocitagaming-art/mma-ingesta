@@ -129,6 +129,35 @@ def _load_fighter_profiles(database_url: str, fighter_ids: list[int]) -> dict[in
     return profiles
 
 
+def _load_fighter_physical(database_url: str, fighter_ids: list[int]) -> dict[int, dict[str, Any]]:
+    """Load physical attributes straight from the fighters table.
+
+    These (height_cm/reach_cm/birth_date) do not depend on fight history, so they
+    remain available for debutants or fighters without fight_stats. Used by the
+    degraded prediction path where the history-derived diffs are imputed."""
+    placeholders = ", ".join(["%s"] * len(fighter_ids))
+    query = f"""
+        SELECT id, birth_date, height_cm, reach_cm
+        FROM fighters
+        WHERE id IN ({placeholders})
+    """
+    from src.scrapers.db import connect, cursor
+
+    with connect(database_url) as connection:
+        with cursor(connection) as db_cursor:
+            db_cursor.execute(query, fighter_ids)
+            rows = db_cursor.fetchall()
+
+    physical: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        physical[int(row["id"])] = {
+            "birth_date": row["birth_date"],
+            "height_cm": float(row["height_cm"]) if row["height_cm"] is not None else None,
+            "reach_cm": float(row["reach_cm"]) if row["reach_cm"] is not None else None,
+        }
+    return physical
+
+
 def _get_latest_matchup_context(fights_df: pd.DataFrame, red_id: int, blue_id: int) -> tuple[date, str | None]:
     shared = fights_df[
         ((fights_df["fighter_red_id"] == red_id) | (fights_df["fighter_blue_id"] == red_id))
@@ -143,7 +172,10 @@ def _get_latest_matchup_context(fights_df: pd.DataFrame, red_id: int, blue_id: i
         | (fights_df["fighter_blue_id"].isin([red_id, blue_id]))
     ].sort_values(["event_date", "fight_id"], ascending=[False, False])
     if latest.empty:
-        raise InsufficientHistoryError("Unable to determine matchup context from fight history.")
+        # Degraded path: neither fighter has any recorded fight (e.g. two
+        # debutants). Fall back to today's date so physical features can still be
+        # computed; the caller flags the prediction as low confidence.
+        return date.today(), None
     row = latest.iloc[0]
     return row["event_date"], row["weight_class"]
 
@@ -153,64 +185,68 @@ def _build_feature_row(
     rankings_df: pd.DataFrame,
     red_id: int,
     blue_id: int,
-) -> tuple[dict[str, float | int | None], dict[str, Any]]:
+    physical: dict[int, dict[str, Any]],
+) -> tuple[dict[str, float | int | None], dict[str, Any], bool]:
     matchup_date, weight_class = _get_latest_matchup_context(fights_df, red_id, blue_id)
     from src.prediction.features import build_fighter_history_dataframe
 
     history_df = build_fighter_history_dataframe(fights_df)
 
-    red_row = fights_df[
-        (fights_df["fighter_red_id"] == red_id) | (fights_df["fighter_blue_id"] == red_id)
-    ].sort_values(["event_date", "fight_id"], ascending=[False, False]).iloc[0]
-    blue_row = fights_df[
-        (fights_df["fighter_red_id"] == blue_id) | (fights_df["fighter_blue_id"] == blue_id)
-    ].sort_values(["event_date", "fight_id"], ascending=[False, False]).iloc[0]
-
-    red_birth_date = red_row["red_birth_date"] if red_row["fighter_red_id"] == red_id else red_row["blue_birth_date"]
-    blue_birth_date = blue_row["red_birth_date"] if blue_row["fighter_red_id"] == blue_id else blue_row["blue_birth_date"]
-    red_height_cm = red_row["red_height_cm"] if red_row["fighter_red_id"] == red_id else red_row["blue_height_cm"]
-    blue_height_cm = blue_row["red_height_cm"] if blue_row["fighter_red_id"] == blue_id else blue_row["blue_height_cm"]
-    red_reach_cm = red_row["red_reach_cm"] if red_row["fighter_red_id"] == red_id else red_row["blue_reach_cm"]
-    blue_reach_cm = blue_row["red_reach_cm"] if blue_row["fighter_red_id"] == blue_id else blue_row["blue_reach_cm"]
-
     red_history = compute_fighter_history(red_id, matchup_date, history_df, rankings_df, weight_class)
     blue_history = compute_fighter_history(blue_id, matchup_date, history_df, rankings_df, weight_class)
-    if red_history is None or blue_history is None:
-        raise InsufficientHistoryError("Insufficient fighter history to generate prediction features.")
 
-    red_age = compute_age(red_birth_date, matchup_date)
-    blue_age = compute_age(blue_birth_date, matchup_date)
+    # Degraded path: a debutant (0 fights) or a fighter without usable
+    # fight_stats yields a None history. Instead of failing with a 422 we flag
+    # the prediction as low confidence and leave the missing history diffs as
+    # None so the model's median SimpleImputer fills them, while still using the
+    # physical features (height/reach/age) sourced from the fighters table.
+    low_confidence = red_history is None or blue_history is None
+
+    red_phys = physical.get(red_id, {})
+    blue_phys = physical.get(blue_id, {})
+    red_height_cm = red_phys.get("height_cm")
+    blue_height_cm = blue_phys.get("height_cm")
+    red_reach_cm = red_phys.get("reach_cm")
+    blue_reach_cm = blue_phys.get("reach_cm")
+    red_age = compute_age(red_phys.get("birth_date"), matchup_date)
+    blue_age = compute_age(blue_phys.get("birth_date"), matchup_date)
+
+    def hist(history: Any, attribute: str) -> Any:
+        # Returns None for a missing history so diff() yields None and the
+        # imputer substitutes the training median for that feature.
+        return getattr(history, attribute) if history is not None else None
 
     feature_row = {
         "height_cm_diff": diff(red_height_cm, blue_height_cm),
         "reach_cm_diff": diff(red_reach_cm, blue_reach_cm),
         "age_diff": diff(red_age, blue_age),
-        "sig_strikes_landed_per_fight_diff": diff(red_history.sig_strikes_landed_per_fight, blue_history.sig_strikes_landed_per_fight),
-        "sig_strike_accuracy_diff": diff(red_history.sig_strike_accuracy, blue_history.sig_strike_accuracy),
-        "knockdowns_per_fight_diff": diff(red_history.knockdowns_per_fight, blue_history.knockdowns_per_fight),
-        "takedowns_landed_per_fight_diff": diff(red_history.takedowns_landed_per_fight, blue_history.takedowns_landed_per_fight),
-        "takedown_accuracy_diff": diff(red_history.takedown_accuracy, blue_history.takedown_accuracy),
-        "submission_attempts_per_fight_diff": diff(red_history.submission_attempts_per_fight, blue_history.submission_attempts_per_fight),
-        "control_time_seconds_per_fight_diff": diff(red_history.control_time_seconds_per_fight, blue_history.control_time_seconds_per_fight),
-        "win_streak_diff": diff(red_history.win_streak, blue_history.win_streak),
-        "wins_last_5_diff": diff(red_history.wins_last_5, blue_history.wins_last_5),
-        "total_prior_fights_diff": diff(red_history.total_prior_fights, blue_history.total_prior_fights),
-        "total_rounds_fought_diff": diff(red_history.total_rounds_fought, blue_history.total_rounds_fought),
-        "pct_wins_by_ko_diff": diff(red_history.pct_wins_by_ko, blue_history.pct_wins_by_ko),
-        "pct_wins_by_submission_diff": diff(red_history.pct_wins_by_submission, blue_history.pct_wins_by_submission),
-        "pct_wins_by_decision_diff": diff(red_history.pct_wins_by_decision, blue_history.pct_wins_by_decision),
+        "sig_strikes_landed_per_fight_diff": diff(hist(red_history, "sig_strikes_landed_per_fight"), hist(blue_history, "sig_strikes_landed_per_fight")),
+        "sig_strike_accuracy_diff": diff(hist(red_history, "sig_strike_accuracy"), hist(blue_history, "sig_strike_accuracy")),
+        "knockdowns_per_fight_diff": diff(hist(red_history, "knockdowns_per_fight"), hist(blue_history, "knockdowns_per_fight")),
+        "takedowns_landed_per_fight_diff": diff(hist(red_history, "takedowns_landed_per_fight"), hist(blue_history, "takedowns_landed_per_fight")),
+        "takedown_accuracy_diff": diff(hist(red_history, "takedown_accuracy"), hist(blue_history, "takedown_accuracy")),
+        "submission_attempts_per_fight_diff": diff(hist(red_history, "submission_attempts_per_fight"), hist(blue_history, "submission_attempts_per_fight")),
+        "control_time_seconds_per_fight_diff": diff(hist(red_history, "control_time_seconds_per_fight"), hist(blue_history, "control_time_seconds_per_fight")),
+        "win_streak_diff": diff(hist(red_history, "win_streak"), hist(blue_history, "win_streak")),
+        "wins_last_5_diff": diff(hist(red_history, "wins_last_5"), hist(blue_history, "wins_last_5")),
+        "total_prior_fights_diff": diff(hist(red_history, "total_prior_fights"), hist(blue_history, "total_prior_fights")),
+        "total_rounds_fought_diff": diff(hist(red_history, "total_rounds_fought"), hist(blue_history, "total_rounds_fought")),
+        "pct_wins_by_ko_diff": diff(hist(red_history, "pct_wins_by_ko"), hist(blue_history, "pct_wins_by_ko")),
+        "pct_wins_by_submission_diff": diff(hist(red_history, "pct_wins_by_submission"), hist(blue_history, "pct_wins_by_submission")),
+        "pct_wins_by_decision_diff": diff(hist(red_history, "pct_wins_by_decision"), hist(blue_history, "pct_wins_by_decision")),
         "scheduled_rounds": 3,
-        "days_since_last_fight_diff": diff(red_history.days_since_last_fight, blue_history.days_since_last_fight),
-        "ranking_position_diff": diff(red_history.ranking_position, blue_history.ranking_position),
+        "days_since_last_fight_diff": diff(hist(red_history, "days_since_last_fight"), hist(blue_history, "days_since_last_fight")),
+        "ranking_position_diff": diff(hist(red_history, "ranking_position"), hist(blue_history, "ranking_position")),
     }
 
     context = {
         "matchupDate": matchup_date.isoformat(),
         "weightClass": weight_class,
-        "redHistory": asdict(red_history),
-        "blueHistory": asdict(blue_history),
+        "redHistory": asdict(red_history) if red_history is not None else None,
+        "blueHistory": asdict(blue_history) if blue_history is not None else None,
+        "lowConfidence": low_confidence,
     }
-    return feature_row, context
+    return feature_row, context, low_confidence
 
 
 def _compute_top_features(
@@ -253,7 +289,10 @@ def predict(
         fights_df = load_base_dataframe(settings.database_url)
     if rankings_df is None:
         rankings_df = load_rankings_dataframe(settings.database_url)
-    feature_row, context = _build_feature_row(fights_df, rankings_df, red_fighter_id, blue_fighter_id)
+    physical = _load_fighter_physical(settings.database_url, [red_fighter_id, blue_fighter_id])
+    feature_row, context, low_confidence = _build_feature_row(
+        fights_df, rankings_df, red_fighter_id, blue_fighter_id, physical
+    )
     feature_columns = bundle["feature_columns"]
     imputer = bundle["imputer"]
     model = bundle["model"]
@@ -272,6 +311,7 @@ def predict(
         "topFeatures": top_features,
         "featureValues": feature_row,
         "context": context,
+        "lowConfidence": low_confidence,
         "fighters": {
             "red": asdict(profiles[red_fighter_id]),
             "blue": asdict(profiles[blue_fighter_id]),
