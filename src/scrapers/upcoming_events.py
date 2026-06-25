@@ -226,9 +226,19 @@ def _build_event_name(soup: BeautifulSoup, headliner: str | None) -> str | None:
 
 
 def _derive_broadcast(name: str | None) -> str | None:
-    """ufc.com exposes no reliable per-event broadcaster in static HTML, so apply UFC's
-    standard model: numbered events ("UFC 329") are pay-per-view; everything else
-    (Fight Night, UFC on ESPN/ABC) streams on ESPN+/Fight Pass."""
+    """Return an ESTIMATED broadcaster for an upcoming event.
+
+    IMPORTANT: this value is a HEURISTIC, not a scraped fact. ufc.com exposes no
+    reliable per-event broadcaster in static HTML, so we apply UFC's standard
+    distribution model purely from the event NAME:
+      - numbered events ("UFC 329") are pay-per-view              -> "PPV"
+      - everything else (Fight Night, UFC on ESPN/ABC) streams on -> "ESPN+ / Fight Pass"
+    It can be wrong (e.g. UFC on ABC, region-specific deals, schedule changes), so
+    the frontend must label it as an ESTIMATION (see mma-app event detail, where it is
+    rendered as "Emisión: <value>" with an "estimada" badge). The stored string itself
+    is left clean (no marker) so the existing `events.broadcast` column/schema is
+    unchanged; the "estimated" semantics live in this docstring + the UI label.
+    """
     if not name:
         return None
     if re.search(r"\bUFC\s+\d+\b", name):
