@@ -278,6 +278,16 @@ def _build_feature_row(
         "scheduled_rounds": scheduled_rounds,
         "days_since_last_fight_diff": diff(hist(red_history, "days_since_last_fight"), hist(blue_history, "days_since_last_fight")),
         "ranking_position_diff": diff(hist(red_history, "ranking_position"), hist(blue_history, "ranking_position")),
+        # Defensive + opponent-quality diffs (#25). Same FighterHistorySummary
+        # attributes the training pipeline diffs, so the formula is identical;
+        # hist() yields None for a missing history so the imputer fills the
+        # training median (debutant fallback, #13). Each name ends with `_diff`,
+        # so _swap_corners negates it and corner symmetry (#26) still holds.
+        "sig_strikes_absorbed_per_fight_diff": diff(hist(red_history, "sig_strikes_absorbed_per_fight"), hist(blue_history, "sig_strikes_absorbed_per_fight")),
+        "sig_strike_defense_diff": diff(hist(red_history, "sig_strike_defense"), hist(blue_history, "sig_strike_defense")),
+        "takedowns_absorbed_per_fight_diff": diff(hist(red_history, "takedowns_absorbed_per_fight"), hist(blue_history, "takedowns_absorbed_per_fight")),
+        "takedown_defense_diff": diff(hist(red_history, "takedown_defense"), hist(blue_history, "takedown_defense")),
+        "avg_opponent_prior_win_rate_diff": diff(hist(red_history, "avg_opponent_prior_win_rate"), hist(blue_history, "avg_opponent_prior_win_rate")),
     }
 
     context = {

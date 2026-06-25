@@ -38,6 +38,13 @@ class FighterHistorySummary:
     pct_wins_by_decision: float | None
     days_since_last_fight: int | None
     ranking_position: int | None
+    # Defensive / opponent-quality features (#25). All career-to-date and
+    # leak-free: aggregated only over fights strictly before the current bout.
+    sig_strikes_absorbed_per_fight: float | None
+    sig_strike_defense: float | None
+    takedowns_absorbed_per_fight: float | None
+    takedown_defense: float | None
+    avg_opponent_prior_win_rate: float | None
     latest_prior_fight_date: date | None
 
 
@@ -72,6 +79,12 @@ FEATURE_COLUMNS = [
     "scheduled_rounds",
     "days_since_last_fight_diff",
     "ranking_position_diff",
+    # Defensive signal + opponent quality / strength-of-schedule (#25).
+    "sig_strikes_absorbed_per_fight_diff",
+    "sig_strike_defense_diff",
+    "takedowns_absorbed_per_fight_diff",
+    "takedown_defense_diff",
+    "avg_opponent_prior_win_rate_diff",
 ]
 
 
@@ -230,6 +243,30 @@ def compute_fighter_history(
     submission_attempts_total = stats_history["submission_attempts"].fillna(0).sum()
     control_time_total = stats_history["control_time_seconds"].fillna(0).sum()
 
+    # Defensive signal (#25): a fighter "absorbs" exactly the opponent's landed
+    # strikes/takedowns in each past bout (fight_stats stores both corners).
+    # Aggregated over the same prior stats fights as the offensive metrics, so
+    # the per-fight denominator (stats_fight_count) matches and stays leak-free.
+    opp_sig_landed_total = stats_history["opp_sig_strikes_landed"].fillna(0).sum()
+    opp_sig_attempted_total = stats_history["opp_sig_strikes_attempted"].fillna(0).sum()
+    opp_td_landed_total = stats_history["opp_takedowns_landed"].fillna(0).sum()
+    opp_td_attempted_total = stats_history["opp_takedowns_attempted"].fillna(0).sum()
+    opp_sig_accuracy = safe_divide(opp_sig_landed_total, opp_sig_attempted_total)
+    opp_td_accuracy = safe_divide(opp_td_landed_total, opp_td_attempted_total)
+    # Striking/takedown defense = fraction of the opponents' attempts avoided.
+    sig_strike_defense = None if opp_sig_accuracy is None else 1.0 - opp_sig_accuracy
+    takedown_defense = None if opp_td_accuracy is None else 1.0 - opp_td_accuracy
+
+    # Opponent quality / strength-of-schedule (#25): mean win-rate of the
+    # fighter's PAST opponents, each measured as that opponent's career win-rate
+    # *going into* the shared bout (opp_prior_win_rate, computed leak-free in
+    # build_fighter_history_dataframe). NaN for debutant opponents is skipped by
+    # Series.mean; None when every past opponent was a debutant.
+    opp_win_rate_series = prior_history["opp_prior_win_rate"]
+    avg_opponent_prior_win_rate = (
+        float(opp_win_rate_series.mean()) if opp_win_rate_series.notna().any() else None
+    )
+
     results = prior_history["result"].tolist()
     win_streak = 0
     for result in reversed(results):
@@ -274,6 +311,11 @@ def compute_fighter_history(
         pct_wins_by_decision=safe_divide(decision_wins, total_prior_wins),
         days_since_last_fight=days_since_last_fight,
         ranking_position=ranking_position,
+        sig_strikes_absorbed_per_fight=float(opp_sig_landed_total / stats_fight_count),
+        sig_strike_defense=sig_strike_defense,
+        takedowns_absorbed_per_fight=float(opp_td_landed_total / stats_fight_count),
+        takedown_defense=takedown_defense,
+        avg_opponent_prior_win_rate=avg_opponent_prior_win_rate,
         latest_prior_fight_date=latest_prior_fight_date,
     )
 
@@ -326,6 +368,12 @@ def build_fighter_history_dataframe(fights_df: pd.DataFrame) -> pd.DataFrame:
                 "submission_attempts": row["red_submission_attempts"],
                 "control_time_seconds": row["red_control_time_seconds"],
                 "knockdowns": row["red_knockdowns"],
+                # Opponent (blue) for this fighter's defensive metrics + SoS.
+                "opponent_id": row["fighter_blue_id"],
+                "opp_sig_strikes_landed": row["blue_sig_strikes_landed"],
+                "opp_sig_strikes_attempted": row["blue_sig_strikes_attempted"],
+                "opp_takedowns_landed": row["blue_takedowns_landed"],
+                "opp_takedowns_attempted": row["blue_takedowns_attempted"],
             }
         )
         records.append(
@@ -343,9 +391,43 @@ def build_fighter_history_dataframe(fights_df: pd.DataFrame) -> pd.DataFrame:
                 "submission_attempts": row["blue_submission_attempts"],
                 "control_time_seconds": row["blue_control_time_seconds"],
                 "knockdowns": row["blue_knockdowns"],
+                # Opponent (red) for this fighter's defensive metrics + SoS.
+                "opponent_id": row["fighter_red_id"],
+                "opp_sig_strikes_landed": row["red_sig_strikes_landed"],
+                "opp_sig_strikes_attempted": row["red_sig_strikes_attempted"],
+                "opp_takedowns_landed": row["red_takedowns_landed"],
+                "opp_takedowns_attempted": row["red_takedowns_attempted"],
             }
         )
-    return pd.DataFrame.from_records(records)
+    history = pd.DataFrame.from_records(records)
+    return _attach_opponent_prior_win_rate(history)
+
+
+def _attach_opponent_prior_win_rate(history: pd.DataFrame) -> pd.DataFrame:
+    """Add ``opp_prior_win_rate`` (leak-free strength-of-schedule signal).
+
+    For every (fighter, bout) row we first compute the fighter's own career
+    win-rate *going into* that bout (wins / fights, both counted strictly before
+    the bout). Then, for each row, we look up the OPPONENT's prior win-rate for
+    that same bout via a self-merge on (fight_id, opponent_id). Because the value
+    only depends on each opponent's results before the shared bout - and that
+    bout predates the prediction target - the resulting per-row signal carries no
+    leakage when later averaged career-to-date in compute_fighter_history."""
+    if history.empty:
+        history["prior_win_rate"] = pd.Series(dtype="float64")
+        history["opp_prior_win_rate"] = pd.Series(dtype="float64")
+        return history
+    history = history.sort_values(["fighter_id", "event_date", "fight_id"]).reset_index(drop=True)
+    is_win = (history["result"] == "win").astype(int)
+    grouped = is_win.groupby(history["fighter_id"])
+    prior_wins = grouped.cumsum() - is_win
+    prior_count = history.groupby("fighter_id").cumcount()
+    history["prior_win_rate"] = np.where(prior_count > 0, prior_wins / prior_count.replace(0, np.nan), np.nan)
+    opponent_lookup = history[["fight_id", "fighter_id", "prior_win_rate"]].rename(
+        columns={"fighter_id": "opponent_id", "prior_win_rate": "opp_prior_win_rate"}
+    )
+    history = history.merge(opponent_lookup, on=["fight_id", "opponent_id"], how="left")
+    return history
 
 
 def build_training_dataset(fights_df: pd.DataFrame, rankings_df: pd.DataFrame) -> DatasetBuildResult:
@@ -467,6 +549,26 @@ def build_training_dataset(fights_df: pd.DataFrame, rankings_df: pd.DataFrame) -
             "ranking_position_diff": diff(
                 red_history.ranking_position,
                 blue_history.ranking_position,
+            ),
+            "sig_strikes_absorbed_per_fight_diff": diff(
+                red_history.sig_strikes_absorbed_per_fight,
+                blue_history.sig_strikes_absorbed_per_fight,
+            ),
+            "sig_strike_defense_diff": diff(
+                red_history.sig_strike_defense,
+                blue_history.sig_strike_defense,
+            ),
+            "takedowns_absorbed_per_fight_diff": diff(
+                red_history.takedowns_absorbed_per_fight,
+                blue_history.takedowns_absorbed_per_fight,
+            ),
+            "takedown_defense_diff": diff(
+                red_history.takedown_defense,
+                blue_history.takedown_defense,
+            ),
+            "avg_opponent_prior_win_rate_diff": diff(
+                red_history.avg_opponent_prior_win_rate,
+                blue_history.avg_opponent_prior_win_rate,
             ),
         }
         # Raw red-blue diffs (NOT oriented by target). Orienting by target
