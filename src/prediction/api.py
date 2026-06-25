@@ -24,6 +24,11 @@ load_dotenv()
 
 MODEL_PATH = Path("src/prediction/model.joblib")
 
+# Used for hypothetical matchups that have no real bout on record. Real bouts
+# carry their own scheduled_rounds (3 for prelims/main-card, 5 for main events
+# and title fights), which we read straight from the fights row.
+DEFAULT_SCHEDULED_ROUNDS = 3
+
 
 class InsufficientHistoryError(RuntimeError):
     """Raised when two fighters lack enough fight history to build prediction features.
@@ -158,14 +163,48 @@ def _load_fighter_physical(database_url: str, fighter_ids: list[int]) -> dict[in
     return physical
 
 
-def _get_latest_matchup_context(fights_df: pd.DataFrame, red_id: int, blue_id: int) -> tuple[date, str | None]:
+def _coerce_scheduled_rounds(value: Any) -> int:
+    """Normalise a fights.scheduled_rounds cell to a positive int.
+
+    Falls back to the default when the value is missing/NaN/non-positive so a
+    dirty row never poisons the feature."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return DEFAULT_SCHEDULED_ROUNDS
+    try:
+        rounds = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_SCHEDULED_ROUNDS
+    return rounds if rounds > 0 else DEFAULT_SCHEDULED_ROUNDS
+
+
+def _get_latest_matchup_context(
+    fights_df: pd.DataFrame, red_id: int, blue_id: int
+) -> tuple[date, str | None, int]:
+    """Resolve the real fight context for the matchup being predicted.
+
+    Returns ``(matchup_date, weight_class, scheduled_rounds)``.
+
+    When the two fighters have an actual bout on record (the fight being
+    predicted), the temporal features are anchored to that bout's real
+    ``event_date`` and its real ``scheduled_rounds`` are used instead of a
+    hardcoded 3. A not-yet-decided bout (``winner_id`` IS NULL) is preferred over
+    a past meeting, so an upcoming rematch anchors to the upcoming date rather
+    than to the previous fight. For a pure hypothetical (no bout on record
+    between the two) there is no real fight date or round count, so we anchor the
+    temporal features to today ("if they fought now") and use a default round
+    count, while still borrowing a weight class from each fighter's most recent
+    bout so the ranking lookup can match the right division."""
     shared = fights_df[
         ((fights_df["fighter_red_id"] == red_id) | (fights_df["fighter_blue_id"] == red_id))
         & ((fights_df["fighter_red_id"] == blue_id) | (fights_df["fighter_blue_id"] == blue_id))
-    ].sort_values(["event_date", "fight_id"], ascending=[False, False])
+    ]
     if not shared.empty:
-        row = shared.iloc[0]
-        return row["event_date"], row["weight_class"]
+        # Prefer the still-unfought bout (the scheduled matchup); otherwise the
+        # most recent meeting on record.
+        upcoming = shared[shared["winner_id"].isna()]
+        candidates = upcoming if not upcoming.empty else shared
+        row = candidates.sort_values(["event_date", "fight_id"], ascending=[False, False]).iloc[0]
+        return row["event_date"], row["weight_class"], _coerce_scheduled_rounds(row["scheduled_rounds"])
 
     latest = fights_df[
         (fights_df["fighter_red_id"].isin([red_id, blue_id]))
@@ -175,9 +214,11 @@ def _get_latest_matchup_context(fights_df: pd.DataFrame, red_id: int, blue_id: i
         # Degraded path: neither fighter has any recorded fight (e.g. two
         # debutants). Fall back to today's date so physical features can still be
         # computed; the caller flags the prediction as low confidence.
-        return date.today(), None
-    row = latest.iloc[0]
-    return row["event_date"], row["weight_class"]
+        return date.today(), None, DEFAULT_SCHEDULED_ROUNDS
+    # Hypothetical matchup with no bout on record: anchor temporal features to
+    # today rather than to either fighter's last past fight, keep a weight class
+    # for the ranking lookup, and use the default scheduled round count.
+    return date.today(), latest.iloc[0]["weight_class"], DEFAULT_SCHEDULED_ROUNDS
 
 
 def _build_feature_row(
@@ -187,7 +228,7 @@ def _build_feature_row(
     blue_id: int,
     physical: dict[int, dict[str, Any]],
 ) -> tuple[dict[str, float | int | None], dict[str, Any], bool]:
-    matchup_date, weight_class = _get_latest_matchup_context(fights_df, red_id, blue_id)
+    matchup_date, weight_class, scheduled_rounds = _get_latest_matchup_context(fights_df, red_id, blue_id)
     from src.prediction.features import build_fighter_history_dataframe
 
     history_df = build_fighter_history_dataframe(fights_df)
@@ -234,7 +275,7 @@ def _build_feature_row(
         "pct_wins_by_ko_diff": diff(hist(red_history, "pct_wins_by_ko"), hist(blue_history, "pct_wins_by_ko")),
         "pct_wins_by_submission_diff": diff(hist(red_history, "pct_wins_by_submission"), hist(blue_history, "pct_wins_by_submission")),
         "pct_wins_by_decision_diff": diff(hist(red_history, "pct_wins_by_decision"), hist(blue_history, "pct_wins_by_decision")),
-        "scheduled_rounds": 3,
+        "scheduled_rounds": scheduled_rounds,
         "days_since_last_fight_diff": diff(hist(red_history, "days_since_last_fight"), hist(blue_history, "days_since_last_fight")),
         "ranking_position_diff": diff(hist(red_history, "ranking_position"), hist(blue_history, "ranking_position")),
     }
@@ -242,6 +283,7 @@ def _build_feature_row(
     context = {
         "matchupDate": matchup_date.isoformat(),
         "weightClass": weight_class,
+        "scheduledRounds": scheduled_rounds,
         "redHistory": asdict(red_history) if red_history is not None else None,
         "blueHistory": asdict(blue_history) if blue_history is not None else None,
         "lowConfidence": low_confidence,
@@ -274,6 +316,38 @@ def _compute_top_features(
     return contributions[:5]
 
 
+def _swap_corners(feature_row: dict[str, float | int | None]) -> dict[str, float | int | None]:
+    """Mirror a feature row to the opposite corner assignment.
+
+    Every model feature is a red-minus-blue diff except ``scheduled_rounds``;
+    swapping the two corners negates each diff (``diff(a, b) == -diff(b, a)``)
+    and leaves the corner-independent scheduled round count untouched. A missing
+    diff stays None so the imputer fills the same training median in both
+    orientations. The None pattern is identical across corners (a diff is missing
+    iff either fighter's value is missing), so this reproduces the genuine
+    swapped row exactly."""
+    swapped: dict[str, float | int | None] = {}
+    for column, value in feature_row.items():
+        if column.endswith("_diff") and value is not None:
+            swapped[column] = -value
+        else:
+            swapped[column] = value
+    return swapped
+
+
+def _red_win_probability(
+    feature_row: dict[str, float | int | None],
+    imputer: Any,
+    model: Any,
+    feature_columns: list[str],
+) -> tuple[float, np.ndarray]:
+    """Return P(red wins) for a raw feature row plus the transformed matrix."""
+    feature_frame = pd.DataFrame([{column: feature_row.get(column) for column in FEATURE_COLUMNS}])
+    transformed = imputer.transform(feature_frame[feature_columns])
+    probabilities = model.predict_proba(transformed)[0]
+    return float(probabilities[1]), transformed
+
+
 def predict(
     red_fighter_id: int,
     blue_fighter_id: int,
@@ -297,11 +371,18 @@ def predict(
     imputer = bundle["imputer"]
     model = bundle["model"]
 
-    feature_frame = pd.DataFrame([{column: feature_row.get(column) for column in FEATURE_COLUMNS}])
-    transformed = imputer.transform(feature_frame[feature_columns])
-    probabilities = model.predict_proba(transformed)[0]
-    red_probability = float(probabilities[1])
-    blue_probability = float(probabilities[0])
+    # Corner symmetry: the model was trained on raw red-blue diffs, so the bare
+    # P(red wins) is not invariant to which fighter is labelled "red". We average
+    # the forward estimate with the mirror estimate (the swapped row, where every
+    # diff is negated). With red_sym = (p_forward + (1 - p_swapped)) / 2 the
+    # prediction satisfies redProbability(A, B) == blueProbability(B, A) exactly,
+    # so predict(A, B) and predict(B, A) sum to 1.
+    forward_red_prob, transformed = _red_win_probability(feature_row, imputer, model, feature_columns)
+    swapped_red_prob, _ = _red_win_probability(
+        _swap_corners(feature_row), imputer, model, feature_columns
+    )
+    red_probability = (forward_red_prob + (1.0 - swapped_red_prob)) / 2.0
+    blue_probability = 1.0 - red_probability
     top_features = _compute_top_features(model, feature_columns, transformed, feature_row)
     profiles = _load_fighter_profiles(settings.database_url, [red_fighter_id, blue_fighter_id])
 
