@@ -27,6 +27,7 @@ import logging
 import os
 import sys
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +48,7 @@ from src.prediction.api import (
 )
 from src.prediction.features import load_base_dataframe, load_rankings_dataframe
 from src.scrapers.config import get_settings
-from src.scrapers.db import connect, cursor
+from src.scrapers.db import close_pool, connect, cursor, init_pool
 
 
 LOGGER = logging.getLogger("prediction.service")
@@ -57,7 +58,25 @@ DATA_TTL_SECONDS = float(os.getenv("PREDICTION_DATA_TTL_SECONDS", "600"))
 API_KEY = os.getenv("PREDICTION_API_KEY") or None
 API_KEY_HEADER = "X-API-Key"
 
-app = FastAPI(title="MMA Prediction Service", version="1.0.0")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # Open the shared Neon pool once so bursts of /predict reuse a handful of
+    # sockets instead of opening 3 connections per request (and exhausting the
+    # free-tier connection slots). Pool size is overridable via env.
+    init_pool(
+        get_settings().database_url,
+        minconn=1,
+        maxconn=int(os.getenv("PREDICTION_DB_POOL_MAX", "5")),
+    )
+    try:
+        yield
+    finally:
+        close_pool()
+
+
+app = FastAPI(
+    title="MMA Prediction Service", version="1.0.0", lifespan=_lifespan
+)
 
 # In-process caches: the model never changes at runtime; dataframes refresh on a TTL.
 _cache: dict[str, Any] = {"bundle": None, "fights_df": None, "rankings_df": None, "loaded_at": 0.0}
