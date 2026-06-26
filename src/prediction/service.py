@@ -39,7 +39,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.prediction.api import InsufficientHistoryError, _load_model_bundle, predict
+from src.prediction.api import (
+    InsufficientHistoryError,
+    _load_model_bundle,
+    model_trained_at,
+    predict,
+)
 from src.prediction.features import load_base_dataframe, load_rankings_dataframe
 from src.scrapers.config import get_settings
 from src.scrapers.db import connect, cursor
@@ -123,13 +128,16 @@ def predict_endpoint(
     try:
         bundle = _get_bundle()
         fights_df, rankings_df = _get_dataframes()
-        return predict(
+        result = predict(
             body.red,
             body.blue,
             bundle=bundle,
             fights_df=fights_df,
             rankings_df=rankings_df,
         )
+        # Expose the model's training date so the UI can show it (#29).
+        result["modelTrainedAt"] = model_trained_at(bundle)
+        return result
     except InsufficientHistoryError:
         return _error(422, "Insufficient fighter history")
     except Exception:  # noqa: BLE001 - surface as a clean 500 for the frontend

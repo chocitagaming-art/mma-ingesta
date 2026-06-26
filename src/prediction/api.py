@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import asdict, dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +60,21 @@ def _load_model_bundle() -> dict[str, Any]:
     if not isinstance(bundle, dict):
         raise RuntimeError("Unexpected model bundle format.")
     return bundle
+
+
+def model_trained_at(
+    bundle: dict[str, Any], model_path: Path = MODEL_PATH
+) -> str | None:
+    """Training date for the UI. Prefer the value stamped into the bundle;
+    fall back to the model file's mtime for older bundles that predate the key."""
+    stamped = bundle.get("trained_at")
+    if stamped:
+        return str(stamped)
+    try:
+        mtime = os.path.getmtime(model_path)
+    except OSError:
+        return None
+    return datetime.fromtimestamp(mtime, tz=timezone.utc).date().isoformat()
 
 
 def _load_fighter_profiles(database_url: str, fighter_ids: list[int]) -> dict[int, FighterPredictionProfile]:

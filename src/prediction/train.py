@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import joblib
@@ -261,6 +262,8 @@ def main() -> None:
             "model": model,
             "imputer": prepared.imputer,
             "feature_columns": feature_columns,
+            # ISO date so the UI can show "Modelo entrenado el <fecha>" (#29).
+            "trained_at": datetime.now(timezone.utc).date().isoformat(),
         },
         MODEL_PATH,
     )
