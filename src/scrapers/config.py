@@ -13,6 +13,7 @@ load_dotenv()
 class Settings:
     database_url: str
     anthropic_api_key: str | None
+    odds_api_key: str | None = None
     request_delay_seconds: float = 1.25
     request_timeout_seconds: int = 30
     user_agent: str = "mma-ingesta/1.0 (+https://ufcstats.com)"
@@ -25,4 +26,9 @@ def get_settings() -> Settings:
     if not database_url:
         raise RuntimeError("DATABASE_URL is not set in the environment or .env file.")
     anthropic_api_key = os.getenv("ANTHROPIC_API_KEY", "").strip() or None
-    return Settings(database_url=database_url, anthropic_api_key=anthropic_api_key)
+    odds_api_key = os.getenv("ODDS_API_KEY", "").strip() or None
+    return Settings(
+        database_url=database_url,
+        anthropic_api_key=anthropic_api_key,
+        odds_api_key=odds_api_key,
+    )
