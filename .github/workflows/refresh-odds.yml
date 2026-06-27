@@ -1,0 +1,31 @@
+name: Refresh odds
+
+# Pulls upcoming MMA moneyline (h2h) odds from The Odds API and populates
+# fights.odds_red / fights.odds_blue so the UI can show the market favorite +
+# implied probability (#41). Needs ODDS_API_KEY in addition to the DB.
+on:
+  schedule:
+    - cron: "0 12 * * *" # daily at 12:00 UTC
+  workflow_dispatch: {}
+
+concurrency:
+  group: refresh-odds
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+      - run: pip install -r requirements-scrapers.txt
+      - name: Run odds scraper
+        run: python -m src.scrapers.odds
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
