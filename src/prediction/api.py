@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.prediction.features import (
     DEFAULT_SCHEDULED_ROUNDS,
     FEATURE_COLUMNS,
+    FighterHistorySummary,
     _coerce_scheduled_rounds,
     build_feature_row,
     compute_age,
@@ -34,11 +35,11 @@ load_dotenv()
 
 MODEL_PATH = Path("src/prediction/model.joblib")
 
-
-class InsufficientHistoryError(RuntimeError):
-    """Raised when two fighters lack enough fight history to build prediction features.
-    Subclasses RuntimeError so existing CLI behaviour is unchanged; the HTTP service
-    maps it to a 422 response."""
+# A prediction is flagged low confidence when either fighter has fewer than this
+# many prior fights (or no usable history at all). Thin history makes the
+# history-derived diffs noisy, so the UI warns instead of presenting the number
+# as solid. Still returned as a normal 200 response, just with lowConfidence:true.
+MIN_CONFIDENT_FIGHTS = 3
 
 
 @dataclass(frozen=True)
@@ -227,27 +228,49 @@ def _get_latest_matchup_context(
     return date.today(), latest.iloc[0]["weight_class"], DEFAULT_SCHEDULED_ROUNDS
 
 
+def _is_low_confidence(
+    red_history: FighterHistorySummary | None,
+    blue_history: FighterHistorySummary | None,
+) -> bool:
+    """Flag a prediction as low confidence when either side lacks enough history.
+
+    A None history means a debutant or a fighter without usable fight_stats; a
+    thin history (fewer than MIN_CONFIDENT_FIGHTS prior fights) still produces a
+    number but a noisy one. Both cases keep returning a normal 200 response, just
+    with lowConfidence:true so the UI can warn."""
+    if red_history is None or blue_history is None:
+        return True
+    return (
+        red_history.total_prior_fights < MIN_CONFIDENT_FIGHTS
+        or blue_history.total_prior_fights < MIN_CONFIDENT_FIGHTS
+    )
+
+
 def _build_feature_row(
     fights_df: pd.DataFrame,
     rankings_df: pd.DataFrame,
     red_id: int,
     blue_id: int,
     physical: dict[int, dict[str, Any]],
+    history_df: pd.DataFrame | None = None,
 ) -> tuple[dict[str, float | int | None], dict[str, Any], bool]:
     matchup_date, weight_class, scheduled_rounds = _get_latest_matchup_context(fights_df, red_id, blue_id)
     from src.prediction.features import build_fighter_history_dataframe
 
-    history_df = build_fighter_history_dataframe(fights_df)
+    # The long-lived service builds this once per data refresh and threads it in;
+    # the CLI path passes nothing and we build it on demand (no signature break).
+    if history_df is None:
+        history_df = build_fighter_history_dataframe(fights_df)
 
     red_history = compute_fighter_history(red_id, matchup_date, history_df, rankings_df, weight_class)
     blue_history = compute_fighter_history(blue_id, matchup_date, history_df, rankings_df, weight_class)
 
     # Degraded path: a debutant (0 fights) or a fighter without usable
-    # fight_stats yields a None history. Instead of failing with a 422 we flag
-    # the prediction as low confidence and leave the missing history diffs as
-    # None so the model's median SimpleImputer fills them, while still using the
-    # physical features (height/reach/age) sourced from the fighters table.
-    low_confidence = red_history is None or blue_history is None
+    # fight_stats yields a None history; a thin history is also flagged. Instead
+    # of failing we mark the prediction low confidence and leave the missing
+    # history diffs as None so the model's median SimpleImputer fills them, while
+    # still using the physical features (height/reach/age) from the fighters table.
+    low_confidence = _is_low_confidence(red_history, blue_history)
 
     red_phys = physical.get(red_id, {})
     blue_phys = physical.get(blue_id, {})
@@ -289,25 +312,47 @@ def _compute_top_features(
     model: Any,
     feature_columns: list[str],
     transformed_row: np.ndarray,
-    raw_feature_row: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    importances = getattr(model, "feature_importances_", None)
-    if importances is None:
+    """Signed, per-prediction feature attributions from the XGBoost booster.
+
+    ``booster.predict(..., pred_contribs=True)`` returns, for each feature, its
+    additive contribution to the raw margin (the log-odds that *red* wins) plus a
+    trailing bias term. A positive contribution pushes the prediction toward red,
+    a negative one toward blue. We rank by absolute contribution and report the
+    top five, each with its signed contribution, direction, and the (imputed)
+    value the model actually saw for that feature.
+
+    Informative only: this explains the frozen base model's margin and does not
+    change the returned probability, which comes from the monotonic calibrator.
+    Because the calibrator is monotonic in that margin, the sign/direction stays
+    valid for the calibrated probability too."""
+    get_booster = getattr(model, "get_booster", None)
+    if get_booster is None:
         return []
-    contributions = []
+    import xgboost as xgb
+
+    booster = get_booster()
+    # Match the DMatrix naming to the booster's OWN feature_names: the production
+    # model is trained on a numpy array (feature_names is None), so forcing names
+    # here would raise a feature-name mismatch; a DataFrame-trained booster carries
+    # names and must get them. Either way pred_contribs returns contributions in
+    # column order (= FEATURE_COLUMNS order), so we map back by index below.
+    dmatrix = xgb.DMatrix(transformed_row, feature_names=booster.feature_names)
+    # Shape (1, n_features + 1); the trailing column is the bias term, dropped here.
+    contributions = booster.predict(dmatrix, pred_contribs=True)[0]
+    ranked: list[dict[str, Any]] = []
     for index, feature_name in enumerate(feature_columns):
-        feature_value = float(transformed_row[0][index])
-        importance = float(importances[index])
-        contributions.append(
+        contribution = float(contributions[index])
+        ranked.append(
             {
                 "name": feature_name,
-                "value": raw_feature_row.get(feature_name),
-                "importance": importance,
-                "impact": abs(feature_value * importance),
+                "value": float(transformed_row[0][index]),
+                "contribution": contribution,
+                "direction": "red" if contribution >= 0 else "blue",
             }
         )
-    contributions.sort(key=lambda item: item["impact"], reverse=True)
-    return contributions[:5]
+    ranked.sort(key=lambda item: abs(item["contribution"]), reverse=True)
+    return ranked[:5]
 
 
 def _swap_corners(feature_row: dict[str, float | int | None]) -> dict[str, float | int | None]:
@@ -349,6 +394,7 @@ def predict(
     bundle: dict[str, Any] | None = None,
     fights_df: pd.DataFrame | None = None,
     rankings_df: pd.DataFrame | None = None,
+    history_df: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
     if bundle is None:
@@ -359,7 +405,7 @@ def predict(
         rankings_df = load_rankings_dataframe(settings.database_url)
     physical = _load_fighter_physical(settings.database_url, [red_fighter_id, blue_fighter_id])
     feature_row, context, low_confidence = _build_feature_row(
-        fights_df, rankings_df, red_fighter_id, blue_fighter_id, physical
+        fights_df, rankings_df, red_fighter_id, blue_fighter_id, physical, history_df=history_df
     )
     feature_columns = bundle["feature_columns"]
     imputer = bundle["imputer"]
@@ -387,7 +433,7 @@ def predict(
     )
     red_probability = (forward_red_prob + (1.0 - swapped_red_prob)) / 2.0
     blue_probability = 1.0 - red_probability
-    top_features = _compute_top_features(model, feature_columns, transformed, feature_row)
+    top_features = _compute_top_features(model, feature_columns, transformed)
     profiles = _load_fighter_profiles(settings.database_url, [red_fighter_id, blue_fighter_id])
 
     return {

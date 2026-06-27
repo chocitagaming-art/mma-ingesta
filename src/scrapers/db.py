@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from contextlib import contextmanager
 
 import psycopg2
@@ -16,6 +17,34 @@ from psycopg2.extras import RealDictCursor
 _pool: psycopg2_pool.ThreadedConnectionPool | None = None
 _pool_url: str | None = None
 _pool_lock = threading.Lock()
+
+# When the pool is momentarily exhausted (a burst of concurrent /predict
+# requests), wait briefly for a connection to be returned instead of failing the
+# request outright. Bounded so a genuinely stuck pool still surfaces an error
+# rather than hanging forever.
+POOL_ACQUIRE_TIMEOUT_SECONDS = 5.0
+POOL_ACQUIRE_RETRY_INTERVAL_SECONDS = 0.05
+
+
+def _getconn_with_wait(
+    connection_pool: psycopg2_pool.ThreadedConnectionPool,
+    timeout: float = POOL_ACQUIRE_TIMEOUT_SECONDS,
+    interval: float = POOL_ACQUIRE_RETRY_INTERVAL_SECONDS,
+):
+    """Borrow a connection, briefly waiting/retrying if the pool is exhausted.
+
+    psycopg2's ThreadedConnectionPool raises PoolError immediately when every
+    connection is checked out. For the long-lived service we'd rather let a burst
+    queue up for a fraction of a second than turn it into a 500, so we retry until
+    a connection frees up or the bounded timeout elapses (then we re-raise)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return connection_pool.getconn()
+        except psycopg2_pool.PoolError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(interval)
 
 
 def init_pool(database_url: str, minconn: int = 1, maxconn: int = 5) -> None:
@@ -49,8 +78,9 @@ def connect(database_url: str):
     fresh connection is opened and closed, preserving the original scraper
     behaviour exactly.
     """
-    if _pool is not None and database_url == _pool_url:
-        connection = _pool.getconn()
+    pool = _pool  # capture once: close_pool() could null the global concurrently
+    if pool is not None and database_url == _pool_url:
+        connection = _getconn_with_wait(pool)
         try:
             yield connection
             # Pooled connections are reused: end the implicit transaction so the
@@ -60,7 +90,7 @@ def connect(database_url: str):
             connection.rollback()
             raise
         finally:
-            _pool.putconn(connection)
+            pool.putconn(connection)
     else:
         connection = psycopg2.connect(database_url)
         try:
