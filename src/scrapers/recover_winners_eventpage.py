@@ -19,10 +19,18 @@ This script:
 The scraped winner map is cached to ``winners_scraped.json`` so the DB update
 phase can be retried without re-fetching.
 
+Safety
+------
+Writes are OFF by default (dry-run): the script prints what it would change and
+exits. Pass ``--apply`` to mutate the DB. It only touches fights that were
+actually present in the scrape, and it never clears an already-stored
+``winner_id`` just because a fight was missing from (or unresolved by) the
+scrape.
+
 Usage::
 
-    python -m src.scrapers.recover_winners_eventpage            # scrape + apply
-    python -m src.scrapers.recover_winners_eventpage --dry-run  # no DB writes
+    python -m src.scrapers.recover_winners_eventpage             # dry-run (no writes)
+    python -m src.scrapers.recover_winners_eventpage --apply     # write to DB
     python -m src.scrapers.recover_winners_eventpage --use-cache # skip scraping
 """
 from __future__ import annotations
@@ -102,7 +110,67 @@ def scrape_winner_map(client: UfcStatsClient, settings) -> dict[str, dict]:
     return winner_map
 
 
-def apply_updates(winner_map: dict[str, dict], dry_run: bool, settings) -> None:
+def compute_updates(
+    winner_map: dict[str, dict],
+    fighter_by_src: dict[str, int],
+    fights: list[dict],
+) -> tuple[list[tuple[int, int, int | None, int]], Counter]:
+    """Pure planner: decide the (red, blue, winner, fight_id) update per fight.
+
+    Two safety invariants enforced here (see the module docstring):
+
+    * A fight that was NOT present in the scrape (``winner_map`` has no row for
+      its source_id) is skipped entirely -- never updated, so a missing event
+      page can never wipe corners or a stored winner.
+    * An existing ``winner_id`` is never cleared to NULL "by absence": only a
+      scraped, *confirmed* draw/NC sets the winner to NULL. An unresolved or
+      undetermined scrape preserves whatever winner the DB already holds.
+    """
+    counts: Counter = Counter()
+    updates: list[tuple[int, int, int | None, int]] = []  # red_new, blue_new, winner_id, fight_id
+    for fr in fights:
+        info = winner_map.get(fr["source_id"])
+        if info is None:
+            counts["skipped_not_scraped"] += 1
+            continue
+
+        current_winner = fr.get("winner_id")
+        # winner-independent corner normalization (sort by fighter source_id)
+        pair = sorted([(fr["red_src"], fr["fighter_red_id"]), (fr["blue_src"], fr["fighter_blue_id"])])
+        red_new, blue_new = pair[0][1], pair[1][1]
+        fight_ids = {fr["fighter_red_id"], fr["fighter_blue_id"]}
+
+        status = info["status"]
+        new_winner: int | None = None
+        if status == "decided":
+            wid = fighter_by_src.get(info["winner_src"])
+            if wid is None:
+                counts["winner_fighter_not_in_db"] += 1
+            elif wid not in fight_ids:
+                counts["winner_not_in_fight"] += 1
+            else:
+                new_winner = wid
+                counts["decided"] += 1
+        elif status == "draw_nc":
+            counts["draw_nc"] += 1  # confirmed no winner -> leave new_winner None
+        else:
+            counts["undetermined"] += 1
+
+        # Never turn a stored winner into NULL unless the scrape confirmed a
+        # draw/NC. Covers decided-but-unresolved and undetermined statuses.
+        if new_winner is None and current_winner is not None and status != "draw_nc":
+            new_winner = current_winner
+            counts["winner_preserved"] += 1
+
+        if new_winner == red_new:
+            counts["winner_is_red_after_norm"] += 1
+        elif new_winner == blue_new:
+            counts["winner_is_blue_after_norm"] += 1
+        updates.append((red_new, blue_new, new_winner, fr["id"]))
+    return updates, counts
+
+
+def apply_updates(winner_map: dict[str, dict], apply: bool, settings) -> None:
     import psycopg2.extras
 
     with connect(settings.database_url) as conn:
@@ -110,10 +178,10 @@ def apply_updates(winner_map: dict[str, dict], dry_run: bool, settings) -> None:
         # fighter source_id -> id
         cur.execute("SELECT id, source_id FROM fighters WHERE source = 'ufcstats' AND source_id IS NOT NULL")
         fighter_by_src = {r["source_id"]: r["id"] for r in cur.fetchall()}
-        # all ufcstats fights with both fighters' source_ids
+        # all ufcstats fights with both fighters' source_ids + the stored winner
         cur.execute(
             """
-            SELECT f.id, f.source_id, f.fighter_red_id, f.fighter_blue_id,
+            SELECT f.id, f.source_id, f.fighter_red_id, f.fighter_blue_id, f.winner_id,
                    r.source_id AS red_src, b.source_id AS blue_src
             FROM fights f
             JOIN fighters r ON r.id = f.fighter_red_id
@@ -123,37 +191,7 @@ def apply_updates(winner_map: dict[str, dict], dry_run: bool, settings) -> None:
         )
         fights = cur.fetchall()
 
-    counts: Counter = Counter()
-    updates: list[tuple[int, int, int | None, int]] = []  # red_new, blue_new, winner_id, fight_id
-    for fr in fights:
-        info = winner_map.get(fr["source_id"])
-        # winner-independent corner normalization (sort by fighter source_id)
-        pair = sorted([(fr["red_src"], fr["fighter_red_id"]), (fr["blue_src"], fr["fighter_blue_id"])])
-        red_new, blue_new = pair[0][1], pair[1][1]
-        fight_ids = {fr["fighter_red_id"], fr["fighter_blue_id"]}
-
-        winner_id: int | None = None
-        if info is None:
-            counts["unmatched_no_event_row"] += 1
-        elif info["status"] == "decided":
-            wid = fighter_by_src.get(info["winner_src"])
-            if wid is None:
-                counts["winner_fighter_not_in_db"] += 1
-            elif wid not in fight_ids:
-                counts["winner_not_in_fight"] += 1
-            else:
-                winner_id = wid
-                counts["decided"] += 1
-        elif info["status"] == "draw_nc":
-            counts["draw_nc"] += 1
-        else:
-            counts["undetermined"] += 1
-
-        if winner_id == red_new:
-            counts["winner_is_red_after_norm"] += 1
-        elif winner_id == blue_new:
-            counts["winner_is_blue_after_norm"] += 1
-        updates.append((red_new, blue_new, winner_id, fr["id"]))
+    updates, counts = compute_updates(winner_map, fighter_by_src, fights)
 
     print("\n=== Resumen de cómputo ===", flush=True)
     for k, v in sorted(counts.items()):
@@ -163,8 +201,12 @@ def apply_updates(winner_map: dict[str, dict], dry_run: bool, settings) -> None:
         bal = counts["winner_is_red_after_norm"] / decided
         print(f"  balance rojo/azul tras normalizar: red={bal:.3f} blue={1 - bal:.3f}", flush=True)
 
-    if dry_run:
-        print("\n[DRY-RUN] No se escribió nada en la BD.", flush=True)
+    if not apply:
+        print(
+            f"\n[DRY-RUN] No se escribió nada en la BD. "
+            f"{len(updates)} fights se actualizarían. Usa --apply para escribir.",
+            flush=True,
+        )
         return
 
     print(f"\nAplicando {len(updates)} updates...", flush=True)
@@ -195,7 +237,7 @@ def apply_updates(winner_map: dict[str, dict], dry_run: bool, settings) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dry-run", action="store_true", help="No escribe en la BD")
+    parser.add_argument("--apply", action="store_true", help="Escribe en la BD (por defecto: dry-run)")
     parser.add_argument("--use-cache", action="store_true", help="Usa winners_scraped.json en vez de scrapear")
     args = parser.parse_args()
 
@@ -210,7 +252,7 @@ def main() -> None:
         CACHE_PATH.write_text(json.dumps(winner_map), encoding="utf-8")
         print(f"Caché guardada en {CACHE_PATH} ({len(winner_map)} filas)", flush=True)
 
-    apply_updates(winner_map, dry_run=args.dry_run, settings=settings)
+    apply_updates(winner_map, apply=args.apply, settings=settings)
 
 
 if __name__ == "__main__":

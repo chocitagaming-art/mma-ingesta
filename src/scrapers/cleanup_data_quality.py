@@ -266,7 +266,7 @@ def _fetch_duplicate_names(cursor) -> list[dict[str, Any]]:
     ]
 
 
-def cleanup_data_quality(dry_run: bool = False) -> AuditSummary:
+def cleanup_data_quality(apply: bool = False) -> AuditSummary:
     settings = get_settings()
     session = requests.Session()
     session.headers.update(
@@ -293,14 +293,15 @@ def cleanup_data_quality(dry_run: bool = False) -> AuditSummary:
             for fighter_id, old_name in suspicious_rows:
                 extracted_name = _extract_real_name(old_name)
                 if extracted_name and extracted_name != old_name:
-                    cursor.execute(
-                        """
-                        UPDATE fighters
-                        SET name = %s, updated_at = NOW()
-                        WHERE id = %s
-                        """,
-                        (extracted_name, fighter_id),
-                    )
+                    if apply:
+                        cursor.execute(
+                            """
+                            UPDATE fighters
+                            SET name = %s, updated_at = NOW()
+                            WHERE id = %s
+                            """,
+                            (extracted_name, fighter_id),
+                        )
                     name_changes.append(
                         NameChange(
                             fighter_id=fighter_id,
@@ -313,7 +314,8 @@ def cleanup_data_quality(dry_run: bool = False) -> AuditSummary:
                 elif extracted_name == old_name:
                     continue
                 else:
-                    cursor.execute("DELETE FROM fighters WHERE id = %s", (fighter_id,))
+                    if apply:
+                        cursor.execute("DELETE FROM fighters WHERE id = %s", (fighter_id,))
                     deleted_ids.append(fighter_id)
                     name_changes.append(
                         NameChange(
@@ -333,7 +335,7 @@ def cleanup_data_quality(dry_run: bool = False) -> AuditSummary:
                     continue
                 invalid_headshot_ids.append(int(fighter_id))
 
-            if invalid_headshot_ids:
+            if invalid_headshot_ids and apply:
                 cursor.execute(
                     """
                     UPDATE fighters
@@ -372,7 +374,7 @@ def cleanup_data_quality(dry_run: bool = False) -> AuditSummary:
                     }
                 )
 
-            if mismatch_ids:
+            if mismatch_ids and apply:
                 cursor.execute(
                     """
                     UPDATE fighters
@@ -388,13 +390,13 @@ def cleanup_data_quality(dry_run: bool = False) -> AuditSummary:
             duplicate_names_after = _fetch_duplicate_names(cursor)
             distinct_headshot_domains_after = _fetch_headshot_domains(cursor)
 
-        if dry_run:
-            connection.rollback()
-        else:
+        if apply:
             connection.commit()
+        else:
+            connection.rollback()
 
     return AuditSummary(
-        dry_run=dry_run,
+        dry_run=not apply,
         fighters_before=fighters_before,
         fighters_after=fighters_after,
         suspicious_name_candidates=len(suspicious_rows),
@@ -423,9 +425,9 @@ def cleanup_data_quality(dry_run: bool = False) -> AuditSummary:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Clean suspicious fighter names and invalid headshot URLs.")
-    parser.add_argument("--dry-run", action="store_true", help="Preview cleanup without committing.")
+    parser.add_argument("--apply", action="store_true", help="Write changes to the DB (default: dry-run preview).")
     args = parser.parse_args()
-    print(json.dumps(asdict(cleanup_data_quality(dry_run=args.dry_run)), indent=2, ensure_ascii=False))
+    print(json.dumps(asdict(cleanup_data_quality(apply=args.apply)), indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":

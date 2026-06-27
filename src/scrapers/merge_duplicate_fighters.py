@@ -57,6 +57,27 @@ def _choose_keeper(rows: list[FighterRow]) -> FighterRow:
     return max(rows, key=_score)
 
 
+def _has_identity_conflict(rows: list[FighterRow]) -> bool:
+    """True when a same-name group looks like distinct people (homonyms).
+
+    Two fighters that share a normalized name but carry conflicting hard
+    identifiers -- different non-null birth dates, or different non-null
+    nationalities -- are almost certainly different humans, not a scraping
+    duplicate. Merging them would fuse two careers into one record, so the caller
+    skips the group unless ``--force-homonyms`` is given.
+    """
+
+    def conflicting(values: list[Any]) -> bool:
+        present = {value for value in values if value not in (None, "")}
+        return len(present) > 1
+
+    if conflicting([row.birth_date for row in rows]):
+        return True
+    if conflicting([row.nationality for row in rows]):
+        return True
+    return False
+
+
 def _merge_group(connection, rows: list[FighterRow]) -> dict[str, Any]:
     keeper = _choose_keeper(rows)
     duplicates = [row for row in rows if row.id != keeper.id]
@@ -144,10 +165,11 @@ def _merge_group(connection, rows: list[FighterRow]) -> dict[str, Any]:
     return {"kept_id": keeper.id, "deleted_ids": deleted_ids}
 
 
-def merge_duplicates(dry_run: bool = False) -> dict[str, Any]:
+def merge_duplicates(apply: bool = False, force_homonyms: bool = False) -> dict[str, Any]:
     settings = get_settings()
     summary: Counter = Counter()
     merged_groups: list[dict[str, Any]] = []
+    skipped_homonyms: list[dict[str, Any]] = []
 
     with connect(settings.database_url) as connection:
         with connection.cursor() as cursor:
@@ -201,22 +223,39 @@ def merge_duplicates(dry_run: bool = False) -> dict[str, Any]:
         for normalized_name, group in grouped.items():
             if len(group) < 2:
                 continue
-            result = _merge_group(connection, group)
+            if not force_homonyms and _has_identity_conflict(group):
+                summary["homonyms_skipped"] += 1
+                skipped_homonyms.append(
+                    {
+                        "name": group[0].name,
+                        "normalized_name": normalized_name,
+                        "ids": [row.id for row in group],
+                    }
+                )
+                continue
+
+            keeper = _choose_keeper(group)
+            deleted_ids = [row.id for row in group if row.id != keeper.id]
+            if not deleted_ids:
+                continue
+            # Dry-run only previews; the mutating SQL runs solely under --apply.
+            if apply:
+                _merge_group(connection, group)
             summary["groups_merged"] += 1
-            summary["fighters_deleted"] += len(result["deleted_ids"])
+            summary["fighters_deleted"] += len(deleted_ids)
             merged_groups.append(
                 {
                     "name": group[0].name,
                     "normalized_name": normalized_name,
-                    "kept_id": result["kept_id"],
-                    "deleted_ids": result["deleted_ids"],
+                    "kept_id": keeper.id,
+                    "deleted_ids": deleted_ids,
                 }
             )
 
-        if dry_run:
-            connection.rollback()
-        else:
+        if apply:
             connection.commit()
+        else:
+            connection.rollback()
 
         with connection.cursor() as cursor:
             cursor.execute("SELECT COUNT(*) FROM fighters")
@@ -225,20 +264,29 @@ def merge_duplicates(dry_run: bool = False) -> dict[str, Any]:
             summary["fighters_with_headshots"] = int(cursor.fetchone()[0])
 
     return {
-        "dry_run": dry_run,
+        "applied": apply,
+        "dry_run": not apply,
+        "force_homonyms": force_homonyms,
         "groups_merged": summary["groups_merged"],
         "fighters_deleted": summary["fighters_deleted"],
+        "homonyms_skipped": summary["homonyms_skipped"],
         "fighters_total": summary["fighters_total"],
         "fighters_with_headshots": summary["fighters_with_headshots"],
         "merged_groups": merged_groups,
+        "skipped_homonyms": skipped_homonyms,
     }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Merge duplicate fighters by normalized name.")
-    parser.add_argument("--dry-run", action="store_true", help="Preview merges without committing.")
+    parser.add_argument("--apply", action="store_true", help="Write merges to the DB (default: dry-run preview).")
+    parser.add_argument(
+        "--force-homonyms",
+        action="store_true",
+        help="Also merge same-name groups that look like distinct people (conflicting birth date/nationality).",
+    )
     args = parser.parse_args()
-    print(json.dumps(merge_duplicates(dry_run=args.dry_run), indent=2))
+    print(json.dumps(merge_duplicates(apply=args.apply, force_homonyms=args.force_homonyms), indent=2))
 
 
 if __name__ == "__main__":

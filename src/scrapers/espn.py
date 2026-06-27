@@ -9,7 +9,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime
 from difflib import get_close_matches
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlencode
 
 import requests
@@ -150,27 +150,87 @@ def _get_json(session: requests.Session, url: str, params: dict[str, Any] | None
     return response.json()
 
 
-def _build_exact_name_index(fighters: list[FighterMatchRecord]) -> dict[str, FighterMatchRecord]:
-    return {fighter.name.casefold(): fighter for fighter in fighters if fighter.name}
+def _build_name_index(
+    fighters: list[FighterMatchRecord],
+    key_func: Callable[[str], str],
+) -> dict[str, FighterMatchRecord | None]:
+    """Index fighters by ``key_func(name)``, neutralising homonym collisions.
+
+    When two *distinct* fighters produce the same key (homonyms), a plain dict
+    comprehension silently keeps whichever one is processed last and welds ESPN
+    data onto the wrong fighter. Instead we mark the colliding key as ambiguous
+    by storing ``None`` (a tombstone) so the name falls through to "no match".
+
+    The tombstone is kept in the dict on purpose: a later live insertion via
+    :func:`_add_to_index` checks ``key in index`` and refuses to resurrect an
+    ambiguous key (popping it would let it be re-added by a homonym).
+    """
+    index: dict[str, FighterMatchRecord | None] = {}
+    for fighter in fighters:
+        if not fighter.name:
+            continue
+        key = key_func(fighter.name)
+        if not key:
+            continue
+        if key in index:
+            existing = index[key]
+            if existing is None:
+                continue  # already burned as ambiguous
+            if existing.id != fighter.id:
+                index[key] = None  # burn the homonym key
+                LOGGER.warning(
+                    "Ambiguous fighter name key %r maps to multiple fighters; skipping match",
+                    key,
+                )
+            # same fighter id -> already indexed, nothing to do
+        else:
+            index[key] = fighter
+    return index
 
 
-def _build_normalized_name_index(fighters: list[FighterMatchRecord]) -> dict[str, FighterMatchRecord]:
-    return {_normalize_name(fighter.name): fighter for fighter in fighters if fighter.name}
+def _build_exact_name_index(fighters: list[FighterMatchRecord]) -> dict[str, FighterMatchRecord | None]:
+    return _build_name_index(fighters, str.casefold)
+
+
+def _build_normalized_name_index(fighters: list[FighterMatchRecord]) -> dict[str, FighterMatchRecord | None]:
+    return _build_name_index(fighters, _normalize_name)
+
+
+def _add_to_index(
+    index: dict[str, FighterMatchRecord | None],
+    key: str,
+    fighter: FighterMatchRecord,
+) -> None:
+    if not key:
+        return
+    if key in index:
+        existing = index[key]
+        if existing is None:
+            # Key already burned as ambiguous (here or in the static index): do
+            # NOT resurrect it, or the homonym would resolve to this writer.
+            return
+        if existing.id != fighter.id:
+            # A freshly inserted fighter collides with an existing name: burn the
+            # key so the homonym resolves to neither one instead of the last writer.
+            index[key] = None
+        # same fighter id -> already indexed, nothing to do
+        return
+    index[key] = fighter
 
 
 def _index_fighter(
     fighter: FighterMatchRecord,
-    exact_name_index: dict[str, FighterMatchRecord],
-    normalized_name_index: dict[str, FighterMatchRecord],
+    exact_name_index: dict[str, FighterMatchRecord | None],
+    normalized_name_index: dict[str, FighterMatchRecord | None],
 ) -> None:
-    exact_name_index[fighter.name.casefold()] = fighter
-    normalized_name_index[_normalize_name(fighter.name)] = fighter
+    _add_to_index(exact_name_index, fighter.name.casefold(), fighter)
+    _add_to_index(normalized_name_index, _normalize_name(fighter.name), fighter)
 
 
 def _match_fighter(
     full_name: str,
-    exact_name_index: dict[str, FighterMatchRecord],
-    normalized_name_index: dict[str, FighterMatchRecord],
+    exact_name_index: dict[str, FighterMatchRecord | None],
+    normalized_name_index: dict[str, FighterMatchRecord | None],
 ) -> FighterMatchRecord | None:
     exact_match = exact_name_index.get(full_name.casefold())
     if exact_match is not None:
@@ -179,7 +239,9 @@ def _match_fighter(
     normalized_match = normalized_name_index.get(normalized_name)
     if normalized_match is not None:
         return normalized_match
-    candidates = get_close_matches(normalized_name, normalized_name_index.keys(), n=1, cutoff=FUZZY_MATCH_THRESHOLD)
+    # Sólo claves vivas (no quemadas como ambiguas) para el fuzzy.
+    live_keys = [k for k, v in normalized_name_index.items() if v is not None]
+    candidates = get_close_matches(normalized_name, live_keys, n=1, cutoff=FUZZY_MATCH_THRESHOLD)
     if not candidates:
         return None
     candidate_name = candidates[0]
