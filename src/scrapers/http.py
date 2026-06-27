@@ -4,7 +4,10 @@ import hashlib
 import logging
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import requests
@@ -15,6 +18,9 @@ from .config import Settings
 
 LOGGER = logging.getLogger(__name__)
 
+MAX_HTTP_RETRIES = 3
+RETRY_BACKOFF_CAP_SECONDS = 30.0
+
 
 @dataclass(frozen=True)
 class FetchResult:
@@ -24,8 +30,13 @@ class FetchResult:
 
 
 class UfcStatsClient:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self._settings = settings
+        self._sleep = sleep
         self._session = requests.Session()
         self._session.headers.update(
             {
@@ -60,13 +71,9 @@ class UfcStatsClient:
         return pages
 
     def _get_with_challenge_handling(self, url: str) -> tuple[requests.Response, str]:
-        last_html = ""
         for attempt in range(3):
-            self._respect_rate_limit()
-            response = self._session.get(url, timeout=self._settings.request_timeout_seconds)
-            response.raise_for_status()
+            response = self._request_with_retries(url)
             html = response.text
-            last_html = html
             if not self._looks_like_challenge(html):
                 return response, html
             LOGGER.info(
@@ -75,15 +82,90 @@ class UfcStatsClient:
                 attempt + 1,
             )
             self._solve_challenge(response.url, html)
-            backoff_seconds = min(2**attempt, 4)
-            time.sleep(backoff_seconds)
+            self._sleep(min(2**attempt, 4))
         raise RuntimeError(f"Unable to bypass UFCStats anti-bot challenge for {url}")
+
+    def _request_with_retries(self, url: str) -> requests.Response:
+        for attempt in range(MAX_HTTP_RETRIES):
+            self._respect_rate_limit()
+            try:
+                response = self._session.get(
+                    url, timeout=self._settings.request_timeout_seconds
+                )
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                if attempt + 1 >= MAX_HTTP_RETRIES:
+                    raise
+                wait = self._retry_wait(attempt)
+                LOGGER.info(
+                    "Transient error fetching %s (%s); retrying in %.1fs (attempt %s/%s).",
+                    url,
+                    exc.__class__.__name__,
+                    wait,
+                    attempt + 1,
+                    MAX_HTTP_RETRIES,
+                )
+                self._sleep(wait)
+                continue
+            if self._is_retryable_status(response.status_code):
+                if attempt + 1 >= MAX_HTTP_RETRIES:
+                    response.raise_for_status()
+                wait = self._retry_wait_for_response(response, attempt)
+                LOGGER.info(
+                    "Retryable HTTP %s fetching %s; retrying in %.1fs (attempt %s/%s).",
+                    response.status_code,
+                    url,
+                    wait,
+                    attempt + 1,
+                    MAX_HTTP_RETRIES,
+                )
+                self._sleep(wait)
+                continue
+            response.raise_for_status()
+            return response
+        raise RuntimeError(f"Exhausted retries fetching {url}")
+
+    def _is_retryable_status(self, status_code: int) -> bool:
+        return status_code == 429 or status_code >= 500
+
+    def _retry_wait(self, attempt: int) -> float:
+        return float(min(2**attempt, RETRY_BACKOFF_CAP_SECONDS))
+
+    def _retry_wait_for_response(
+        self, response: requests.Response, attempt: int
+    ) -> float:
+        if response.status_code == 429:
+            retry_after = self._retry_after_seconds(response)
+            if retry_after is not None:
+                # Cap the server-provided Retry-After so a hostile/huge value
+                # (e.g. 3600s) can't stall the scraper for an hour.
+                return min(retry_after, RETRY_BACKOFF_CAP_SECONDS)
+        return self._retry_wait(attempt)
+
+    def _retry_after_seconds(self, response: requests.Response) -> float | None:
+        raw = response.headers.get("Retry-After")
+        if not raw:
+            return None
+        raw = raw.strip()
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+        # Retry-After may also be an HTTP-date instead of a delta in seconds.
+        try:
+            retry_at = parsedate_to_datetime(raw)
+        except (TypeError, ValueError):
+            return None
+        if retry_at is None:
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
 
     def _respect_rate_limit(self) -> None:
         elapsed = time.monotonic() - self._last_request_at
         remaining = self._settings.request_delay_seconds - elapsed
         if remaining > 0:
-            time.sleep(remaining)
+            self._sleep(remaining)
         self._last_request_at = time.monotonic()
 
     def _looks_like_challenge(self, html: str) -> bool:
