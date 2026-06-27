@@ -1,3 +1,7 @@
+<div align="center">
+
+<img src="docs/banner.png" alt="MMA STATUS" width="640">
+
 # mma-ingesta
 
 The data and machine learning half of [MMA STATUS](https://mma-app-ruby.vercel.app). It scrapes UFC and ESPN, keeps a PostgreSQL database current, trains the fight prediction model, and serves predictions over a small FastAPI service.
@@ -9,7 +13,9 @@ The data and machine learning half of [MMA STATUS](https://mma-app-ruby.vercel.a
 ![Tests](https://img.shields.io/badge/tests-113%20passing-22c55e?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
-Read this in: **English** · [Español](./README.es.md)
+English · [Español](./README.es.md)
+
+</div>
 
 ## What it is
 
