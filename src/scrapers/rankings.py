@@ -205,7 +205,12 @@ def _parse_rank_change(cell) -> int | None:
 
 def _parse_rankings(html: str, counts: Counter) -> list[ParsedDivision]:
     soup = BeautifulSoup(html, "lxml")
-    divisions: list[ParsedDivision] = []
+    # ufc.com renders each weight division's view-grouping TWICE (a desktop block and
+    # a mobile block with identical content); the P4P groupings appear once. Parsing
+    # every block verbatim emits duplicate (slug, rank_position) rows — the root cause
+    # of the doubled 2026-06-24 snapshot. We collapse to one division per slug, keeping
+    # the richer block, so the load stays a clean 13 divisions / ~206 rows.
+    by_slug: dict[str, ParsedDivision] = {}
     for grouping in soup.select("div.view-grouping"):
         header_el = grouping.select_one("div.view-grouping-header")
         if header_el is None:
@@ -255,8 +260,24 @@ def _parse_rankings(html: str, counts: Counter) -> list[ParsedDivision]:
                 )
             )
 
-        divisions.append(ParsedDivision(slug=slug, champion_name=champion_name, entries=entries))
-    return divisions
+        parsed = ParsedDivision(slug=slug, champion_name=champion_name, entries=entries)
+        existing = by_slug.get(slug)
+        if existing is None:
+            by_slug[slug] = parsed
+        else:
+            # Duplicate render of the same division: keep the richer block (more
+            # ranked entries), but carry over a champion from whichever block has one
+            # so an asymmetric/partial render can never drop rank 0. Reassigning an
+            # existing dict key keeps the original first-seen ordering.
+            counts["duplicate_groupings"] += 1
+            kept = parsed if len(parsed.entries) > len(existing.entries) else existing
+            kept.champion_name = kept.champion_name or existing.champion_name or parsed.champion_name
+            by_slug[slug] = kept
+            LOGGER.info(
+                "Collapsed duplicate grouping for division %s (kept %d entries)",
+                slug, len(kept.entries),
+            )
+    return list(by_slug.values())
 
 
 # --------------------------------------------------------------------------- build + load
@@ -394,7 +415,8 @@ def _build_summary(counts: Counter) -> str:
     keys = [
         "snapshot_date", "source_url", "divisions", "champions", "ranked",
         "total_rows", "matched", "matched_folded", "unmatched", "fighters_in_db",
-        "unmapped_divisions", "rank_mismatches", "deleted_existing", "written",
+        "unmapped_divisions", "duplicate_groupings", "rank_mismatches",
+        "deleted_existing", "written",
     ]
     return json.dumps({key: counts.get(key, 0) for key in keys}, indent=2)
 
