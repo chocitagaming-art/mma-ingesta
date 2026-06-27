@@ -20,17 +20,21 @@ def parse_int(value: str | None) -> int | None:
     text = clean_text(value)
     if not text or text in {"--", "---", "N/A"}:
         return None
-    digits = re.sub(r"[^\d-]", "", text)
-    if not digits:
+    # Grab the first signed integer; a stray hyphen ("-") or a range ("1-2")
+    # must not raise, it just yields None / the leading number respectively.
+    match = re.search(r"-?\d+", text)
+    if not match:
         return None
-    return int(digits)
+    return int(match.group())
 
 
 def parse_height_to_cm(value: str | None) -> float | None:
     text = clean_text(value)
     if not text or text in {"--", "---"}:
         return None
-    match = re.match(r"(?P<feet>\d+)'\\s*(?P<inches>\d+)\"", text)
+    # Feet/inches with straight ('/"), prime (U+2032/U+2033) or curly
+    # (U+2019/U+201D) marks; the inch mark is optional and spacing is flexible.
+    match = re.match(r"(?P<feet>\d+)\s*['′’]\s*(?P<inches>\d+)", text)
     if not match:
         return None
     feet = int(match.group("feet"))

@@ -90,14 +90,17 @@ def upsert_fight(connection: PgConnection, fight: FightRecord) -> int:
                 fighter_red_id = EXCLUDED.fighter_red_id,
                 fighter_blue_id = EXCLUDED.fighter_blue_id,
                 weight_class = EXCLUDED.weight_class,
-                weight_grams = EXCLUDED.weight_grams,
                 scheduled_rounds = EXCLUDED.scheduled_rounds,
-                winner_id = EXCLUDED.winner_id,
-                method = EXCLUDED.method,
-                end_round = EXCLUDED.end_round,
-                end_time = EXCLUDED.end_time,
-                odds_red = EXCLUDED.odds_red,
-                odds_blue = EXCLUDED.odds_blue,
+                -- Result / separately-enriched columns: a re-scrape that no longer
+                -- resolves these (HTML changed, or odds/weight come from other
+                -- sources and arrive NULL here) must never wipe a stored value (#20).
+                winner_id = COALESCE(EXCLUDED.winner_id, fights.winner_id),
+                method = COALESCE(EXCLUDED.method, fights.method),
+                end_round = COALESCE(EXCLUDED.end_round, fights.end_round),
+                end_time = COALESCE(EXCLUDED.end_time, fights.end_time),
+                weight_grams = COALESCE(EXCLUDED.weight_grams, fights.weight_grams),
+                odds_red = COALESCE(EXCLUDED.odds_red, fights.odds_red),
+                odds_blue = COALESCE(EXCLUDED.odds_blue, fights.odds_blue),
                 updated_at = NOW()
             RETURNING id
             """,
