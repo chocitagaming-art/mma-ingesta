@@ -2,10 +2,17 @@
 
 This script does NOT retrain. It loads the persisted model bundle
 (``src/prediction/model.joblib``) and reconstructs the EXACT same chronological
-test slice that ``train.py`` builds (same dataset, same split, same feature
-columns and the same fitted imputer that was saved alongside the model).
+test slice that ``train.py`` builds (same dataset, same three-way split, same
+feature columns and the same fitted imputer that was saved alongside the model).
 
-On that test slice it reports:
+It scores that test slice the way PRODUCTION does: with the calibrator when the
+bundle carries one (``bundle.get('calibrator') or bundle['model']``) and with the
+corner symmetrization from ``api.predict`` (``p_sym = (p(row) + (1 -
+p(swap_corners(row)))) / 2``). It reports the four variants {raw, symmetrized} x
+{uncalibrated, calibrated} and marks ``symmetrized + calibrated`` as the
+production-equivalent headline.
+
+On that test slice it also reports:
   * Brier score (``sklearn.metrics.brier_score_loss``)
   * Log loss (``sklearn.metrics.log_loss``)
   * A 10-bin calibration curve (``sklearn.calibration.calibration_curve``):
@@ -32,10 +39,11 @@ import pandas as pd
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import accuracy_score, brier_score_loss, log_loss
 
+from src.prediction.api import _swap_corners
 from src.prediction.train import (
     METRICS_PATH,
     MODEL_PATH,
-    chronological_train_test_split,
+    chronological_three_way_split,
     get_available_feature_columns,
     load_dataset,
 )
@@ -43,6 +51,17 @@ from src.prediction.train import (
 SECTION_HEADER = "## Diagnostico (evaluate.py)"
 N_CALIBRATION_BINS = 10
 DECISION_THRESHOLD = 0.5
+
+# The four reported variants and their order. {raw, symmetrized} x {uncalibrated,
+# calibrated}. 'symmetrized + calibrated' is the production-equivalent headline
+# (mirrors api.predict, which symmetrizes corners and scores via the calibrator).
+_VARIANT_LABELS = {
+    "raw_uncalibrated": "raw, uncalibrated",
+    "symmetrized_uncalibrated": "symmetrized, uncalibrated",
+    "raw_calibrated": "raw, calibrated",
+    "symmetrized_calibrated": "symmetrized + calibrated (PRODUCTION-EQUIVALENT)",
+}
+HEADLINE_VARIANT = "symmetrized_calibrated"
 
 
 def era_bucket(year: int) -> str:
@@ -102,20 +121,45 @@ def fetch_fight_metadata(fight_ids: list[int]) -> pd.DataFrame:
         return pd.DataFrame(columns=["fight_id", "weight_class", "db_scheduled_rounds"])
 
 
-def build_test_predictions() -> tuple[pd.DataFrame, dict]:
-    """Reconstruct the train.py test slice and score it with the saved model.
+def _estimator_probabilities(
+    estimator, imputer, feature_columns: list[str], test_df: pd.DataFrame
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``(raw, symmetrized)`` P(red wins) arrays for ``estimator``.
 
-    Returns the test dataframe enriched with `prob`/`pred`/segment columns and
-    the loaded model bundle.
+    ``symmetrized`` mirrors the production corner-symmetrization in api.predict:
+    for each row ``p_sym = (p(row) + (1 - p(swap_corners(row)))) / 2``. The swap
+    negates every ``*_diff`` (all features are diffs now), reusing
+    ``api._swap_corners`` so this matches serving exactly. Both orientations pass
+    through the same fitted imputer and estimator.
+    """
+    raw = estimator.predict_proba(imputer.transform(test_df[feature_columns]))[:, 1]
+    swapped_records = [
+        _swap_corners(record) for record in test_df[feature_columns].to_dict("records")
+    ]
+    swapped_frame = pd.DataFrame(swapped_records)[feature_columns]
+    swapped = estimator.predict_proba(imputer.transform(swapped_frame))[:, 1]
+    symmetrized = (raw + (1.0 - swapped)) / 2.0
+    return raw, symmetrized
+
+
+def build_test_predictions() -> tuple[pd.DataFrame, dict[str, np.ndarray], str]:
+    """Reconstruct the train.py test slice and score it four ways.
+
+    Returns the test dataframe (with the PRODUCTION-EQUIVALENT `prob`/`pred` plus
+    segment columns), a dict of the four probability variants {raw, symmetrized} x
+    {uncalibrated, calibrated}, and the key of the headline variant actually used.
     """
     dataset = load_dataset()
-    train_df, test_df = chronological_train_test_split(dataset)
+    train_df, _calibration_df, test_df = chronological_three_way_split(dataset)
     test_df = test_df.reset_index(drop=True)
 
     bundle = load_model_bundle()
     feature_columns = list(bundle["feature_columns"])
     imputer = bundle["imputer"]
     model = bundle["model"]
+    # Score with the calibrator when present (mirrors api.predict); the base model
+    # drives the uncalibrated variants and the feature importances.
+    calibrator = bundle.get("calibrator")
 
     # Sanity check: the feature columns saved with the model must match what
     # train.py would derive from the same train slice (guards against drift).
@@ -127,36 +171,47 @@ def build_test_predictions() -> tuple[pd.DataFrame, dict]:
             f"  expected: {expected_columns}\nUsing the saved columns (model was trained on them)."
         )
 
-    x_test = imputer.transform(test_df[feature_columns])
-    probabilities = model.predict_proba(x_test)[:, 1]
-    predictions = (probabilities >= DECISION_THRESHOLD).astype(int)
+    raw_uncal, sym_uncal = _estimator_probabilities(model, imputer, feature_columns, test_df)
+    variants: dict[str, np.ndarray] = {
+        "raw_uncalibrated": raw_uncal,
+        "symmetrized_uncalibrated": sym_uncal,
+    }
+    if calibrator is not None:
+        raw_cal, sym_cal = _estimator_probabilities(
+            calibrator, imputer, feature_columns, test_df
+        )
+        variants["raw_calibrated"] = raw_cal
+        variants["symmetrized_calibrated"] = sym_cal
+
+    # Headline = symmetrized + calibrated when a calibrator exists, otherwise the
+    # best available (symmetrized, uncalibrated). Drives prob/pred and breakdowns.
+    headline_key = HEADLINE_VARIANT if HEADLINE_VARIANT in variants else "symmetrized_uncalibrated"
+    headline = variants[headline_key]
 
     test_df = test_df.copy()
-    test_df["prob"] = probabilities
-    test_df["pred"] = predictions
+    test_df["prob"] = headline
+    test_df["pred"] = (headline >= DECISION_THRESHOLD).astype(int)
     test_df["year"] = pd.to_datetime(test_df["event_date"]).dt.year
     test_df["era"] = test_df["year"].apply(era_bucket)
 
     # Enrich with true fight attributes for segmentation (division + rounds).
+    # scheduled_rounds is no longer a model feature, so it comes only from the
+    # fights table; without DB access the rounds breakdown collapses to Unknown.
     metadata = fetch_fight_metadata(test_df["fight_id"].tolist())
     if not metadata.empty:
         test_df = test_df.merge(metadata, on="fight_id", how="left")
         test_df["division"] = test_df["weight_class"].fillna("Unknown")
-        # The CSV `scheduled_rounds` feature is degenerate (all 3); use the true
-        # value from the fights table so the 3-vs-5 split is meaningful.
-        test_df["rounds_segment"] = test_df["db_scheduled_rounds"].fillna(
-            test_df["scheduled_rounds"]
-        )
+        test_df["rounds_segment"] = test_df["db_scheduled_rounds"]
     else:
         test_df["division"] = "Unknown"
-        test_df["rounds_segment"] = test_df["scheduled_rounds"]
+        test_df["rounds_segment"] = pd.NA
 
     test_df["rounds_segment"] = (
         pd.to_numeric(test_df["rounds_segment"], errors="coerce")
         .round()
         .astype("Int64")
     )
-    return test_df, bundle
+    return test_df, variants, headline_key
 
 
 def segment_breakdown(test_df: pd.DataFrame, column: str) -> list[dict]:
@@ -212,7 +267,18 @@ def compute_calibration(test_df: pd.DataFrame) -> tuple[list[dict], np.ndarray, 
     return table, prob_true, prob_pred
 
 
-def build_section(test_df: pd.DataFrame) -> str:
+def _variant_metrics(y_true: np.ndarray, prob: np.ndarray) -> dict[str, float]:
+    pred = (prob >= DECISION_THRESHOLD).astype(int)
+    return {
+        "brier": float(brier_score_loss(y_true, prob)),
+        "log_loss": float(log_loss(y_true, prob, labels=[0, 1])),
+        "accuracy": float(accuracy_score(y_true, pred)),
+    }
+
+
+def build_section(
+    test_df: pd.DataFrame, variants: dict[str, np.ndarray], headline_key: str
+) -> str:
     """Render the markdown diagnostic section."""
     y_true = test_df["target"].to_numpy()
     prob = test_df["prob"].to_numpy()
@@ -231,29 +297,63 @@ def build_section(test_df: pd.DataFrame) -> str:
     rounds_rows = segment_breakdown(test_df, "rounds_segment")
     era_rows = segment_breakdown(test_df, "era")
 
+    headline_label = _VARIANT_LABELS[headline_key]
     lines: list[str] = [
         SECTION_HEADER,
         "",
         "Evaluacion diagnostica del modelo persistido (sin reentrenar). "
         "Reconstruye el mismo test slice cronologico de `train.py` y lo puntua "
-        "con `model.joblib` (modelo + imputer + feature_columns guardados).",
+        "con `model.joblib` (modelo + imputer + calibrator + feature_columns "
+        "guardados), aplicando la simetrizacion de esquinas de produccion.",
         "",
         f"- Test rows: {len(test_df)}",
         f"- Test date range: {date_min} to {date_max}",
         f"- Decision threshold: {DECISION_THRESHOLD}",
         "",
-        "### Probabilistic metrics (test)",
+        "### HEADLINE (production-equivalent: " + headline_label + ")",
         f"- Brier score: {brier:.4f}  (lower is better; 0.25 = uninformed 0.5)",
         f"- Log loss: {logloss:.4f}  (lower is better)",
         f"- Accuracy: {accuracy:.4f}",
         "",
-        "### Calibration curve (10 uniform bins)",
+        "### Variant comparison {raw, symmetrized} x {uncalibrated, calibrated}",
         "",
-        "Mean predicted probability vs. observed positive fraction per bin.",
+        "`symmetrized + calibrated` matches what api.predict serves and is the "
+        "headline above; the others are diagnostic references.",
         "",
-        "| Bin | Count | Mean predicted | Observed fraction |",
+        "| Variant | Brier | Log loss | Accuracy |",
         "| --- | ---: | ---: | ---: |",
     ]
+    for variant_key, variant_label in _VARIANT_LABELS.items():
+        if variant_key not in variants:
+            continue
+        metrics = _variant_metrics(y_true, variants[variant_key])
+        marker = " **<-** " if variant_key == headline_key else ""
+        lines.append(
+            f"| {variant_label}{marker} | {metrics['brier']:.4f} | "
+            f"{metrics['log_loss']:.4f} | {metrics['accuracy']:.4f} |"
+        )
+    if HEADLINE_VARIANT not in variants:
+        lines.extend(
+            [
+                "",
+                "Note: the saved bundle has no `calibrator`, so only the "
+                "uncalibrated variants are shown. Run `python -m "
+                "src.prediction.calibrate` to add one.",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "### Calibration curve (10 uniform bins)",
+            "",
+            "Mean predicted probability vs. observed positive fraction per bin "
+            "(headline variant).",
+            "",
+            "| Bin | Count | Mean predicted | Observed fraction |",
+            "| --- | ---: | ---: | ---: |",
+        ]
+    )
     for row in calibration_table:
         mean_predicted = "-" if row["mean_predicted"] is None else f"{row['mean_predicted']:.4f}"
         observed = "-" if row["observed_fraction"] is None else f"{row['observed_fraction']:.4f}"
@@ -286,8 +386,9 @@ def build_section(test_df: pd.DataFrame) -> str:
             "",
             "### Breakdown by scheduled_rounds (3 vs 5)",
             "",
-            "Scheduled rounds taken from the `fights` table (the CSV feature is "
-            "degenerate, all 3).",
+            "Scheduled rounds taken from the `fights` table. scheduled_rounds is "
+            "NO LONGER a model feature (dropped as zero-importance); this is a "
+            "segmentation label only.",
             "",
             "| Scheduled rounds | N | Accuracy | Brier | Positive rate |",
             "| --- | ---: | ---: | ---: | ---: |",
@@ -341,17 +442,30 @@ def write_section_idempotent(section: str) -> None:
     METRICS_PATH.write_text(new_text, encoding="utf-8")
 
 
-def print_summary(test_df: pd.DataFrame, section: str) -> None:
+def print_summary(
+    test_df: pd.DataFrame, variants: dict[str, np.ndarray], headline_key: str
+) -> None:
     y_true = test_df["target"].to_numpy()
     prob = test_df["prob"].to_numpy()
     pred = test_df["pred"].to_numpy()
     print("=== Diagnostic evaluation (no retraining) ===")
     print(f"Test rows: {len(test_df)}")
+    print(f"Headline variant (production-equivalent): {_VARIANT_LABELS[headline_key]}")
     print(
         f"Brier: {brier_score_loss(y_true, prob):.4f} | "
         f"LogLoss: {log_loss(y_true, prob, labels=[0, 1]):.4f} | "
         f"Accuracy: {accuracy_score(y_true, pred):.4f}"
     )
+    print("Variants {raw, symmetrized} x {uncalibrated, calibrated}:")
+    for variant_key, variant_label in _VARIANT_LABELS.items():
+        if variant_key not in variants:
+            continue
+        metrics = _variant_metrics(y_true, variants[variant_key])
+        marker = "  <- headline" if variant_key == headline_key else ""
+        print(
+            f"  {variant_label:<48} brier={metrics['brier']:.4f} "
+            f"logloss={metrics['log_loss']:.4f} acc={metrics['accuracy']:.4f}{marker}"
+        )
     print()
     print("Division breakdown (accuracy / brier / n):")
     for row in segment_breakdown(test_df, "division"):
@@ -367,10 +481,10 @@ def print_summary(test_df: pd.DataFrame, section: str) -> None:
 
 
 def main() -> None:
-    test_df, _bundle = build_test_predictions()
-    section = build_section(test_df)
+    test_df, variants, headline_key = build_test_predictions()
+    section = build_section(test_df, variants, headline_key)
     write_section_idempotent(section)
-    print_summary(test_df, section)
+    print_summary(test_df, variants, headline_key)
 
 
 if __name__ == "__main__":

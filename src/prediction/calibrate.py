@@ -2,21 +2,23 @@
 
 This script does NOT retrain the base XGBoost model. It loads the persisted
 bundle (``src/prediction/model.joblib`` = model + imputer + feature_columns),
-reuses ``load_dataset`` and the chronological split from ``train.py`` to obtain
-data, and fits a post-hoc calibrator on a HELD-OUT calibration slice that is
-DISTINCT from the test slice that ``evaluate.py`` scores. The calibrated
-estimator is added to the bundle under the key ``"calibrator"`` (the original
-``model`` / ``imputer`` / ``feature_columns`` are preserved untouched).
+reuses ``load_dataset`` and the shared chronological THREE-way split from
+``train.py`` to obtain data, and fits a post-hoc calibrator on the
+calibration-holdout slice that the base model NEVER saw during training. The
+calibrated estimator is added to the bundle under the key ``"calibrator"`` (the
+original ``model`` / ``imputer`` / ``feature_columns`` are preserved untouched).
 
 Calibration data
 ----------------
-The base model was trained on the whole TRAIN slice, so to avoid contaminating
-``evaluate.py``'s metrics we take the most recent portion of TRAIN as the
-calibration slice (never the test slice). That slice is split chronologically
-into a fit part and a validation part: we fit both an isotonic and a sigmoid
-calibrator on the fit part, score Brier on the validation part, keep whichever
-is better, and finally refit the winning method on the FULL calibration slice
-(more data) before persisting.
+``train.py`` now fits the base model on ``train_df`` ONLY (the first ~64% of the
+chronology). ``chronological_three_way_split`` carves out the next ~16% as a
+dedicated calibration holdout, which the base model never trained on; we
+re-derive that exact slice here via the same shared split. This removes the
+previous in-sample calibration bug, where the calibrator was fit on the tail of
+TRAIN that the base had already learned. We compare an isotonic and a sigmoid
+calibrator by out-of-fold Brier on the holdout, keep whichever is better, and
+refit the winning method on the FULL holdout before persisting. The
+``evaluate.py`` test slice (last ~20%) stays untouched.
 
 Prefit calibration
 -------------------
@@ -39,14 +41,11 @@ from sklearn.model_selection import StratifiedKFold, cross_val_predict
 
 from src.prediction.train import (
     MODEL_PATH,
-    chronological_train_test_split,
+    chronological_three_way_split,
     get_available_feature_columns,
     load_dataset,
 )
 
-# Fraction of the TRAIN slice (most recent rows) reserved for calibration. This
-# is carved out of TRAIN only, never out of the evaluate.py test slice.
-CALIBRATION_FRACTION = 0.25
 # Number of folds used to compare candidate methods by out-of-fold Brier. A
 # cross-validated estimate is far steadier than a single split on a slice this
 # small, where isotonic can win by noise yet overfit into extreme 0/1 outputs.
@@ -83,7 +82,10 @@ def fit_prefit_calibrator(
 
 def main() -> None:
     dataset = load_dataset()
-    train_df, test_df = chronological_train_test_split(dataset)
+    # Re-derive the SAME slices train.py used. The calibration holdout is the
+    # out-of-sample slice the base model never trained on.
+    train_df, calibration_df, test_df = chronological_three_way_split(dataset)
+    calibration_df = calibration_df.reset_index(drop=True)
 
     bundle = load_model_bundle()
     model = bundle["model"]
@@ -99,21 +101,17 @@ def main() -> None:
             "(the model was trained on them)."
         )
 
-    # Held-out calibration slice = most recent rows of TRAIN (kept fully apart
-    # from the evaluate.py test slice so those metrics stay honest).
-    cal_start = max(int(len(train_df) * (1 - CALIBRATION_FRACTION)), 1)
-    calibration_df = train_df.iloc[cal_start:].reset_index(drop=True)
     if len(calibration_df) < 50 or calibration_df["target"].nunique() < 2:
         raise RuntimeError(
-            "Calibration slice is too small or single-class; cannot calibrate."
+            "Calibration holdout is too small or single-class; cannot calibrate."
         )
 
     x_cal = imputer.transform(calibration_df[feature_columns])
     y_cal = calibration_df["target"].to_numpy()
 
-    # Baseline (uncalibrated) out-of-fold Brier on the calibration slice. The
-    # base model already saw these rows during training, so this in-sample number
-    # is only a loose reference point for the calibrated estimates below.
+    # Uncalibrated Brier on the holdout. Because the base model NEVER trained on
+    # these rows, this is a genuine out-of-sample reference for the calibrated
+    # estimates below.
     uncal_cal_brier = brier_score_loss(y_cal, model.predict_proba(x_cal)[:, 1])
 
     # Compare candidate methods by out-of-fold Brier (5-fold CV on the calibration
@@ -159,10 +157,10 @@ def main() -> None:
     print("=== Probability calibration (base XGBoost frozen, not retrained) ===")
     print(f"Train rows: {len(train_df)} | Test rows (evaluate.py): {len(test_df)}")
     print(
-        f"Calibration slice (most recent TRAIN): {len(calibration_df)} rows, "
-        f"{N_SELECTION_FOLDS}-fold CV for method selection"
+        f"Calibration holdout (out-of-sample, base never trained on it): "
+        f"{len(calibration_df)} rows, {N_SELECTION_FOLDS}-fold CV for method selection"
     )
-    print(f"Calibration-slice Brier (uncalibrated base, in-sample): {uncal_cal_brier:.4f}")
+    print(f"Holdout Brier (uncalibrated base, out-of-sample): {uncal_cal_brier:.4f}")
     print("Method selection (out-of-fold CV Brier, lower is better):")
     for method, score in selection:
         marker = "  <- chosen" if method == best_method else ""

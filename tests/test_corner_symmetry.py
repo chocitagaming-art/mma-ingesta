@@ -1,9 +1,9 @@
 """Corner symmetry of api._swap_corners.
 
-_swap_corners must negate every ``*_diff`` and leave ``scheduled_rounds`` and any
-None untouched, so that predict averages the forward estimate with the genuine
-corner-swapped estimate. These tests pin that contract directly and via the
-shared builder.
+Every model feature is now a ``*_diff`` (scheduled_rounds was dropped), so
+_swap_corners must negate every diff and leave any None untouched, so that
+predict averages the forward estimate with the genuine corner-swapped estimate.
+These tests pin that contract directly and via the shared builder.
 """
 
 from datetime import date
@@ -41,12 +41,11 @@ def _summary(**overrides) -> FighterHistorySummary:
     return FighterHistorySummary(**base)
 
 
-def test_swap_negates_diffs_keeps_scheduled_and_none():
+def test_swap_negates_diffs_keeps_none():
     row = {
         "height_cm_diff": 5.0,
         "reach_cm_diff": -3.0,
         "age_diff": 0.0,
-        "scheduled_rounds": 5,
         "ranking_position_diff": None,
     }
     swapped = _swap_corners(row)
@@ -54,14 +53,12 @@ def test_swap_negates_diffs_keeps_scheduled_and_none():
     assert swapped["height_cm_diff"] == -5.0
     assert swapped["reach_cm_diff"] == 3.0
     assert swapped["age_diff"] == 0.0
-    # scheduled_rounds is corner-independent and must NOT be negated.
-    assert swapped["scheduled_rounds"] == 5
     # A missing diff stays None so the imputer fills the same median both ways.
     assert swapped["ranking_position_diff"] is None
 
 
 def test_swap_is_an_involution_on_diffs():
-    row = {"height_cm_diff": 5.0, "scheduled_rounds": 3, "ranking_position_diff": None}
+    row = {"height_cm_diff": 5.0, "age_diff": -2.0, "ranking_position_diff": None}
     assert _swap_corners(_swap_corners(row)) == row
 
 
@@ -81,7 +78,6 @@ def test_swap_reproduces_genuine_corner_swap():
         blue_reach_cm=180.0,
         red_age=30.0,
         blue_age=28.0,
-        scheduled_rounds=5,
     )
     genuine_swap = build_feature_row(
         blue_history,
@@ -92,7 +88,6 @@ def test_swap_reproduces_genuine_corner_swap():
         blue_reach_cm=183.0,
         red_age=28.0,
         blue_age=30.0,
-        scheduled_rounds=5,
     )
 
     assert _swap_corners(forward) == genuine_swap

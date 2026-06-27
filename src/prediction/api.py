@@ -258,10 +258,11 @@ def _build_feature_row(
     red_age = compute_age(red_phys.get("birth_date"), matchup_date)
     blue_age = compute_age(blue_phys.get("birth_date"), matchup_date)
 
-    # scheduled_rounds is already coerced by _get_latest_matchup_context. The
-    # builder imputes nothing for a missing history (hist() -> None -> None diff),
-    # so the imputer fills the training median downstream; the low_confidence flag
-    # and imputation policy stay here in the caller, not in the shared builder.
+    # scheduled_rounds is no longer a model feature (dropped as zero-importance);
+    # it is kept only for the context payload below. The builder imputes nothing
+    # for a missing history (hist() -> None -> None diff), so the imputer fills the
+    # training median downstream; the low_confidence flag and imputation policy
+    # stay here in the caller, not in the shared builder.
     feature_row = build_feature_row(
         red_history,
         blue_history,
@@ -271,7 +272,6 @@ def _build_feature_row(
         blue_reach_cm=blue_reach_cm,
         red_age=red_age,
         blue_age=blue_age,
-        scheduled_rounds=scheduled_rounds,
     )
 
     context = {
@@ -313,13 +313,13 @@ def _compute_top_features(
 def _swap_corners(feature_row: dict[str, float | int | None]) -> dict[str, float | int | None]:
     """Mirror a feature row to the opposite corner assignment.
 
-    Every model feature is a red-minus-blue diff except ``scheduled_rounds``;
-    swapping the two corners negates each diff (``diff(a, b) == -diff(b, a)``)
-    and leaves the corner-independent scheduled round count untouched. A missing
-    diff stays None so the imputer fills the same training median in both
-    orientations. The None pattern is identical across corners (a diff is missing
-    iff either fighter's value is missing), so this reproduces the genuine
-    swapped row exactly."""
+    Every model feature is a red-minus-blue diff, so swapping the two corners
+    negates each diff (``diff(a, b) == -diff(b, a)``). A missing diff stays None
+    so the imputer fills the same training median in both orientations. The None
+    pattern is identical across corners (a diff is missing iff either fighter's
+    value is missing), so this reproduces the genuine swapped row exactly. The
+    non-``_diff`` passthrough branch is kept defensively for any future
+    corner-independent column."""
     swapped: dict[str, float | int | None] = {}
     for column, value in feature_row.items():
         if column.endswith("_diff") and value is not None:

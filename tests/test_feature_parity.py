@@ -1,7 +1,7 @@
 """Train/serve parity for the shared feature-row builder.
 
-Feeds ONE fixed (red_history, blue_history, physical, scheduled_rounds) tuple
-through `build_feature_row` the way the TRAINING caller assembles its arguments
+Feeds ONE fixed (red_history, blue_history, physical) tuple through
+`build_feature_row` the way the TRAINING caller assembles its arguments
 (build_training_dataset) and the way the SERVING caller assembles them
 (api._build_feature_row), then asserts the produced feature dicts are equal
 key-for-key, including the None pattern. This is the regression guard against
@@ -13,7 +13,6 @@ from datetime import date
 from src.prediction.features import (
     FEATURE_COLUMNS,
     FighterHistorySummary,
-    _coerce_scheduled_rounds,
     build_feature_row,
     compute_age,
 )
@@ -58,9 +57,6 @@ def test_feature_parity_training_vs_serving():
     anchor = date(2022, 6, 1)
     red_birth = date(1992, 1, 1)
     blue_birth = date(1990, 1, 1)
-    # A valid positive int, so _coerce_scheduled_rounds is a no-op and the two
-    # callers feed the builder the SAME scheduled_rounds value.
-    raw_scheduled_rounds = 5
 
     # Physical attrs as the serving path assembles them (fighters-table dict).
     physical = {
@@ -78,7 +74,6 @@ def test_feature_parity_training_vs_serving():
         blue_reach_cm=180.0,
         red_age=compute_age(red_birth, anchor),
         blue_age=compute_age(blue_birth, anchor),
-        scheduled_rounds=raw_scheduled_rounds,
     )
 
     # --- serving caller convention (api._build_feature_row) ---
@@ -93,7 +88,6 @@ def test_feature_parity_training_vs_serving():
         blue_reach_cm=blue_phys.get("reach_cm"),
         red_age=compute_age(red_phys.get("birth_date"), anchor),
         blue_age=compute_age(blue_phys.get("birth_date"), anchor),
-        scheduled_rounds=_coerce_scheduled_rounds(raw_scheduled_rounds),
     )
 
     assert set(training_row) == set(FEATURE_COLUMNS)
@@ -119,17 +113,15 @@ def test_builder_is_neutral_about_missing_history():
         blue_reach_cm=180.0,
         red_age=30.0,
         blue_age=28.0,
-        scheduled_rounds=3,
     )
     # Physical features survive (both sides present).
     assert row["height_cm_diff"] == 2.0
     assert row["reach_cm_diff"] == 3.0
     assert row["age_diff"] == 2.0
-    assert row["scheduled_rounds"] == 3
     # Every history-derived diff is None because blue history is missing.
     history_diffs = [
         column
         for column in FEATURE_COLUMNS
-        if column not in {"height_cm_diff", "reach_cm_diff", "age_diff", "scheduled_rounds"}
+        if column not in {"height_cm_diff", "reach_cm_diff", "age_diff"}
     ]
     assert all(row[column] is None for column in history_diffs)

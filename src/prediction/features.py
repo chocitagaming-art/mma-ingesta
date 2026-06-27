@@ -63,6 +63,13 @@ class DatasetBuildResult:
     excluded_missing_stats: int
 
 
+# Every feature is a red-minus-blue diff. Five zero-importance features were
+# dropped after the importance audit (submission_attempts_per_fight_diff,
+# win_streak_diff, pct_wins_by_submission_diff, pct_wins_by_decision_diff and the
+# only non-diff feature, scheduled_rounds). With scheduled_rounds gone every
+# remaining feature negates under a corner swap, which strengthens corner
+# symmetry. ranking_position_diff stays here but is auto-dropped at train time by
+# get_available_feature_columns when it is all-NaN (existing behaviour).
 FEATURE_COLUMNS = [
     "height_cm_diff",
     "reach_cm_diff",
@@ -72,16 +79,11 @@ FEATURE_COLUMNS = [
     "knockdowns_per_fight_diff",
     "takedowns_landed_per_fight_diff",
     "takedown_accuracy_diff",
-    "submission_attempts_per_fight_diff",
     "control_time_seconds_per_fight_diff",
-    "win_streak_diff",
     "wins_last_5_diff",
     "total_prior_fights_diff",
     "total_rounds_fought_diff",
     "pct_wins_by_ko_diff",
-    "pct_wins_by_submission_diff",
-    "pct_wins_by_decision_diff",
-    "scheduled_rounds",
     "days_since_last_fight_diff",
     "ranking_position_diff",
     # Defensive signal + opponent quality / strength-of-schedule (#25).
@@ -490,8 +492,6 @@ def build_training_dataset(fights_df: pd.DataFrame, rankings_df: pd.DataFrame) -
         red_age = compute_age(row["red_birth_date"], row["event_date"])
         blue_age = compute_age(row["blue_birth_date"], row["event_date"])
 
-        # scheduled_rounds passed RAW (the fights cell) so training keeps its
-        # existing values; serving coerces in its own caller before the builder.
         feature_row = build_feature_row(
             red_history,
             blue_history,
@@ -501,7 +501,6 @@ def build_training_dataset(fights_df: pd.DataFrame, rankings_df: pd.DataFrame) -
             blue_reach_cm=row["blue_reach_cm"],
             red_age=red_age,
             blue_age=blue_age,
-            scheduled_rounds=row["scheduled_rounds"],
         )
         # Raw red-blue diffs (NOT oriented by target). Orienting by target
         # canonicalizes every row to winner-loser diffs, which makes the label
@@ -588,15 +587,14 @@ def build_feature_row(
     blue_reach_cm: float | None,
     red_age: float | None,
     blue_age: float | None,
-    scheduled_rounds: Any,
 ) -> dict[str, float | int | None]:
     """Single source of truth for a model feature row (keys == FEATURE_COLUMNS,
-    in order). Every entry is a red-minus-blue diff except scheduled_rounds, which
-    is stored RAW exactly as passed in. hist() yields None for a missing history
-    side so the corresponding diff is None: the builder imputes nothing, leaving
-    each caller free to keep its own imputation/exclusion policy. Shared by the
-    training pipeline (build_training_dataset) and serving (api._build_feature_row)
-    so the two can never drift."""
+    in order). Every entry is a red-minus-blue diff, so the row negates cleanly
+    under a corner swap. hist() yields None for a missing history side so the
+    corresponding diff is None: the builder imputes nothing, leaving each caller
+    free to keep its own imputation/exclusion policy. Shared by the training
+    pipeline (build_training_dataset) and serving (api._build_feature_row) so the
+    two can never drift."""
 
     def hist(history: FighterHistorySummary | None, attribute: str) -> Any:
         return getattr(history, attribute) if history is not None else None
@@ -610,16 +608,11 @@ def build_feature_row(
         "knockdowns_per_fight_diff": diff(hist(red_history, "knockdowns_per_fight"), hist(blue_history, "knockdowns_per_fight")),
         "takedowns_landed_per_fight_diff": diff(hist(red_history, "takedowns_landed_per_fight"), hist(blue_history, "takedowns_landed_per_fight")),
         "takedown_accuracy_diff": diff(hist(red_history, "takedown_accuracy"), hist(blue_history, "takedown_accuracy")),
-        "submission_attempts_per_fight_diff": diff(hist(red_history, "submission_attempts_per_fight"), hist(blue_history, "submission_attempts_per_fight")),
         "control_time_seconds_per_fight_diff": diff(hist(red_history, "control_time_seconds_per_fight"), hist(blue_history, "control_time_seconds_per_fight")),
-        "win_streak_diff": diff(hist(red_history, "win_streak"), hist(blue_history, "win_streak")),
         "wins_last_5_diff": diff(hist(red_history, "wins_last_5"), hist(blue_history, "wins_last_5")),
         "total_prior_fights_diff": diff(hist(red_history, "total_prior_fights"), hist(blue_history, "total_prior_fights")),
         "total_rounds_fought_diff": diff(hist(red_history, "total_rounds_fought"), hist(blue_history, "total_rounds_fought")),
         "pct_wins_by_ko_diff": diff(hist(red_history, "pct_wins_by_ko"), hist(blue_history, "pct_wins_by_ko")),
-        "pct_wins_by_submission_diff": diff(hist(red_history, "pct_wins_by_submission"), hist(blue_history, "pct_wins_by_submission")),
-        "pct_wins_by_decision_diff": diff(hist(red_history, "pct_wins_by_decision"), hist(blue_history, "pct_wins_by_decision")),
-        "scheduled_rounds": scheduled_rounds,
         "days_since_last_fight_diff": diff(hist(red_history, "days_since_last_fight"), hist(blue_history, "days_since_last_fight")),
         "ranking_position_diff": diff(hist(red_history, "ranking_position"), hist(blue_history, "ranking_position")),
         "sig_strikes_absorbed_per_fight_diff": diff(hist(red_history, "sig_strikes_absorbed_per_fight"), hist(blue_history, "sig_strikes_absorbed_per_fight")),

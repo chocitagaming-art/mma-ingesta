@@ -1,4 +1,4 @@
-"""Golden-value test pinning the 25-feature mapping of build_feature_row.
+"""Golden-value test pinning the feature mapping of build_feature_row.
 
 The parity/symmetry tests are builder-vs-builder and symmetric, so a transcription
 bug (a feature reading the WRONG FighterHistorySummary attribute, or two columns
@@ -15,22 +15,21 @@ from src.prediction.features import (
     build_feature_row,
 )
 
-# Every history-derived feature -> the FighterHistorySummary attribute it must read.
+# Every history-derived FEATURE -> the FighterHistorySummary attribute it must
+# read. The four zero-importance history features that were dropped from
+# FEATURE_COLUMNS (submission_attempts_per_fight, win_streak,
+# pct_wins_by_submission, pct_wins_by_decision) are no longer listed here.
 _HISTORY_ATTR = {
     "sig_strikes_landed_per_fight_diff": "sig_strikes_landed_per_fight",
     "sig_strike_accuracy_diff": "sig_strike_accuracy",
     "knockdowns_per_fight_diff": "knockdowns_per_fight",
     "takedowns_landed_per_fight_diff": "takedowns_landed_per_fight",
     "takedown_accuracy_diff": "takedown_accuracy",
-    "submission_attempts_per_fight_diff": "submission_attempts_per_fight",
     "control_time_seconds_per_fight_diff": "control_time_seconds_per_fight",
-    "win_streak_diff": "win_streak",
     "wins_last_5_diff": "wins_last_5",
     "total_prior_fights_diff": "total_prior_fights",
     "total_rounds_fought_diff": "total_rounds_fought",
     "pct_wins_by_ko_diff": "pct_wins_by_ko",
-    "pct_wins_by_submission_diff": "pct_wins_by_submission",
-    "pct_wins_by_decision_diff": "pct_wins_by_decision",
     "days_since_last_fight_diff": "days_since_last_fight",
     "ranking_position_diff": "ranking_position",
     "sig_strikes_absorbed_per_fight_diff": "sig_strikes_absorbed_per_fight",
@@ -40,14 +39,42 @@ _HISTORY_ATTR = {
     "avg_opponent_prior_win_rate_diff": "avg_opponent_prior_win_rate",
 }
 
-_NON_HISTORY = {"height_cm_diff", "reach_cm_diff", "age_diff", "scheduled_rounds"}
+# scheduled_rounds was the only non-diff feature and is now dropped, so every
+# remaining feature is a diff.
+_NON_HISTORY = {"height_cm_diff", "reach_cm_diff", "age_diff"}
+
+# ALL FighterHistorySummary numeric attributes (a superset of the asserted
+# features above). The dataclass still carries the dropped attributes, so we must
+# supply values for them to construct it, even though they are not asserted.
+_ALL_HISTORY_ATTRS = [
+    "total_prior_fights",
+    "total_rounds_fought",
+    "sig_strikes_landed_per_fight",
+    "sig_strike_accuracy",
+    "knockdowns_per_fight",
+    "takedowns_landed_per_fight",
+    "takedown_accuracy",
+    "submission_attempts_per_fight",
+    "control_time_seconds_per_fight",
+    "win_streak",
+    "wins_last_5",
+    "pct_wins_by_ko",
+    "pct_wins_by_submission",
+    "pct_wins_by_decision",
+    "days_since_last_fight",
+    "ranking_position",
+    "sig_strikes_absorbed_per_fight",
+    "sig_strike_defense",
+    "takedowns_absorbed_per_fight",
+    "takedown_defense",
+    "avg_opponent_prior_win_rate",
+]
 
 
 def _summaries():
-    attrs = list(_HISTORY_ATTR.values())
     # red = (i+1)*10, blue = (i+1)*1  ->  diff = (i+1)*9, all DISTINCT per attribute.
-    red_vals = {attr: (i + 1) * 10.0 for i, attr in enumerate(attrs)}
-    blue_vals = {attr: (i + 1) * 1.0 for i, attr in enumerate(attrs)}
+    red_vals = {attr: (i + 1) * 10.0 for i, attr in enumerate(_ALL_HISTORY_ATTRS)}
+    blue_vals = {attr: (i + 1) * 1.0 for i, attr in enumerate(_ALL_HISTORY_ATTRS)}
     red = FighterHistorySummary(latest_prior_fight_date=date(2021, 1, 1), **red_vals)
     blue = FighterHistorySummary(latest_prior_fight_date=date(2020, 1, 1), **blue_vals)
     return red, blue, red_vals, blue_vals
@@ -65,7 +92,6 @@ def test_build_feature_row_golden_mapping():
         blue_reach_cm=180.0,
         red_age=35.0,
         blue_age=28.0,
-        scheduled_rounds=5,
     )
 
     # Keys + order are exactly FEATURE_COLUMNS and cover the whole list.
@@ -76,7 +102,6 @@ def test_build_feature_row_golden_mapping():
     assert row["height_cm_diff"] == 20.0
     assert row["reach_cm_diff"] == 20.0
     assert row["age_diff"] == 7.0
-    assert row["scheduled_rounds"] == 5  # raw passthrough
 
     # Each history feature must read ITS attribute (red-minus-blue), not another.
     for feature, attr in _HISTORY_ATTR.items():
