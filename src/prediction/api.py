@@ -17,18 +17,22 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.prediction.features import FEATURE_COLUMNS, compute_age, compute_fighter_history, diff, load_base_dataframe, load_rankings_dataframe
+from src.prediction.features import (
+    DEFAULT_SCHEDULED_ROUNDS,
+    FEATURE_COLUMNS,
+    _coerce_scheduled_rounds,
+    build_feature_row,
+    compute_age,
+    compute_fighter_history,
+    load_base_dataframe,
+    load_rankings_dataframe,
+)
 from src.scrapers.config import get_settings
 
 
 load_dotenv()
 
 MODEL_PATH = Path("src/prediction/model.joblib")
-
-# Used for hypothetical matchups that have no real bout on record. Real bouts
-# carry their own scheduled_rounds (3 for prelims/main-card, 5 for main events
-# and title fights), which we read straight from the fights row.
-DEFAULT_SCHEDULED_ROUNDS = 3
 
 
 class InsufficientHistoryError(RuntimeError):
@@ -179,20 +183,6 @@ def _load_fighter_physical(database_url: str, fighter_ids: list[int]) -> dict[in
     return physical
 
 
-def _coerce_scheduled_rounds(value: Any) -> int:
-    """Normalise a fights.scheduled_rounds cell to a positive int.
-
-    Falls back to the default when the value is missing/NaN/non-positive so a
-    dirty row never poisons the feature."""
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return DEFAULT_SCHEDULED_ROUNDS
-    try:
-        rounds = int(value)
-    except (TypeError, ValueError):
-        return DEFAULT_SCHEDULED_ROUNDS
-    return rounds if rounds > 0 else DEFAULT_SCHEDULED_ROUNDS
-
-
 def _get_latest_matchup_context(
     fights_df: pd.DataFrame, red_id: int, blue_id: int
 ) -> tuple[date, str | None, int]:
@@ -268,43 +258,21 @@ def _build_feature_row(
     red_age = compute_age(red_phys.get("birth_date"), matchup_date)
     blue_age = compute_age(blue_phys.get("birth_date"), matchup_date)
 
-    def hist(history: Any, attribute: str) -> Any:
-        # Returns None for a missing history so diff() yields None and the
-        # imputer substitutes the training median for that feature.
-        return getattr(history, attribute) if history is not None else None
-
-    feature_row = {
-        "height_cm_diff": diff(red_height_cm, blue_height_cm),
-        "reach_cm_diff": diff(red_reach_cm, blue_reach_cm),
-        "age_diff": diff(red_age, blue_age),
-        "sig_strikes_landed_per_fight_diff": diff(hist(red_history, "sig_strikes_landed_per_fight"), hist(blue_history, "sig_strikes_landed_per_fight")),
-        "sig_strike_accuracy_diff": diff(hist(red_history, "sig_strike_accuracy"), hist(blue_history, "sig_strike_accuracy")),
-        "knockdowns_per_fight_diff": diff(hist(red_history, "knockdowns_per_fight"), hist(blue_history, "knockdowns_per_fight")),
-        "takedowns_landed_per_fight_diff": diff(hist(red_history, "takedowns_landed_per_fight"), hist(blue_history, "takedowns_landed_per_fight")),
-        "takedown_accuracy_diff": diff(hist(red_history, "takedown_accuracy"), hist(blue_history, "takedown_accuracy")),
-        "submission_attempts_per_fight_diff": diff(hist(red_history, "submission_attempts_per_fight"), hist(blue_history, "submission_attempts_per_fight")),
-        "control_time_seconds_per_fight_diff": diff(hist(red_history, "control_time_seconds_per_fight"), hist(blue_history, "control_time_seconds_per_fight")),
-        "win_streak_diff": diff(hist(red_history, "win_streak"), hist(blue_history, "win_streak")),
-        "wins_last_5_diff": diff(hist(red_history, "wins_last_5"), hist(blue_history, "wins_last_5")),
-        "total_prior_fights_diff": diff(hist(red_history, "total_prior_fights"), hist(blue_history, "total_prior_fights")),
-        "total_rounds_fought_diff": diff(hist(red_history, "total_rounds_fought"), hist(blue_history, "total_rounds_fought")),
-        "pct_wins_by_ko_diff": diff(hist(red_history, "pct_wins_by_ko"), hist(blue_history, "pct_wins_by_ko")),
-        "pct_wins_by_submission_diff": diff(hist(red_history, "pct_wins_by_submission"), hist(blue_history, "pct_wins_by_submission")),
-        "pct_wins_by_decision_diff": diff(hist(red_history, "pct_wins_by_decision"), hist(blue_history, "pct_wins_by_decision")),
-        "scheduled_rounds": scheduled_rounds,
-        "days_since_last_fight_diff": diff(hist(red_history, "days_since_last_fight"), hist(blue_history, "days_since_last_fight")),
-        "ranking_position_diff": diff(hist(red_history, "ranking_position"), hist(blue_history, "ranking_position")),
-        # Defensive + opponent-quality diffs (#25). Same FighterHistorySummary
-        # attributes the training pipeline diffs, so the formula is identical;
-        # hist() yields None for a missing history so the imputer fills the
-        # training median (debutant fallback, #13). Each name ends with `_diff`,
-        # so _swap_corners negates it and corner symmetry (#26) still holds.
-        "sig_strikes_absorbed_per_fight_diff": diff(hist(red_history, "sig_strikes_absorbed_per_fight"), hist(blue_history, "sig_strikes_absorbed_per_fight")),
-        "sig_strike_defense_diff": diff(hist(red_history, "sig_strike_defense"), hist(blue_history, "sig_strike_defense")),
-        "takedowns_absorbed_per_fight_diff": diff(hist(red_history, "takedowns_absorbed_per_fight"), hist(blue_history, "takedowns_absorbed_per_fight")),
-        "takedown_defense_diff": diff(hist(red_history, "takedown_defense"), hist(blue_history, "takedown_defense")),
-        "avg_opponent_prior_win_rate_diff": diff(hist(red_history, "avg_opponent_prior_win_rate"), hist(blue_history, "avg_opponent_prior_win_rate")),
-    }
+    # scheduled_rounds is already coerced by _get_latest_matchup_context. The
+    # builder imputes nothing for a missing history (hist() -> None -> None diff),
+    # so the imputer fills the training median downstream; the low_confidence flag
+    # and imputation policy stay here in the caller, not in the shared builder.
+    feature_row = build_feature_row(
+        red_history,
+        blue_history,
+        red_height_cm=red_height_cm,
+        blue_height_cm=blue_height_cm,
+        red_reach_cm=red_reach_cm,
+        blue_reach_cm=blue_reach_cm,
+        red_age=red_age,
+        blue_age=blue_age,
+        scheduled_rounds=scheduled_rounds,
+    )
 
     context = {
         "matchupDate": matchup_date.isoformat(),

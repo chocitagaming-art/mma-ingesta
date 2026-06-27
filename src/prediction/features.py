@@ -19,6 +19,11 @@ OUTPUT_CSV_PATH = Path("training_dataset.csv")
 OUTPUT_TABLE_NAME = "fight_prediction_training_data"
 SPOT_CHECK_COUNT = 3
 
+# Used for hypothetical matchups that have no real bout on record. Real bouts
+# carry their own scheduled_rounds (3 for prelims/main-card, 5 for main events
+# and title fights), which we read straight from the fights row.
+DEFAULT_SCHEDULED_ROUNDS = 3
+
 
 @dataclass(frozen=True)
 class FighterHistorySummary:
@@ -485,98 +490,27 @@ def build_training_dataset(fights_df: pd.DataFrame, rankings_df: pd.DataFrame) -
         red_age = compute_age(row["red_birth_date"], row["event_date"])
         blue_age = compute_age(row["blue_birth_date"], row["event_date"])
 
-        base_row = {
-            "fight_id": row["fight_id"],
-            "event_date": row["event_date"],
-            "height_cm_diff": diff(row["red_height_cm"], row["blue_height_cm"]),
-            "reach_cm_diff": diff(row["red_reach_cm"], row["blue_reach_cm"]),
-            "age_diff": diff(red_age, blue_age),
-            "sig_strikes_landed_per_fight_diff": diff(
-                red_history.sig_strikes_landed_per_fight,
-                blue_history.sig_strikes_landed_per_fight,
-            ),
-            "sig_strike_accuracy_diff": diff(
-                red_history.sig_strike_accuracy,
-                blue_history.sig_strike_accuracy,
-            ),
-            "knockdowns_per_fight_diff": diff(
-                red_history.knockdowns_per_fight,
-                blue_history.knockdowns_per_fight,
-            ),
-            "takedowns_landed_per_fight_diff": diff(
-                red_history.takedowns_landed_per_fight,
-                blue_history.takedowns_landed_per_fight,
-            ),
-            "takedown_accuracy_diff": diff(
-                red_history.takedown_accuracy,
-                blue_history.takedown_accuracy,
-            ),
-            "submission_attempts_per_fight_diff": diff(
-                red_history.submission_attempts_per_fight,
-                blue_history.submission_attempts_per_fight,
-            ),
-            "control_time_seconds_per_fight_diff": diff(
-                red_history.control_time_seconds_per_fight,
-                blue_history.control_time_seconds_per_fight,
-            ),
-            "win_streak_diff": diff(red_history.win_streak, blue_history.win_streak),
-            "wins_last_5_diff": diff(red_history.wins_last_5, blue_history.wins_last_5),
-            "total_prior_fights_diff": diff(
-                red_history.total_prior_fights,
-                blue_history.total_prior_fights,
-            ),
-            "total_rounds_fought_diff": diff(
-                red_history.total_rounds_fought,
-                blue_history.total_rounds_fought,
-            ),
-            "pct_wins_by_ko_diff": diff(
-                red_history.pct_wins_by_ko,
-                blue_history.pct_wins_by_ko,
-            ),
-            "pct_wins_by_submission_diff": diff(
-                red_history.pct_wins_by_submission,
-                blue_history.pct_wins_by_submission,
-            ),
-            "pct_wins_by_decision_diff": diff(
-                red_history.pct_wins_by_decision,
-                blue_history.pct_wins_by_decision,
-            ),
-            "scheduled_rounds": row["scheduled_rounds"],
-            "days_since_last_fight_diff": diff(
-                red_history.days_since_last_fight,
-                blue_history.days_since_last_fight,
-            ),
-            "ranking_position_diff": diff(
-                red_history.ranking_position,
-                blue_history.ranking_position,
-            ),
-            "sig_strikes_absorbed_per_fight_diff": diff(
-                red_history.sig_strikes_absorbed_per_fight,
-                blue_history.sig_strikes_absorbed_per_fight,
-            ),
-            "sig_strike_defense_diff": diff(
-                red_history.sig_strike_defense,
-                blue_history.sig_strike_defense,
-            ),
-            "takedowns_absorbed_per_fight_diff": diff(
-                red_history.takedowns_absorbed_per_fight,
-                blue_history.takedowns_absorbed_per_fight,
-            ),
-            "takedown_defense_diff": diff(
-                red_history.takedown_defense,
-                blue_history.takedown_defense,
-            ),
-            "avg_opponent_prior_win_rate_diff": diff(
-                red_history.avg_opponent_prior_win_rate,
-                blue_history.avg_opponent_prior_win_rate,
-            ),
-        }
+        # scheduled_rounds passed RAW (the fights cell) so training keeps its
+        # existing values; serving coerces in its own caller before the builder.
+        feature_row = build_feature_row(
+            red_history,
+            blue_history,
+            red_height_cm=row["red_height_cm"],
+            blue_height_cm=row["blue_height_cm"],
+            red_reach_cm=row["red_reach_cm"],
+            blue_reach_cm=row["blue_reach_cm"],
+            red_age=red_age,
+            blue_age=blue_age,
+            scheduled_rounds=row["scheduled_rounds"],
+        )
         # Raw red-blue diffs (NOT oriented by target). Orienting by target
         # canonicalizes every row to winner-loser diffs, which makes the label
         # unlearnable and mismatches inference (api.py uses raw red-blue diffs).
         dataset_rows.append(
             {
-                **base_row,
+                "fight_id": row["fight_id"],
+                "event_date": row["event_date"],
+                **feature_row,
                 "target": target,
             }
         )
@@ -628,6 +562,72 @@ def diff(red_value: Any, blue_value: Any) -> float | None:
     if pd.isna(red_value) or pd.isna(blue_value):
         return None
     return float(red_value) - float(blue_value)
+
+
+def _coerce_scheduled_rounds(value: Any) -> int:
+    """Normalise a fights.scheduled_rounds cell to a positive int.
+
+    Falls back to the default when the value is missing/NaN/non-positive so a
+    dirty row never poisons the feature."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return DEFAULT_SCHEDULED_ROUNDS
+    try:
+        rounds = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_SCHEDULED_ROUNDS
+    return rounds if rounds > 0 else DEFAULT_SCHEDULED_ROUNDS
+
+
+def build_feature_row(
+    red_history: FighterHistorySummary | None,
+    blue_history: FighterHistorySummary | None,
+    *,
+    red_height_cm: float | None,
+    blue_height_cm: float | None,
+    red_reach_cm: float | None,
+    blue_reach_cm: float | None,
+    red_age: float | None,
+    blue_age: float | None,
+    scheduled_rounds: Any,
+) -> dict[str, float | int | None]:
+    """Single source of truth for a model feature row (keys == FEATURE_COLUMNS,
+    in order). Every entry is a red-minus-blue diff except scheduled_rounds, which
+    is stored RAW exactly as passed in. hist() yields None for a missing history
+    side so the corresponding diff is None: the builder imputes nothing, leaving
+    each caller free to keep its own imputation/exclusion policy. Shared by the
+    training pipeline (build_training_dataset) and serving (api._build_feature_row)
+    so the two can never drift."""
+
+    def hist(history: FighterHistorySummary | None, attribute: str) -> Any:
+        return getattr(history, attribute) if history is not None else None
+
+    return {
+        "height_cm_diff": diff(red_height_cm, blue_height_cm),
+        "reach_cm_diff": diff(red_reach_cm, blue_reach_cm),
+        "age_diff": diff(red_age, blue_age),
+        "sig_strikes_landed_per_fight_diff": diff(hist(red_history, "sig_strikes_landed_per_fight"), hist(blue_history, "sig_strikes_landed_per_fight")),
+        "sig_strike_accuracy_diff": diff(hist(red_history, "sig_strike_accuracy"), hist(blue_history, "sig_strike_accuracy")),
+        "knockdowns_per_fight_diff": diff(hist(red_history, "knockdowns_per_fight"), hist(blue_history, "knockdowns_per_fight")),
+        "takedowns_landed_per_fight_diff": diff(hist(red_history, "takedowns_landed_per_fight"), hist(blue_history, "takedowns_landed_per_fight")),
+        "takedown_accuracy_diff": diff(hist(red_history, "takedown_accuracy"), hist(blue_history, "takedown_accuracy")),
+        "submission_attempts_per_fight_diff": diff(hist(red_history, "submission_attempts_per_fight"), hist(blue_history, "submission_attempts_per_fight")),
+        "control_time_seconds_per_fight_diff": diff(hist(red_history, "control_time_seconds_per_fight"), hist(blue_history, "control_time_seconds_per_fight")),
+        "win_streak_diff": diff(hist(red_history, "win_streak"), hist(blue_history, "win_streak")),
+        "wins_last_5_diff": diff(hist(red_history, "wins_last_5"), hist(blue_history, "wins_last_5")),
+        "total_prior_fights_diff": diff(hist(red_history, "total_prior_fights"), hist(blue_history, "total_prior_fights")),
+        "total_rounds_fought_diff": diff(hist(red_history, "total_rounds_fought"), hist(blue_history, "total_rounds_fought")),
+        "pct_wins_by_ko_diff": diff(hist(red_history, "pct_wins_by_ko"), hist(blue_history, "pct_wins_by_ko")),
+        "pct_wins_by_submission_diff": diff(hist(red_history, "pct_wins_by_submission"), hist(blue_history, "pct_wins_by_submission")),
+        "pct_wins_by_decision_diff": diff(hist(red_history, "pct_wins_by_decision"), hist(blue_history, "pct_wins_by_decision")),
+        "scheduled_rounds": scheduled_rounds,
+        "days_since_last_fight_diff": diff(hist(red_history, "days_since_last_fight"), hist(blue_history, "days_since_last_fight")),
+        "ranking_position_diff": diff(hist(red_history, "ranking_position"), hist(blue_history, "ranking_position")),
+        "sig_strikes_absorbed_per_fight_diff": diff(hist(red_history, "sig_strikes_absorbed_per_fight"), hist(blue_history, "sig_strikes_absorbed_per_fight")),
+        "sig_strike_defense_diff": diff(hist(red_history, "sig_strike_defense"), hist(blue_history, "sig_strike_defense")),
+        "takedowns_absorbed_per_fight_diff": diff(hist(red_history, "takedowns_absorbed_per_fight"), hist(blue_history, "takedowns_absorbed_per_fight")),
+        "takedown_defense_diff": diff(hist(red_history, "takedown_defense"), hist(blue_history, "takedown_defense")),
+        "avg_opponent_prior_win_rate_diff": diff(hist(red_history, "avg_opponent_prior_win_rate"), hist(blue_history, "avg_opponent_prior_win_rate")),
+    }
 
 
 def create_output_table(database_url: str, dataset: pd.DataFrame) -> None:
