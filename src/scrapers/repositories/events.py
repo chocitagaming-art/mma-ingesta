@@ -53,6 +53,11 @@ def upsert_event_meta(connection: PgConnection, event: EventMetaRecord) -> int:
                 ),
             )
             return event_id
+        # The (source, source_id) lookup above missed, so this is a new ufc.com card.
+        # It can still collide with an existing row on the events_name_date_promotion_key
+        # natural key (migration 007) — e.g. the ufcstats historical twin once the date
+        # arrives. ON CONFLICT DO UPDATE merges the upcoming metadata onto that row
+        # instead of raising IntegrityError or inserting a duplicate.
         cursor.execute(
             """
             INSERT INTO events (
@@ -60,6 +65,12 @@ def upsert_event_meta(connection: PgConnection, event: EventMetaRecord) -> int:
                 image_url, tagline, broadcast, ticket_url, headliner, source, source_id
             )
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (name, event_date, promotion_id) DO UPDATE SET
+                start_time = EXCLUDED.start_time, location = EXCLUDED.location,
+                status = EXCLUDED.status, image_url = EXCLUDED.image_url,
+                tagline = EXCLUDED.tagline, broadcast = EXCLUDED.broadcast,
+                ticket_url = EXCLUDED.ticket_url, headliner = EXCLUDED.headliner,
+                source = EXCLUDED.source, source_id = EXCLUDED.source_id
             RETURNING id
             """,
             (
@@ -153,11 +164,14 @@ def find_existing_event_id(connection: PgConnection, event: EventRecord) -> int 
 
 def upsert_event(connection: PgConnection, event: EventRecord) -> int:
     with connection.cursor() as cursor:
+        # Explicit target so the dedup fires against events_name_date_promotion_key
+        # (migration 007). NULL natural-key columns bypass the conflict (a UNIQUE
+        # treats NULLs as distinct), so those rows are always inserted as new.
         cursor.execute(
             """
             INSERT INTO events (name, event_date, location, promotion_id)
             VALUES (%s, %s, %s, %s)
-            ON CONFLICT DO NOTHING
+            ON CONFLICT (name, event_date, promotion_id) DO NOTHING
             RETURNING id
             """,
             (event.name, event.event_date, event.location, event.promotion_id),
@@ -165,15 +179,26 @@ def upsert_event(connection: PgConnection, event: EventRecord) -> int:
         row = cursor.fetchone()
         if row:
             return int(row[0])
+        # DO NOTHING fired: a row already holds this natural key. Look it up by the
+        # SAME columns as the conflict target (NOT location, which is not part of the
+        # key and can drift across sources) so the conflicting row is always found.
         cursor.execute(
             """
             SELECT id
             FROM events
             WHERE name = %s
               AND event_date IS NOT DISTINCT FROM %s
-              AND location IS NOT DISTINCT FROM %s
-              AND promotion_id = %s
+              AND promotion_id IS NOT DISTINCT FROM %s
+            ORDER BY id
+            LIMIT 1
             """,
-            (event.name, event.event_date, event.location, event.promotion_id),
+            (event.name, event.event_date, event.promotion_id),
         )
-        return int(cursor.fetchone()[0])
+        row = cursor.fetchone()
+        if row is None:
+            raise RuntimeError(
+                "upsert_event: ON CONFLICT fired but no row matched the natural key "
+                f"(name={event.name!r}, event_date={event.event_date!r}, "
+                f"promotion_id={event.promotion_id!r})"
+            )
+        return int(row[0])
