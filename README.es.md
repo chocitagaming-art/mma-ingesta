@@ -13,6 +13,10 @@ La mitad de datos y machine learning de [MMA STATUS](https://mma-app-ruby.vercel
 ![Tests](https://img.shields.io/badge/tests-113%20passing-22c55e?style=flat-square)
 ![Licencia](https://img.shields.io/badge/licencia-MIT-blue?style=flat-square)
 
+[![Estrellas](https://img.shields.io/github/stars/chocitagaming-art/mma-ingesta?style=flat-square&color=ef4444)](https://github.com/chocitagaming-art/mma-ingesta/stargazers)
+![Forks](https://img.shields.io/github/forks/chocitagaming-art/mma-ingesta?style=flat-square&color=ef4444)
+![Último commit](https://img.shields.io/github/last-commit/chocitagaming-art/mma-ingesta?style=flat-square&color=ef4444)
+
 [English](./README.md) · Español
 
 </div>
