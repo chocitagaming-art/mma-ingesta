@@ -111,11 +111,15 @@ def repair_fight_winners() -> Counter:
                     counts["repair_skipped_mismatch"] += 1
                     connection.rollback()
                     continue
-                winner_id = None
-                if winner_corner == "red":
-                    winner_id = stored_red_id
-                elif winner_corner == "blue":
-                    winner_id = stored_blue_id
+                if winner_corner is None:
+                    # Statuses were empty / non-parseable / a draw: there is no
+                    # confirmed winner. Calling update_fight_winner with None here
+                    # would NULL an already-stored victory, so skip the update.
+                    # (Any corner swap above is legitimate and is kept.)
+                    counts["repair_skipped_no_winner"] += 1
+                    connection.commit()
+                    continue
+                winner_id = stored_red_id if winner_corner == "red" else stored_blue_id
                 update_fight_winner(connection, fight_id, winner_id)
                 connection.commit()
                 counts["repair_updated"] += 1

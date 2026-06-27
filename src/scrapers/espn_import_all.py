@@ -5,6 +5,7 @@ import json
 import logging
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from difflib import get_close_matches
@@ -133,27 +134,65 @@ def _get_json(session: requests.Session, url: str, params: dict[str, Any] | None
     return response.json()
 
 
-def _build_exact_name_index(fighters: list[FighterMatchRecord]) -> dict[str, FighterMatchRecord]:
-    return {fighter.name.casefold(): fighter for fighter in fighters if fighter.name}
+def _add_to_index(
+    index: dict[str, FighterMatchRecord | None],
+    key: str,
+    fighter: FighterMatchRecord,
+) -> None:
+    if not key:
+        return
+    if key in index:
+        existing = index[key]
+        if existing is None:
+            # Key already burned as ambiguous: do NOT resurrect it, or the
+            # homonym would resolve to this writer.
+            return
+        if existing.id != fighter.id:
+            index[key] = None  # burn the homonym key
+        return
+    index[key] = fighter
 
 
-def _build_normalized_name_index(fighters: list[FighterMatchRecord]) -> dict[str, FighterMatchRecord]:
-    return {_normalize_name(fighter.name): fighter for fighter in fighters if fighter.name}
+def _build_name_index(
+    fighters: list[FighterMatchRecord],
+    key_func: Callable[[str], str],
+) -> dict[str, FighterMatchRecord | None]:
+    """Index fighters by ``key_func(name)``, neutralising homonym collisions.
+
+    Two distinct fighters sharing a key (homonyms) would silently overwrite each
+    other in a plain dict, welding ESPN data onto whichever was processed last
+    (issue #6). The colliding key is tombstoned with ``None`` so it falls through
+    to "no match". Mirrors the policy in src/scrapers/espn.py.
+    """
+    index: dict[str, FighterMatchRecord | None] = {}
+    for fighter in fighters:
+        if not fighter.name:
+            continue
+        _add_to_index(index, key_func(fighter.name), fighter)
+    return index
+
+
+def _build_exact_name_index(fighters: list[FighterMatchRecord]) -> dict[str, FighterMatchRecord | None]:
+    return _build_name_index(fighters, str.casefold)
+
+
+def _build_normalized_name_index(fighters: list[FighterMatchRecord]) -> dict[str, FighterMatchRecord | None]:
+    return _build_name_index(fighters, _normalize_name)
 
 
 def _index_fighter(
     fighter: FighterMatchRecord,
-    exact_name_index: dict[str, FighterMatchRecord],
-    normalized_name_index: dict[str, FighterMatchRecord],
+    exact_name_index: dict[str, FighterMatchRecord | None],
+    normalized_name_index: dict[str, FighterMatchRecord | None],
 ) -> None:
-    exact_name_index[fighter.name.casefold()] = fighter
-    normalized_name_index[_normalize_name(fighter.name)] = fighter
+    _add_to_index(exact_name_index, fighter.name.casefold(), fighter)
+    _add_to_index(normalized_name_index, _normalize_name(fighter.name), fighter)
 
 
 def _match_fighter(
     full_name: str,
-    exact_name_index: dict[str, FighterMatchRecord],
-    normalized_name_index: dict[str, FighterMatchRecord],
+    exact_name_index: dict[str, FighterMatchRecord | None],
+    normalized_name_index: dict[str, FighterMatchRecord | None],
 ) -> FighterMatchRecord | None:
     exact_match = exact_name_index.get(full_name.casefold())
     if exact_match is not None:
@@ -162,7 +201,8 @@ def _match_fighter(
     normalized_match = normalized_name_index.get(normalized_name)
     if normalized_match is not None:
         return normalized_match
-    candidates = get_close_matches(normalized_name, normalized_name_index.keys(), n=1, cutoff=FUZZY_MATCH_THRESHOLD)
+    live_keys = [key for key, value in normalized_name_index.items() if value is not None]
+    candidates = get_close_matches(normalized_name, live_keys, n=1, cutoff=FUZZY_MATCH_THRESHOLD)
     if not candidates:
         return None
     candidate_name = candidates[0]

@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from difflib import get_close_matches
@@ -323,18 +324,45 @@ def _extract_fighter_names_from_text(text: str, fighters: list[FighterMatchRecor
     return matches
 
 
-def _build_exact_name_index(fighters: list[FighterMatchRecord]) -> dict[str, FighterMatchRecord]:
-    return {fighter.name.casefold(): fighter for fighter in fighters if fighter.name}
+def _build_name_index(
+    fighters: list[FighterMatchRecord],
+    key_func: Callable[[str], str],
+) -> dict[str, FighterMatchRecord | None]:
+    """Index fighters by ``key_func(name)``, tombstoning homonym collisions.
+
+    A plain dict keyed by name silently lets one of two distinct fighters who
+    share a name overwrite the other (issue #6), so an article gets tagged with
+    the wrong fighter_id. Ambiguous keys are stored as ``None`` and fall through
+    to "no match". Mirrors the policy in src/scrapers/espn.py.
+    """
+    index: dict[str, FighterMatchRecord | None] = {}
+    for fighter in fighters:
+        if not fighter.name:
+            continue
+        key = key_func(fighter.name)
+        if not key:
+            continue
+        if key in index:
+            existing = index[key]
+            if existing is not None and existing.id != fighter.id:
+                index[key] = None  # burn the homonym key
+            continue
+        index[key] = fighter
+    return index
 
 
-def _build_normalized_name_index(fighters: list[FighterMatchRecord]) -> dict[str, FighterMatchRecord]:
-    return {_normalize_name(fighter.name): fighter for fighter in fighters if fighter.name}
+def _build_exact_name_index(fighters: list[FighterMatchRecord]) -> dict[str, FighterMatchRecord | None]:
+    return _build_name_index(fighters, str.casefold)
+
+
+def _build_normalized_name_index(fighters: list[FighterMatchRecord]) -> dict[str, FighterMatchRecord | None]:
+    return _build_name_index(fighters, _normalize_name)
 
 
 def _match_first_fighter_id(
     fighter_names: list[str],
-    exact_name_index: dict[str, FighterMatchRecord],
-    normalized_name_index: dict[str, FighterMatchRecord],
+    exact_name_index: dict[str, FighterMatchRecord | None],
+    normalized_name_index: dict[str, FighterMatchRecord | None],
 ) -> int | None:
     for fighter_name in fighter_names:
         matched = _match_fighter(fighter_name, exact_name_index, normalized_name_index)
@@ -345,8 +373,8 @@ def _match_first_fighter_id(
 
 def _match_fighter(
     full_name: str,
-    exact_name_index: dict[str, FighterMatchRecord],
-    normalized_name_index: dict[str, FighterMatchRecord],
+    exact_name_index: dict[str, FighterMatchRecord | None],
+    normalized_name_index: dict[str, FighterMatchRecord | None],
 ) -> FighterMatchRecord | None:
     exact_match = exact_name_index.get(full_name.casefold())
     if exact_match is not None:
@@ -355,7 +383,8 @@ def _match_fighter(
     normalized_match = normalized_name_index.get(normalized_name)
     if normalized_match is not None:
         return normalized_match
-    candidates = get_close_matches(normalized_name, normalized_name_index.keys(), n=1, cutoff=FUZZY_MATCH_THRESHOLD)
+    live_keys = [key for key, value in normalized_name_index.items() if value is not None]
+    candidates = get_close_matches(normalized_name, live_keys, n=1, cutoff=FUZZY_MATCH_THRESHOLD)
     if not candidates:
         return None
     candidate_name = candidates[0]
