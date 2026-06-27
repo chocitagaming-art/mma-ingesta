@@ -9,3 +9,6 @@ build/
 
 # Scrape cache (reproducible artifact from recover_winners_eventpage.py)
 winners_scraped.json
+
+# Local script output dumps (regenerable, not source)
+verify_headshots_output.json
