@@ -1,0 +1,12 @@
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+
+[tool.pytest.ini_options]
+# Make `from src... import` resolve regardless of how pytest is invoked
+# (`pytest` vs `python -m pytest`), instead of relying on the cwd being on sys.path.
+pythonpath = ["."]

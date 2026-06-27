@@ -1,0 +1,7 @@
+# Dev / CI tooling only. Runtime deps live in requirements*.txt; these are the
+# extras needed to run the test suite and the linter.
+pytest==9.1.1
+ruff==0.14.0
+# Required by Starlette/FastAPI TestClient (prediction-service tests); declared
+# explicitly so CI doesn't rely on it arriving transitively via anthropic.
+httpx==0.28.1

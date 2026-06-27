@@ -1,0 +1,41 @@
+name: CI
+
+# Runs the test suite on every push / PR to main. No secrets: the tests mock the
+# database and all network calls (see tests/conftest.py), so nothing here touches
+# Neon or the live scrape targets.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-service.txt
+            requirements-dev.txt
+      - name: Install dependencies
+        # requirements.txt covers the scraper + ML stack; requirements-service.txt
+        # adds fastapi/joblib needed by the prediction-service tests; -dev adds the
+        # test runner + linter. `from src... import` resolves via pythonpath=["."]
+        # in pyproject.toml, so the package itself doesn't need to be installed.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-service.txt -r requirements-dev.txt
+      - name: Lint (non-blocking)
+        run: ruff check src/ || true
+      - name: Run tests
+        run: python -m pytest tests/ -q
