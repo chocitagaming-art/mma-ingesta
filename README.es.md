@@ -126,10 +126,28 @@ src/
 tests/           # suite de pytest
 ```
 
+## Roadmap
+
+Hecho hasta ahora:
+
+- [x] Scrapers de UFC y ESPN, más cuotas, noticias y vídeos
+- [x] Pipeline de features con una única fuente de verdad compartida por entrenamiento y servicio
+- [x] Modelo XGBoost calibrado con baselines honestos y manejo de la baja confianza
+- [x] Microservicio FastAPI con atribución de features con signo
+- [x] Refresco programado y CI en GitHub Actions
+- [x] `features.py` partido en un paquete `features/`
+
+Pendiente:
+
+- [ ] Desplegar el servicio de predicción (Render o Railway) para que las predicciones en producción salgan en vivo
+- [ ] Backfill de rankings históricos y de bout order para features más fuertes
+- [ ] Un rol de solo lectura en la base de datos para la web
+- [ ] Anclar las señales del cara a cara a "hoy" para peleadores que ya se enfrentaron
+
 ## El otro repo
 
 [**mma-app**](https://github.com/chocitagaming-art/mma-app) es la web de Next.js que convierte estos datos en un producto vivo. Las capturas y la lista completa de funciones están allí.
 
 ## Licencia
 
-MIT.
+MIT. Ver [LICENSE](./LICENSE). Es un proyecto personal, pero los issues y pull requests son bienvenidos.

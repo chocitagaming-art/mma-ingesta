@@ -126,10 +126,28 @@ src/
 tests/           # pytest suite
 ```
 
+## Roadmap
+
+Done so far:
+
+- [x] Scrapers for UFC and ESPN, plus odds, news, and videos
+- [x] Feature pipeline with a single source of truth shared by training and serving
+- [x] Calibrated XGBoost model with honest baselines and low confidence handling
+- [x] FastAPI prediction service with signed feature attribution
+- [x] Scheduled refresh and CI on GitHub Actions
+- [x] `features.py` split into a small `features/` package
+
+Planned:
+
+- [ ] Deploy the prediction service (Render or Railway) so production predictions go live
+- [ ] Backfill historical rankings and bout order for stronger features
+- [ ] A read-only database role for the web app
+- [ ] Anchor head to head signals to "today" for fighters who already met
+
 ## The other repo
 
 [**mma-app**](https://github.com/chocitagaming-art/mma-app) is the Next.js site that turns this data into a live product. The screenshots and the full feature list are over there.
 
 ## License
 
-MIT.
+MIT. See [LICENSE](./LICENSE). This is a personal project, but issues and pull requests are welcome.
