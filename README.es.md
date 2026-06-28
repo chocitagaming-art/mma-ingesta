@@ -10,7 +10,7 @@ La mitad de datos y machine learning de [MMA STATUS](https://mma-app-ruby.vercel
 ![XGBoost](https://img.shields.io/badge/XGBoost-modelo-ff6600?style=flat-square)
 ![FastAPI](https://img.shields.io/badge/FastAPI-servicio-009688?style=flat-square&logo=fastapi)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Neon-4169e1?style=flat-square&logo=postgresql)
-![Tests](https://img.shields.io/badge/tests-113%20passing-22c55e?style=flat-square)
+[![CI](https://github.com/chocitagaming-art/mma-ingesta/actions/workflows/ci.yml/badge.svg)](https://github.com/chocitagaming-art/mma-ingesta/actions/workflows/ci.yml)
 ![Licencia](https://img.shields.io/badge/licencia-MIT-blue?style=flat-square)
 
 [![Estrellas](https://img.shields.io/github/stars/chocitagaming-art/mma-ingesta?style=flat-square&color=ef4444)](https://github.com/chocitagaming-art/mma-ingesta/stargazers)
@@ -33,8 +33,9 @@ La web ([mma-app](https://github.com/chocitagaming-art/mma-app)) lee la misma ba
 
 ## El modelo
 
-- Entrenado **solo con estadísticas** de los peleadores: récords, físico, golpeo, grappling, forma y calidad del rival. Las cuotas nunca son una feature. Cada feature es una diferencia rojo menos azul, así que el orden de las esquinas no se filtra.
-- La precisión ronda el **63%** (0.6289), con un Brier de unos 0.226. El modelo se calibra fuera de muestra y se simetriza, así que el número que ves en producción es el honesto, no el optimista del entrenamiento.
+- Entrenado solo con estadísticas de los peleadores: récords, físico, golpeo, grappling, forma y calidad del rival, mapeadas en 20 features. Las cuotas nunca son variable de entrada del modelo. Cada feature es una diferencia rojo menos azul, así que el orden de las esquinas no se filtra.
+- La precisión ronda el 63% (0.6289), con un Brier de 0.2266. La métrica reportada es la calibrada fuera de muestra, no la optimista del entrenamiento, y el modelo se simetriza para puntuar las dos esquinas igual.
+- Está construido sobre un dataset de unos 2.838 luchadores y 8.750 peleas.
 - Se compara contra un baseline de clase mayoritaria, así que "¿de verdad está aprendiendo algo?" tiene respuesta.
 - Los historiales pobres (debutantes) se marcan como baja confianza en vez de regalarles un favorito falso.
 - El mapeo de features tiene una única fuente de verdad (`build_feature_row`), compartida por entrenamiento y servicio, así que no pueden divergir. Los tests golden y de paridad lo fijan.
@@ -48,7 +49,30 @@ Una app FastAPI en `src/prediction/service.py`. Carga el modelo y un dataframe c
 - `POST /predict` con dos ids de luchador, devolviendo probabilidades, señales por esquina y atribución de features con signo.
 - `GET /health` para una comprobación de salud real (modelo cargado más un ping a la base de datos).
 
-Está endurecido para producción (auth, pool de conexiones, degradado con calma) pero no está desplegado en este montaje. Corre en local en desarrollo, y la web maneja su ausencia sin dramas.
+Corre con autenticación por API key y un pool de conexiones compartido, y la web lo llama para servir las predicciones.
+
+Ejemplo de petición:
+
+```bash
+curl -X POST http://localhost:8000/predict \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $PREDICTION_SERVICE_API_KEY" \
+  -d '{"red": 1234, "blue": 5678}'
+```
+
+Respuesta (recortada):
+
+```json
+{
+  "redProbability": 0.63,
+  "blueProbability": 0.37,
+  "lowConfidence": false,
+  "topFeatures": [
+    { "name": "striking_accuracy_diff", "direction": "red" }
+  ],
+  "modelTrainedAt": "2026-06-01"
+}
+```
 
 ## Fuentes de datos
 
@@ -115,7 +139,7 @@ GitHub Actions mantiene los datos al día con un horario, en `.github/workflows`
 ## Tests
 
 ```bash
-python -m pytest tests/ -q   # 113 tests
+python -m pytest tests/ -q
 ```
 
 La suite incluye tests golden y de paridad que bloquean las features del modelo, además de simetría de esquina y comprobaciones de fuga de datos, así que un refactor o un reentreno no pueden cambiar las entradas en silencio.
@@ -135,24 +159,6 @@ src/
     model.joblib # el modelo entrenado
 tests/           # suite de pytest
 ```
-
-## Roadmap
-
-Hecho hasta ahora:
-
-- [x] Scrapers de UFC y ESPN, más cuotas, noticias y vídeos
-- [x] Pipeline de features con una única fuente de verdad compartida por entrenamiento y servicio
-- [x] Modelo XGBoost calibrado con baselines honestos y manejo de la baja confianza
-- [x] Microservicio FastAPI con atribución de features con signo
-- [x] Refresco programado y CI en GitHub Actions
-- [x] `features.py` partido en un paquete `features/`
-
-Pendiente:
-
-- [ ] Desplegar el servicio de predicción (Render o Railway) para que las predicciones en producción salgan en vivo
-- [ ] Backfill de rankings históricos y de bout order para features más fuertes
-- [ ] Un rol de solo lectura en la base de datos para la web
-- [ ] Anclar las señales del cara a cara a "hoy" para peleadores que ya se enfrentaron
 
 ## El otro repo
 

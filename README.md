@@ -10,7 +10,7 @@ The data and machine learning half of [MMA STATUS](https://mma-app-ruby.vercel.a
 ![XGBoost](https://img.shields.io/badge/XGBoost-model-ff6600?style=flat-square)
 ![FastAPI](https://img.shields.io/badge/FastAPI-service-009688?style=flat-square&logo=fastapi)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Neon-4169e1?style=flat-square&logo=postgresql)
-![Tests](https://img.shields.io/badge/tests-113%20passing-22c55e?style=flat-square)
+[![CI](https://github.com/chocitagaming-art/mma-ingesta/actions/workflows/ci.yml/badge.svg)](https://github.com/chocitagaming-art/mma-ingesta/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
 [![Stars](https://img.shields.io/github/stars/chocitagaming-art/mma-ingesta?style=flat-square&color=ef4444)](https://github.com/chocitagaming-art/mma-ingesta/stargazers)
@@ -33,8 +33,9 @@ The web app ([mma-app](https://github.com/chocitagaming-art/mma-app)) reads the 
 
 ## The model
 
-- Trained **only on fighter stats**: records, physical attributes, striking, grappling, form, and quality of opposition. Odds are never a feature. Every feature is a red minus blue difference, so corner order does not leak.
-- Accuracy is about **63%** (0.6289), with a Brier score around 0.226. The model is calibrated out of sample and symmetrized, so the number you see in production is the honest one, not the optimistic training number.
+- Trained on fighter stats only: records, physical attributes, striking, grappling, form, and quality of opposition, mapped into 20 features. Odds are never an input to the model. Every feature is a red minus blue difference, so corner order does not leak.
+- Accuracy is about 63% (0.6289), with a Brier score of 0.2266. The reported metric is the out-of-sample calibrated one, not the optimistic training number, and the model is symmetrized so both corners are scored the same way.
+- It is built on a dataset of roughly 2,838 fighters and 8,750 fights.
 - It is benchmarked against a majority class baseline, so "is it actually learning anything" has an answer.
 - Thin histories (debutants) are flagged as low confidence instead of being given a fake favorite.
 - The feature mapping has one source of truth (`build_feature_row`), shared by training and serving, so the two cannot drift apart. Golden and parity tests pin it.
@@ -48,7 +49,30 @@ A FastAPI app in `src/prediction/service.py`. It loads the model and a fighter h
 - `POST /predict` with two fighter ids, returning probabilities, per corner signals, and signed feature attribution.
 - `GET /health` for a real readiness check (model loaded plus a database ping).
 
-It is hardened for production (auth, connection pooling, graceful degradation) but is not deployed in this setup. It runs locally during development, and the web app handles its absence quietly.
+It runs with API key auth and a shared connection pool, and the web app calls it to serve predictions.
+
+Example request:
+
+```bash
+curl -X POST http://localhost:8000/predict \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $PREDICTION_SERVICE_API_KEY" \
+  -d '{"red": 1234, "blue": 5678}'
+```
+
+Response (trimmed):
+
+```json
+{
+  "redProbability": 0.63,
+  "blueProbability": 0.37,
+  "lowConfidence": false,
+  "topFeatures": [
+    { "name": "striking_accuracy_diff", "direction": "red" }
+  ],
+  "modelTrainedAt": "2026-06-01"
+}
+```
 
 ## Data sources
 
@@ -115,7 +139,7 @@ GitHub Actions keeps the data current on a schedule, in `.github/workflows`:
 ## Tests
 
 ```bash
-python -m pytest tests/ -q   # 113 tests
+python -m pytest tests/ -q
 ```
 
 The suite includes golden and parity tests that lock the model features, plus corner symmetry and leak checks, so a refactor or a retrain cannot silently change the inputs.
@@ -135,24 +159,6 @@ src/
     model.joblib # the trained model
 tests/           # pytest suite
 ```
-
-## Roadmap
-
-Done so far:
-
-- [x] Scrapers for UFC and ESPN, plus odds, news, and videos
-- [x] Feature pipeline with a single source of truth shared by training and serving
-- [x] Calibrated XGBoost model with honest baselines and low confidence handling
-- [x] FastAPI prediction service with signed feature attribution
-- [x] Scheduled refresh and CI on GitHub Actions
-- [x] `features.py` split into a small `features/` package
-
-Planned:
-
-- [ ] Deploy the prediction service (Render or Railway) so production predictions go live
-- [ ] Backfill historical rankings and bout order for stronger features
-- [ ] A read-only database role for the web app
-- [ ] Anchor head to head signals to "today" for fighters who already met
 
 ## The other repo
 
