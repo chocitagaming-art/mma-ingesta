@@ -38,11 +38,14 @@ CATEGORIES = {
     "transfer",
     "other",
 }
-# Spanish-language source (matches the Spanish UI). ESPN Deportes ships a clean
-# RSS with images; ufc.com/rss/news is English and image-less, so it's not used
-# for news — ufc.com is used elsewhere only for athlete photos.
+# Spanish-language sources (match the Spanish UI). ESPN Deportes ships a clean
+# RSS; since 2026-06-30 its CDN answers GitHub-runner IPs with an empty body
+# regardless of User-Agent, so Marca's MMA feed (reachable from runners) keeps
+# the pipeline alive. ufc.com/rss/news is English and image-less, so it's not
+# used for news — ufc.com is used elsewhere only for athlete photos.
 RSS_FEEDS = (
     ("ESPN Deportes", "https://espndeportes.espn.com/espn/rss/mma/news"),
+    ("Marca", "https://e00-marca.uecdn.es/rss/mma.xml"),
 )
 # ESPN blocks feedparser's default User-Agent ("feedparser/6.x") from datacenter
 # IPs (GitHub runners) with an empty/HTML body, which feedparser parses to
@@ -181,8 +184,14 @@ def fetch_feed_articles(max_articles: int) -> list[FeedArticle]:
     articles: list[FeedArticle] = []
     per_feed_limit = max(25, max_articles // len(RSS_FEEDS) + 5)
     for source, url in RSS_FEEDS:
-        response = requests.get(url, headers=_RSS_HEADERS, timeout=20)
-        response.raise_for_status()
+        try:
+            response = requests.get(url, headers=_RSS_HEADERS, timeout=20)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            # One blocked/down feed must not kill the others; the zero-articles
+            # guard below still fails the run if EVERY feed comes back empty.
+            LOGGER.warning("Feed fetch failed for %s: %s", source, exc)
+            continue
         parsed = feedparser.parse(response.content)
         if getattr(parsed, "bozo", False):
             LOGGER.warning("Feed parse issue for %s: %s", source, getattr(parsed, "bozo_exception", "unknown"))

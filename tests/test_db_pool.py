@@ -11,6 +11,18 @@ import pytest
 from src.scrapers import db
 from src.scrapers.config import get_settings
 
+# These are live-DB integration tests: without a DATABASE_URL (e.g. in CI,
+# which runs with no secrets) they must skip, not fail.
+try:
+    _DATABASE_URL = get_settings().database_url
+except RuntimeError:
+    _DATABASE_URL = None
+
+pytestmark = pytest.mark.skipif(
+    _DATABASE_URL is None,
+    reason="integration test: requires a live DATABASE_URL (.env); CI has no DB secrets",
+)
+
 
 @pytest.fixture(autouse=True)
 def _clean_pool():

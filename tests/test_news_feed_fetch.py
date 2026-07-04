@@ -85,11 +85,26 @@ def test_zero_articles_across_all_feeds_raises(monkeypatch, body):
         news.fetch_feed_articles(max_articles=10)
 
 
-def test_http_403_surfaces_as_visible_error(monkeypatch):
+def test_one_feed_down_does_not_kill_the_rest(monkeypatch):
+    # ESPN blocked with a 403 while Marca still answers: the run must survive
+    # on the healthy feed (per-feed tolerance + global zero-articles guard).
+    def fake_get(url, headers=None, timeout=None):
+        if "espn" in url:
+            return FakeResponse(403)
+        return FakeResponse(200, VALID_RSS)
+
+    monkeypatch.setattr(news.requests, "get", fake_get)
+
+    articles = news.fetch_feed_articles(max_articles=10)
+
+    assert len(articles) == 2
+
+
+def test_all_feeds_failing_raises(monkeypatch):
     monkeypatch.setattr(
         news.requests,
         "get",
         lambda url, headers=None, timeout=None: FakeResponse(403),
     )
-    with pytest.raises(requests.HTTPError):
+    with pytest.raises(RuntimeError, match="0 articles parsed from RSS feeds"):
         news.fetch_feed_articles(max_articles=10)
