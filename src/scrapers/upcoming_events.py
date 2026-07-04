@@ -379,6 +379,12 @@ def _complete_dropped_upcoming(connection, current_source_ids: set[str]) -> int:
     event (and its bouts), so any 2026+ event the user had seen vanished forever — the
     ufcstats re-importer never brings it back (its year<=2025 cutoff drops it). Bouts are
     preserved with NULL results; a separate results backfill can fill winner/method later.
+
+    IMPORTANT: dropping off the listing does NOT mean the event happened — ufc.com's
+    page 1 shows only ~8 cards, so with 9+ events announced the furthest one falls off
+    while still months away (event id=1085, Paris 2026-09-05, got flipped this way).
+    The UPDATE therefore guards on event_date < CURRENT_DATE and the returned count
+    sums cursor.rowcount (rows actually flipped), not len(stale_ids).
     """
     with connection.cursor() as cursor:
         cursor.execute(
@@ -387,9 +393,20 @@ def _complete_dropped_upcoming(connection, current_source_ids: set[str]) -> int:
         )
         rows = cursor.fetchall()
         stale_ids = [int(r[0]) for r in rows if str(r[1]) not in current_source_ids]
+        completed = 0
         for event_id in stale_ids:
-            cursor.execute("UPDATE events SET status = 'completed' WHERE id = %s", (event_id,))
-        return len(stale_ids)
+            cursor.execute(
+                "UPDATE events SET status = 'completed' "
+                "WHERE id = %s AND event_date IS NOT NULL AND event_date < CURRENT_DATE",
+                (event_id,),
+            )
+            if cursor.rowcount == 0:
+                # Dropped off the listing but not flipped (future or NULL date):
+                # expected for far-out events pushed to page 2; log it so a
+                # permanently stuck event (e.g. unparseable date) stays visible.
+                LOGGER.info("Stale event %s not completed (event_date in the future or NULL)", event_id)
+            completed += cursor.rowcount
+        return completed
 
 
 def scrape_upcoming_events(dry_run: bool = False) -> Counter:
