@@ -1,0 +1,44 @@
+name: Enrich full-body photos
+
+# Manual backfill (Phase 2 of the redesign): fills fighters.full_body_url,
+# leg_reach_cm and trains_at from ufc.com athlete pages. Manual only (no cron):
+# the pass walks ~1,468 confirmed athlete pages at a 0.4s delay (~10-15 min) and
+# every UPDATE is additive (COALESCE, only fills NULLs), so re-dispatching is
+# always safe and resumes whatever gap is left.
+# REQUIRES migration db/migrations/008_fighter_bio_extras.sql applied first.
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max fighters to process (empty = all)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry-run: resolve + report, no writes"
+        type: boolean
+        default: false
+
+concurrency:
+  group: enrich-fullbody
+  cancel-in-progress: false
+
+jobs:
+  enrich:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+      - run: pip install -r requirements-scrapers.txt
+      - name: Run full-body enrichment backfill
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python -m src.scrapers.enrich_fullbody $ARGS
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

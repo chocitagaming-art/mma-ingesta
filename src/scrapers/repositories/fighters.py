@@ -114,7 +114,12 @@ def update_fighter_enrichment(
     reach_cm: float | None = None,
     weight_grams: int | None = None,
     stance: str | None = None,
+    full_body_url: str | None = None,
+    leg_reach_cm: float | None = None,
+    trains_at: str | None = None,
 ) -> bool:
+    """Fill ONLY empty columns (COALESCE keeps existing data; a NULL argument can
+    never overwrite a populated value). Returns True if a row was updated."""
     with connection.cursor() as cursor:
         cursor.execute(
             """
@@ -128,6 +133,9 @@ def update_fighter_enrichment(
                 reach_cm = COALESCE(reach_cm, %s),
                 weight_grams = COALESCE(weight_grams, %s),
                 stance = COALESCE(NULLIF(stance, ''), %s),
+                full_body_url = COALESCE(NULLIF(full_body_url, ''), %s),
+                leg_reach_cm = COALESCE(leg_reach_cm, %s),
+                trains_at = COALESCE(NULLIF(trains_at, ''), %s),
                 updated_at = NOW()
             WHERE id = %s
               AND (
@@ -139,6 +147,9 @@ def update_fighter_enrichment(
                 OR (reach_cm IS NULL AND %s IS NOT NULL)
                 OR (weight_grams IS NULL AND %s IS NOT NULL)
                 OR (NULLIF(stance, '') IS NULL AND %s IS NOT NULL)
+                OR (NULLIF(full_body_url, '') IS NULL AND %s IS NOT NULL)
+                OR (leg_reach_cm IS NULL AND %s IS NOT NULL)
+                OR (NULLIF(trains_at, '') IS NULL AND %s IS NOT NULL)
               )
             """,
             (
@@ -150,6 +161,9 @@ def update_fighter_enrichment(
                 reach_cm,
                 weight_grams,
                 stance,
+                full_body_url,
+                leg_reach_cm,
+                trains_at,
                 fighter_id,
                 nickname,
                 headshot_url,
@@ -159,6 +173,9 @@ def update_fighter_enrichment(
                 reach_cm,
                 weight_grams,
                 stance,
+                full_body_url,
+                leg_reach_cm,
+                trains_at,
             ),
         )
         return cursor.rowcount > 0

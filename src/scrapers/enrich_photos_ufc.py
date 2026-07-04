@@ -4,9 +4,10 @@ ESPN enrichment only covered ranked fighters, so most fighters render as
 initials with an empty 0-0-0 record. UFC's own athlete pages
 (ufc.com/athlete/<slug>) carry, for essentially every fighter, an official
 headshot AND a bio block: pro record (W-L-D), height, weight, reach and place
-of birth. This resolves each gap fighter's page by name-slug and fills ONLY
-empty fields (COALESCE for photo/measures/nationality; record only when it is
-currently 0-0-0) so nothing already populated is overwritten.
+of birth — plus (Phase 2) the full-body hero photo, leg reach and gym
+("Trains at"). This resolves each gap fighter's page by name-slug and fills
+ONLY empty fields (COALESCE for photo/measures/nationality; record only when it
+is currently 0-0-0) so nothing already populated is overwritten.
 
 Usage:
     python -m src.scrapers.enrich_photos_ufc --probe "Jon Jones" "Ilia Topuria"  # no DB, just test
@@ -47,10 +48,13 @@ _HEADERS = {
     "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
 }
 
+# Full-body bio shot: used as a headshot fallback AND as the full_body_url fallback.
+_FULL_BODY_RE = re.compile(r"/images/styles/athlete_bio_full_body/[^\s\"'<>()]+?\.png(?:\?[^\s\"'<>()]*)?", re.I)
+
 # Preferred image styles, best first: a tight headshot, then bio body shot.
 _IMAGE_RES = (
     re.compile(r"/images/styles/event_results_athlete_headshot/[^\s\"'<>()]+?\.png(?:\?[^\s\"'<>()]*)?", re.I),
-    re.compile(r"/images/styles/athlete_bio_full_body/[^\s\"'<>()]+?\.png(?:\?[^\s\"'<>()]*)?", re.I),
+    _FULL_BODY_RE,
     re.compile(r"/images/styles/event_fight_card_upper_body_of_standing_athlete/[^\s\"'<>()]+?\.png(?:\?[^\s\"'<>()]*)?", re.I),
 )
 
@@ -58,6 +62,11 @@ _IMAGE_RES = (
 RECORD_RE = re.compile(r"hero-profile__division-body[^>]*>\s*(\d+)-(\d+)-(\d+)")
 _LABEL_RE = re.compile(r"c-bio__label[^>]*>\s*([^<]*?)\s*<")
 _TEXT_RE = re.compile(r"c-bio__text[^>]*>\s*([^<]*?)\s*<")
+
+# Full-body hero image: <div class="hero-profile__image-wrap"><img class="hero-profile__image" src="...">.
+# Attribute order varies, so first grab the whole <img> tag by class, then its src.
+_HERO_IMG_TAG_RE = re.compile(r"<img[^>]*\bhero-profile__image\b[^>]*>", re.IGNORECASE)
+_SRC_RE = re.compile(r"""\bsrc\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
 
 
 def slugify(name: str) -> str:
@@ -89,6 +98,9 @@ class AthleteData:
     reach_cm: float | None = None
     weight_grams: int | None = None
     nationality: str | None = None
+    full_body_url: str | None = None
+    leg_reach_cm: float | None = None
+    trains_at: str | None = None
 
     @property
     def has_record(self) -> bool:
@@ -122,6 +134,46 @@ def _extract_headshot(html: str, name: str) -> str | None:
         og = og_match.group(1)
         if og.startswith("http") and not _is_placeholder_image(og):
             return og
+    return None
+
+
+def _normalize_ufc_url(url: str | None) -> str | None:
+    """Absolute https://www.ufc.com URL from whatever the page served (relative
+    path, protocol-relative, http, or missing www)."""
+    url = (url or "").strip()
+    if not url:
+        return None
+    if url.startswith("//"):
+        return "https:" + url
+    if url.startswith("/"):
+        return UFC_IMAGE_BASE + url
+    url = re.sub(r"^http://", "https://", url, count=1)
+    return re.sub(r"^https://ufc\.com", UFC_IMAGE_BASE, url, count=1)
+
+
+def _extract_full_body(html: str, name: str) -> str | None:
+    """Full-body photo from the hero <img class="hero-profile__image">.
+
+    The athlete_bio_full_body URLs are not constructible a priori — they must be
+    read from the served HTML. Placeholder silhouettes are rejected (same guard
+    as headshots). Fallback: any athlete_bio_full_body URL in the page whose
+    filename carries this athlete's own name (LASTNAME_FIRSTNAME_*), mirroring
+    _extract_headshot so an opponent's photo is never picked up.
+    """
+    for tag in _HERO_IMG_TAG_RE.findall(html):
+        src_match = _SRC_RE.search(tag)
+        if not src_match:
+            continue
+        url = _normalize_ufc_url(src_match.group(1))
+        if url and not _is_placeholder_image(url):
+            return url
+    tokens = _name_tokens(name)
+    if tokens:
+        first, last = tokens[0], tokens[-1]
+        for path in _FULL_BODY_RE.findall(html):
+            upper = path.upper()
+            if first in upper and last in upper and not _is_placeholder_image(path):
+                return UFC_IMAGE_BASE + path
     return None
 
 
@@ -181,6 +233,7 @@ def resolve_athlete(session: requests.Session, name: str) -> AthleteData | None:
     height = _to_float(fields.get("height"))
     reach = _to_float(fields.get("reach"))
     weight = _to_float(fields.get("weight"))
+    leg_reach = _to_float(fields.get("leg reach"))
     return AthleteData(
         headshot_url=_extract_headshot(html, name),
         wins=record[0] if record else None,
@@ -190,6 +243,9 @@ def resolve_athlete(session: requests.Session, name: str) -> AthleteData | None:
         reach_cm=round(reach * IN_TO_CM, 1) if reach else None,
         weight_grams=int(round(weight * LB_TO_G)) if weight else None,
         nationality=_nationality_from_birthplace(fields.get("place of birth")),
+        full_body_url=_extract_full_body(html, name),
+        leg_reach_cm=round(leg_reach * IN_TO_CM, 1) if leg_reach else None,
+        trains_at=fields.get("trains at") or None,
     )
 
 
@@ -272,6 +328,9 @@ def enrich(dry_run: bool = False, scope: str = "upcoming", limit: int | None = N
                 height_cm=data.height_cm,
                 reach_cm=data.reach_cm,
                 weight_grams=data.weight_grams,
+                full_body_url=data.full_body_url,
+                leg_reach_cm=data.leg_reach_cm,
+                trains_at=data.trains_at,
             )
             record_filled = False
             if data.has_record:
