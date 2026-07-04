@@ -2,9 +2,11 @@ name: Enrich full-body photos
 
 # Manual backfill (Phase 2 of the redesign): fills fighters.full_body_url,
 # leg_reach_cm and trains_at from ufc.com athlete pages. Manual only (no cron):
-# the pass walks ~1,468 confirmed athlete pages at a 0.4s delay (~10-15 min) and
-# every UPDATE is additive (COALESCE, only fills NULLs), so re-dispatching is
-# always safe and resumes whatever gap is left.
+# the pass walks every fighter still missing one of the three columns (slug
+# guessed from the name; ranked + upcoming + with-headshot fighters first) at a
+# 0.4s delay, every UPDATE is additive (COALESCE, only fills NULLs), and pages
+# whose rendered name does not match the DB fighter are skipped (anti-homonym
+# guard), so re-dispatching is always safe and resumes whatever gap is left.
 # REQUIRES migration db/migrations/008_fighter_bio_extras.sql applied first.
 on:
   workflow_dispatch:
@@ -15,6 +17,10 @@ on:
         default: ""
       dry_run:
         description: "Dry-run: resolve + report, no writes"
+        type: boolean
+        default: false
+      solo_ufc:
+        description: "Old scope: only fighters whose headshot is already from ufc.com"
         type: boolean
         default: false
 
@@ -39,6 +45,7 @@ jobs:
           ARGS=""
           if [ -n "${{ inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          if [ "${{ inputs.solo_ufc }}" = "true" ]; then ARGS="$ARGS --solo-ufc"; fi
           python -m src.scrapers.enrich_fullbody $ARGS
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

@@ -57,6 +57,7 @@ ATHLETE_HTML = f"""
          src="/images/styles/athlete_bio_full_body/s3/2025-04/VERA_MARLON_L_04-12.png?itok=abc123"
          alt="Marlon Vera">
   </div>
+  <h1 class="hero-profile__name">Marlon  Vera</h1>
   <p class="hero-profile__division-body">23-9-1 (W-L-D)</p>
 </div>
 <img src="/images/styles/event_results_athlete_headshot/s3/2025-04/VERA_MARLON_L_04-12_HS.png?itok=hs1">
@@ -171,6 +172,8 @@ def test_resolve_athlete_fills_new_fields_and_keeps_headshot():
     assert data.full_body_url and "athlete_bio_full_body" in data.full_body_url
     assert data.leg_reach_cm == 105.4
     assert data.trains_at == "Millennia MMA, Rancho, CA"
+    # Hero name captured (inner whitespace collapsed) for the anti-homonym guard.
+    assert data.page_name == "Marlon Vera"
     # Existing pipeline untouched: headshot + record + measures still resolve.
     assert data.headshot_url == (
         "https://www.ufc.com/images/styles/event_results_athlete_headshot/s3/2025-04/"
@@ -220,14 +223,15 @@ def test_update_with_all_null_new_values_updates_nothing(fakedb):
 # ------------------------------------------------------------------- backfill
 
 
-_TARGET_ROWS = [(1, "Marlon Vera"), (2, "Jon Jones")]
+# ufc_confirmed=True: both already carried a ufc.com headshot (old behaviour).
+_TARGET_ROWS = [(1, "Marlon Vera", True), (2, "Jon Jones", True)]
 
 
-def _responder(update_result):
+def _responder(update_result, target_rows=_TARGET_ROWS):
     def responder(sql, params=None):
         flat = " ".join(sql.split())
-        if flat.startswith("SELECT id, name FROM fighters"):
-            return _TARGET_ROWS
+        if flat.startswith("SELECT") and "FROM fighters" in flat:
+            return target_rows
         if "UPDATE fighters" in flat:
             return update_result  # length simulates rowcount
         return []
@@ -235,11 +239,12 @@ def _responder(update_result):
     return responder
 
 
-def _resolved(_session, _name):
+def _resolved(_session, name):
     return AthleteData(
         full_body_url="https://www.ufc.com/images/styles/athlete_bio_full_body/s3/x.png",
         leg_reach_cm=105.4,
         trains_at="Millennia MMA, Rancho, CA",
+        page_name=name,  # page renders exactly the DB name -> guard passes
     )
 
 
@@ -278,9 +283,163 @@ def test_backfill_skips_update_when_page_has_no_new_data(fakedb):
 
 
 def test_backfill_counts_unresolved_pages(fakedb):
+    # resolve_athlete returns None on ufc.com 404s (historical fighters without
+    # a page): counted as unresolved, never an error, never a write.
     conn = fakedb.Connection(_responder(update_result=[(1,)]))
     counts = enrich_fullbody.backfill(
         conn, dry_run=False, resolver=lambda s, n: None, sleeper=lambda _s: None
     )
     assert counts["unresolved"] == 2
     assert fakedb.mutating_statements(conn) == []
+
+
+# ----------------------------------------------------------- target selection
+
+
+def _selected_sql(conn) -> str:
+    return " ".join(conn.cursors[0].executed[0][0].split())
+
+
+def test_targets_default_scope_is_all_fighters_missing_any_field(fakedb):
+    conn = fakedb.Connection(_responder(update_result=[]))
+    targets = enrich_fullbody._get_target_fighters(conn)
+    sql, params = conn.cursors[0].executed[0]
+    flat = " ".join(sql.split())
+    # No ufc.com WHERE filter any more: every fighter missing one of the three
+    # columns is a target; ufc.com only qualifies the confirmation flag.
+    where = flat.split("WHERE", 1)[1]
+    assert "ILIKE" not in where.split("ORDER BY")[0]
+    assert "(f.full_body_url IS NULL OR f.leg_reach_cm IS NULL OR f.trains_at IS NULL)" in flat
+    assert "(f.headshot_url ILIKE %s) AS ufc_confirmed" in flat
+    assert params == ("%ufc.com%",)
+    # Rows come back typed as (id, name, ufc_confirmed).
+    assert targets == [(1, "Marlon Vera", True), (2, "Jon Jones", True)]
+
+
+def test_targets_ordered_ranked_then_upcoming_then_headshot_then_rest(fakedb):
+    conn = fakedb.Connection(_responder(update_result=[]))
+    enrich_fullbody._get_target_fighters(conn)
+    flat = _selected_sql(conn)
+    order_by = flat.split("ORDER BY", 1)[1]
+    ranked = order_by.index("r.snapshot_date = (SELECT MAX(snapshot_date) FROM rankings)")
+    upcoming = order_by.index("e.status = 'upcoming'")
+    headshot = order_by.index("NULLIF(f.headshot_url, '') IS NOT NULL")
+    name = order_by.rindex("f.name")
+    assert ranked < upcoming < headshot < name
+    # Boolean sort keys put TRUE first only with DESC.
+    assert order_by.count("DESC") == 3
+    # Ranked priority reads the LATEST snapshot, not any historical one.
+    assert "MAX(snapshot_date)" in order_by
+
+
+def test_targets_solo_ufc_restores_old_filter(fakedb):
+    conn = fakedb.Connection(_responder(update_result=[]))
+    targets = enrich_fullbody._get_target_fighters(conn, solo_ufc=True)
+    sql, params = conn.cursors[0].executed[0]
+    flat = " ".join(sql.split())
+    assert "WHERE headshot_url ILIKE %s" in flat
+    assert "(full_body_url IS NULL OR leg_reach_cm IS NULL OR trains_at IS NULL)" in flat
+    assert params == ("%ufc.com%",)
+    assert targets == [(1, "Marlon Vera", True), (2, "Jon Jones", True)]
+
+
+def test_targets_limit_appended_in_both_scopes(fakedb):
+    for solo_ufc in (False, True):
+        conn = fakedb.Connection(_responder(update_result=[]))
+        enrich_fullbody._get_target_fighters(conn, limit=8, solo_ufc=solo_ufc)
+        sql, params = conn.cursors[0].executed[0]
+        assert sql.rstrip().endswith("LIMIT %s")
+        assert params[-1] == 8
+
+
+def test_backfill_solo_ufc_flag_reaches_the_query(fakedb):
+    conn = fakedb.Connection(_responder(update_result=[(1,)]))
+    enrich_fullbody.backfill(
+        conn, dry_run=True, solo_ufc=True, resolver=_resolved, sleeper=lambda _s: None
+    )
+    assert "WHERE headshot_url ILIKE %s" in _selected_sql(conn)
+
+
+# ---------------------------------------------------------- anti-homonym guard
+
+
+def test_names_match_exact_ignoring_accents_case_and_spacing():
+    assert enrich_fullbody._names_match("José  Aldo", "jose aldo")
+
+
+def test_names_match_allows_extra_token_on_either_side():
+    assert enrich_fullbody._names_match("Jose Aldo", "Jose Aldo Junior")
+    assert enrich_fullbody._names_match("Jose Aldo Junior", "Jose Aldo")
+
+
+def test_names_match_is_word_order_insensitive():
+    assert enrich_fullbody._names_match("Weili Zhang", "Zhang Weili")
+
+
+def test_names_match_rejects_homonym():
+    assert not enrich_fullbody._names_match("Joe Smith", "John Smith")
+    assert not enrich_fullbody._names_match("Conor McGregor", "")
+
+
+def test_backfill_skips_and_counts_name_mismatch_without_writing(fakedb):
+    # Guessed slug (ufc_confirmed=False) landing on a namesake's page: the hero
+    # name disagrees with the DB name -> skip, count, and never touch the DB.
+    rows = [(1, "Joe Smith", False)]
+    conn = fakedb.Connection(_responder(update_result=[(1,)], target_rows=rows))
+    homonym = lambda _s, _n: AthleteData(  # noqa: E731
+        full_body_url="https://www.ufc.com/images/styles/athlete_bio_full_body/s3/SMITH_JOHN.png",
+        page_name="John Smith",
+    )
+    counts = enrich_fullbody.backfill(
+        conn, dry_run=False, resolver=homonym, sleeper=lambda _s: None
+    )
+    assert counts["name_mismatch"] == 1
+    assert counts["resolved"] == 0
+    assert counts["updated"] == 0
+    assert fakedb.mutating_statements(conn) == []
+
+
+def test_backfill_guard_applies_even_to_confirmed_fighters(fakedb):
+    # The guard is free (the HTML is already in memory), so it also protects
+    # confirmed fighters against slug redirects landing on someone else's page.
+    rows = [(1, "Joe Smith", True)]
+    conn = fakedb.Connection(_responder(update_result=[(1,)], target_rows=rows))
+    counts = enrich_fullbody.backfill(
+        conn,
+        dry_run=False,
+        resolver=lambda _s, _n: AthleteData(full_body_url="https://x.png", page_name="John Smith"),
+        sleeper=lambda _s: None,
+    )
+    assert counts["name_mismatch"] == 1
+    assert fakedb.mutating_statements(conn) == []
+
+
+def test_backfill_accepts_guessed_slug_when_page_name_has_extra_token(fakedb):
+    rows = [(1, "Jose Aldo", False)]
+    conn = fakedb.Connection(_responder(update_result=[(1,)], target_rows=rows))
+    counts = enrich_fullbody.backfill(
+        conn,
+        dry_run=False,
+        resolver=lambda _s, _n: AthleteData(full_body_url="https://x.png", page_name="Jose Aldo Junior"),
+        sleeper=lambda _s: None,
+    )
+    assert counts["name_mismatch"] == 0
+    assert counts["resolved"] == 1
+    assert counts["updated"] == 1
+
+
+def test_backfill_missing_page_name_trusts_only_confirmed_fighters(fakedb):
+    # A page without hero-profile__name cannot be verified: proceed only for
+    # fighters whose ufc.com headshot already proved the page is theirs.
+    rows = [(1, "Marlon Vera", True), (2, "Conor McGregor", False)]
+    conn = fakedb.Connection(_responder(update_result=[(1,)], target_rows=rows))
+    counts = enrich_fullbody.backfill(
+        conn,
+        dry_run=False,
+        resolver=lambda _s, _n: AthleteData(full_body_url="https://x.png", page_name=None),
+        sleeper=lambda _s: None,
+    )
+    assert counts["resolved"] == 1
+    assert counts["name_mismatch"] == 1
+    assert counts["updated"] == 1
+    assert len(fakedb.mutating_statements(conn)) == 1

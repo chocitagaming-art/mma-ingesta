@@ -68,6 +68,12 @@ _TEXT_RE = re.compile(r"c-bio__text[^>]*>\s*([^<]*?)\s*<")
 _HERO_IMG_TAG_RE = re.compile(r"<img[^>]*\bhero-profile__image\b[^>]*>", re.IGNORECASE)
 _SRC_RE = re.compile(r"""\bsrc\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
 
+# <h1 class="hero-profile__name">Conor McGregor</h1> — the athlete's own name as
+# the page renders it. Consumed by enrich_fullbody's anti-homonym guard: when a
+# slug is guessed from a DB name, this is the proof the page belongs to that
+# fighter and not to a namesake.
+_HERO_NAME_RE = re.compile(r"hero-profile__name\b[^>]*>\s*([^<]+?)\s*<", re.IGNORECASE)
+
 
 def slugify(name: str) -> str:
     decomposed = unicodedata.normalize("NFKD", name)
@@ -101,6 +107,9 @@ class AthleteData:
     full_body_url: str | None = None
     leg_reach_cm: float | None = None
     trains_at: str | None = None
+    # Name as rendered by the page's hero block (None if the page had none).
+    # NOT persisted; used to verify the page really belongs to the DB fighter.
+    page_name: str | None = None
 
     @property
     def has_record(self) -> bool:
@@ -199,6 +208,15 @@ def _extract_bio_fields(html: str) -> dict[str, str]:
     return fields
 
 
+def _extract_page_name(html: str) -> str | None:
+    """The athlete's name exactly as the served page renders it (hero block)."""
+    match = _HERO_NAME_RE.search(html)
+    if not match:
+        return None
+    name = re.sub(r"\s+", " ", match.group(1)).strip()
+    return name or None
+
+
 def _extract_record(html: str) -> tuple[int, int, int] | None:
     match = RECORD_RE.search(html)
     if not match:
@@ -246,6 +264,7 @@ def resolve_athlete(session: requests.Session, name: str) -> AthleteData | None:
         full_body_url=_extract_full_body(html, name),
         leg_reach_cm=round(leg_reach * IN_TO_CM, 1) if leg_reach else None,
         trains_at=fields.get("trains at") or None,
+        page_name=_extract_page_name(html),
     )
 
 
