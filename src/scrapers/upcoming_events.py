@@ -35,6 +35,7 @@ from bs4 import BeautifulSoup
 
 from .config import Settings, get_settings
 from .db import connect
+from .enrich_photos_ufc import _is_placeholder_image, _normalize_ufc_url
 from .espn import _build_exact_name_index, _build_normalized_name_index, _match_fighter
 from .logging_config import configure_logging
 from .rankings import BROWSER_HEADERS, _build_folded_index, _match_fighter_folded
@@ -44,7 +45,7 @@ from .repositories.fights import (
     delete_upcoming_fights,
     upsert_upcoming_fight,
 )
-from .repositories.fighters import get_all_fighters
+from .repositories.fighters import get_all_fighters, update_fighter_standing_photo
 
 
 LOGGER = logging.getLogger(__name__)
@@ -64,6 +65,12 @@ SEGMENT_WRAPPER_CLASSES = {
     "fight-card-early-prelims": "early_prelims",
 }
 
+# Drupal image style of the standing full-body photo each bout view serves per
+# corner (PNG alpha, ~185x600+). Only URLs carrying this marker are captured
+# into fighters.standing_body_url (migration 009); anything else in the corner
+# (flag icons, ranking badges, another style) is ignored.
+STANDING_IMAGE_STYLE = "event_fight_card_upper_body_of_standing_athlete"
+
 
 @dataclass
 class ParsedBout:
@@ -74,6 +81,10 @@ class ParsedBout:
     red_name: str
     blue_name: str
     fmid: str
+    # Standing full-body photos from the bout view (optional: far-out cards and
+    # debut fighters have no photo yet). Defaults keep old constructions valid.
+    red_image_url: str | None = None
+    blue_image_url: str | None = None
 
 
 @dataclass
@@ -281,9 +292,28 @@ def _parse_bouts(soup: BeautifulSoup, event_source_id: str) -> list[ParsedBout]:
                 blue_name=blue or "TBD",
                 # data-fmid is a globally-unique UFC fight id; the fallback is unique per event.
                 fmid=fmid if fmid else f"{event_source_id}#{order}",
+                red_image_url=_corner_image(bout, "red"),
+                blue_image_url=_corner_image(bout, "blue"),
             )
         )
     return bouts
+
+
+def _corner_image(bout, color: str) -> str | None:
+    """Standing full-body photo URL for a corner, or None.
+
+    The bout view serves it as .c-listing-fight__corner-image--<color> img[src]
+    with the athlete's name as alt. The host arrives as https://ufc.com (no www)
+    -> normalized to https://www.ufc.com. Only the standing-athlete Drupal style
+    is accepted; placeholders/silhouettes are rejected like every other photo.
+    """
+    img = bout.select_one(f".c-listing-fight__corner-image--{color} img[src]")
+    if img is None:
+        return None
+    url = _normalize_ufc_url(img.get("src"))
+    if not url or STANDING_IMAGE_STYLE not in url or _is_placeholder_image(url):
+        return None
+    return url
 
 
 def _segment_from_text(text: str | None) -> str | None:
@@ -470,12 +500,14 @@ def scrape_upcoming_events(dry_run: bool = False) -> Counter:
                 event_id = upsert_event_meta(connection, record)
                 delete_upcoming_fights(connection, event_id, SOURCE)
                 for bout in event.bouts:
+                    red_id = match(bout.red_name)
+                    blue_id = match(bout.blue_name)
                     upsert_upcoming_fight(
                         connection,
                         UpcomingFightRecord(
                             event_id=event_id,
-                            fighter_red_id=match(bout.red_name),
-                            fighter_blue_id=match(bout.blue_name),
+                            fighter_red_id=red_id,
+                            fighter_blue_id=blue_id,
                             fighter_red_name=bout.red_name,
                             fighter_blue_name=bout.blue_name,
                             weight_class=bout.weight_class,
@@ -486,6 +518,16 @@ def scrape_upcoming_events(dry_run: bool = False) -> Counter:
                             source_id=bout.fmid,
                         ),
                     )
+                    # Standing full-body photo: newest scrape wins (UFC refreshes
+                    # it after every fight); the repository never writes NULL/empty
+                    # over an existing value.
+                    for fighter_id, image_url in (
+                        (red_id, bout.red_image_url),
+                        (blue_id, bout.blue_image_url),
+                    ):
+                        if fighter_id is not None and image_url:
+                            if update_fighter_standing_photo(connection, fighter_id, image_url):
+                                counts["standing_photos_updated"] += 1
                 connection.commit()
                 counts["events_written"] += 1
                 counts["bouts_written"] += len(event.bouts)
@@ -509,7 +551,8 @@ def _build_summary(counts: Counter) -> str:
     keys = [
         "events_found", "details_fetched", "detail_errors", "bouts_parsed",
         "fighters_in_db", "bouts_red_matched", "bouts_blue_matched",
-        "stale_completed", "events_written", "bouts_written", "write_errors",
+        "stale_completed", "events_written", "bouts_written",
+        "standing_photos_updated", "write_errors",
     ]
     return json.dumps({key: counts.get(key, 0) for key in keys}, indent=2)
 

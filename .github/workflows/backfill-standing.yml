@@ -1,0 +1,46 @@
+name: Backfill standing photos
+
+# Manual backfill (redesign round A): fills fighters.standing_body_url from the
+# standing full-body photo each ufc.com event bout view serves per corner.
+# Sweeps events with source='ufc.com' (upcoming AND completed — their pages stay
+# live) newest first. The newest scraped value wins (UFC refreshes the photo
+# after every fight) but NULL/empty never overwrites a stored value, so
+# re-dispatching is always safe. Manual only (no cron): the daily
+# refresh-upcoming run keeps upcoming cards current on its own.
+# REQUIRES migration db/migrations/009_fighter_standing_photo.sql applied first.
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max events to process, newest first (empty = all)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry-run: parse + match, no writes"
+        type: boolean
+        default: false
+
+concurrency:
+  group: backfill-standing
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+      - run: pip install -r requirements-scrapers.txt
+      - name: Run standing-photo backfill
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python -m src.scrapers.backfill_standing_photos $ARGS
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

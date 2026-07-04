@@ -181,6 +181,34 @@ def update_fighter_enrichment(
         return cursor.rowcount > 0
 
 
+def update_fighter_standing_photo(
+    connection: PgConnection,
+    fighter_id: int,
+    standing_body_url: str | None,
+) -> bool:
+    """Store the ufc.com standing full-body photo (migration 009).
+
+    Unlike update_fighter_enrichment, the NEW value WINS: UFC refreshes this
+    photo after every fight, so the freshest scraped URL is authoritative and
+    replaces whatever is stored. Two guards remain: a NULL/empty new value
+    never wipes an existing one (early return, no SQL), and an identical value
+    skips the row churn (IS DISTINCT FROM). Returns True if a row was updated.
+    """
+    if not standing_body_url:
+        return False
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE fighters
+            SET standing_body_url = %s, updated_at = NOW()
+            WHERE id = %s
+              AND standing_body_url IS DISTINCT FROM %s
+            """,
+            (standing_body_url, fighter_id, standing_body_url),
+        )
+        return cursor.rowcount > 0
+
+
 def update_fighter_record(
     connection: PgConnection,
     fighter_id: int,
