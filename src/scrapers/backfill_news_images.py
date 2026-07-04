@@ -22,6 +22,8 @@ import argparse
 import json
 import logging
 
+import requests
+
 from .config import get_settings
 from .db import connect
 from .logging_config import configure_logging
@@ -33,7 +35,14 @@ LOGGER = logging.getLogger(__name__)
 def _build_feed_image_map(max_articles: int = 400) -> dict[str, str]:
     """Map article URL -> image URL from the current RSS feeds that ship one."""
     feed_map: dict[str, str] = {}
-    for article in fetch_feed_articles(max_articles=max_articles):
+    try:
+        articles = fetch_feed_articles(max_articles=max_articles)
+    except (RuntimeError, requests.RequestException) as exc:
+        # A blocked/empty feed must not abort the backfill: the og:image path
+        # below still works per-article without the feed map.
+        LOGGER.warning("Skipping feed image map (feed unavailable): %s", exc)
+        return feed_map
+    for article in articles:
         if article.image_url:
             feed_map[article.url] = article.image_url
     return feed_map

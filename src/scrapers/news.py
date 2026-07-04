@@ -44,6 +44,17 @@ CATEGORIES = {
 RSS_FEEDS = (
     ("ESPN Deportes", "https://espndeportes.espn.com/espn/rss/mma/news"),
 )
+# ESPN blocks feedparser's default User-Agent ("feedparser/6.x") from datacenter
+# IPs (GitHub runners) with an empty/HTML body, which feedparser parses to
+# bozo=False + 0 entries — a silent green run. Fetch with real-browser headers
+# instead and let feedparser parse the already-downloaded bytes.
+_RSS_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
+}
 
 
 @dataclass(frozen=True)
@@ -135,7 +146,7 @@ class NewsClassifier:
             messages=[{"role": "user", "content": prompt}],
         )
         text = "".join(block.text for block in response.content if getattr(block, "type", "") == "text").strip()
-        payload = json.loads(text)
+        payload = _extract_json_object(text)
         fighters = [str(name).strip() for name in payload.get("fighters", []) if str(name).strip()]
         category = str(payload.get("category", "other")).strip()
         if category not in CATEGORIES:
@@ -143,17 +154,46 @@ class NewsClassifier:
         return ClassificationResult(fighters=fighters, category=category)
 
 
+def _extract_json_object(text: str) -> dict:
+    """Extract the first JSON object from a model response.
+
+    Claude wraps its answer in markdown fences (```json ... ```) or adds prose
+    around it, so a bare json.loads fails with "Expecting value: line 1 column 1"
+    (every classification in CI hit this and degraded to the keyword fallback).
+    Strip fences, take the first '{' .. last '}' range and parse that; anything
+    unparseable raises ValueError so callers keep their existing fallback path.
+    """
+    cleaned = re.sub(r"```(?:json)?", "", text)
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end <= start:
+        raise ValueError(f"no JSON object found in model response: {text[:200]!r}")
+    try:
+        payload = json.loads(cleaned[start : end + 1])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON object in model response: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("model response JSON is not an object")
+    return payload
+
+
 def fetch_feed_articles(max_articles: int) -> list[FeedArticle]:
     articles: list[FeedArticle] = []
     per_feed_limit = max(25, max_articles // len(RSS_FEEDS) + 5)
     for source, url in RSS_FEEDS:
-        parsed = feedparser.parse(url)
+        response = requests.get(url, headers=_RSS_HEADERS, timeout=20)
+        response.raise_for_status()
+        parsed = feedparser.parse(response.content)
         if getattr(parsed, "bozo", False):
             LOGGER.warning("Feed parse issue for %s: %s", source, getattr(parsed, "bozo_exception", "unknown"))
         for entry in parsed.entries[:per_feed_limit]:
             article = _entry_to_article(source, entry)
             if article is not None:
                 articles.append(article)
+    if not articles:
+        # A block page / empty body parses "cleanly" to 0 entries; without this
+        # guard the workflow ends GREEN with "fetched": 0 and nobody notices.
+        raise RuntimeError("0 articles parsed from RSS feeds - upstream blocked or format changed")
     articles.sort(key=lambda item: item.published_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     deduped: list[FeedArticle] = []
     seen_urls: set[str] = set()
