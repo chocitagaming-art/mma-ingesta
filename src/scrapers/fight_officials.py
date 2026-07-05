@@ -149,15 +149,17 @@ def parse_fight_officials(soup: BeautifulSoup) -> ParsedOfficials:
 # ------------------------------------------------------------------ mapping
 
 
-def first_person_is_red(officials: ParsedOfficials, fight: TargetFight) -> bool:
-    """Whether the page's first person block is the DB fight's red corner.
+def resolve_first_person_is_red(officials: ParsedOfficials, fight: TargetFight) -> bool | None:
+    """:func:`first_person_is_red` without the positional default.
 
     source_id match first (exact, both are '/fighter-details/<hash>'), then
-    fuzzy names at IDENTITY_THRESHOLD; defaults to True (the importer assigns
-    red to the first fighter link, so page order == corner order normally).
+    fuzzy names at IDENTITY_THRESHOLD. Returns None when the first person
+    can't be tied to either corner — callers whose DB corners do NOT come
+    from ufcstats page order (backfill_results' ufc.com bouts) must skip on
+    None instead of guessing, or every judge's scores could land swapped.
     """
     if len(officials.persons) < 2:
-        return True
+        return None
     first_source, first_name = officials.persons[0]
     if first_source:
         if fight.red_source_id and first_source == fight.red_source_id:
@@ -168,7 +170,18 @@ def first_person_is_red(officials: ParsedOfficials, fight: TargetFight) -> bool:
         return True
     if fight.blue_name and fuzzy_match(first_name, fight.blue_name, IDENTITY_THRESHOLD):
         return False
-    return True
+    return None
+
+
+def first_person_is_red(officials: ParsedOfficials, fight: TargetFight) -> bool:
+    """Whether the page's first person block is the DB fight's red corner.
+
+    Resolution as in :func:`resolve_first_person_is_red`; defaults to True
+    (the importer assigns red to the first fighter link, so page order ==
+    corner order normally for ufcstats-sourced fights).
+    """
+    resolved = resolve_first_person_is_red(officials, fight)
+    return True if resolved is None else resolved
 
 
 # ------------------------------------------------------------------------ db
