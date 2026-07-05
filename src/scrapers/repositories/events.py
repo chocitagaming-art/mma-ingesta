@@ -25,6 +25,11 @@ class EventMetaRecord:
     headliner: str | None
     source: str
     source_id: str
+    # Section start times (migration 011 / BE6). None = "not announced by
+    # ufc.com yet" and never overwrites a stored value (COALESCE below); the
+    # defaults keep old constructions valid.
+    prelims_time: datetime | None = None
+    early_prelims_time: datetime | None = None
 
 
 def upsert_event_meta(connection: PgConnection, event: EventMetaRecord) -> int:
@@ -43,13 +48,19 @@ def upsert_event_meta(connection: PgConnection, event: EventMetaRecord) -> int:
                 UPDATE events SET
                     name = %s, event_date = %s, start_time = %s, location = %s,
                     promotion_id = %s, status = %s, image_url = %s, tagline = %s,
-                    broadcast = %s, ticket_url = %s, headliner = %s
+                    broadcast = %s, ticket_url = %s, headliner = %s,
+                    -- Section times (BE6): ufc.com only announces Prelims /
+                    -- Early Prelims close to fight week, so a scrape without
+                    -- them (NULL) must never wipe a previously stored hour.
+                    prelims_time = COALESCE(%s, prelims_time),
+                    early_prelims_time = COALESCE(%s, early_prelims_time)
                 WHERE id = %s
                 """,
                 (
                     event.name, event.event_date, event.start_time, event.location,
                     event.promotion_id, event.status, event.image_url, event.tagline,
-                    event.broadcast, event.ticket_url, event.headliner, event_id,
+                    event.broadcast, event.ticket_url, event.headliner,
+                    event.prelims_time, event.early_prelims_time, event_id,
                 ),
             )
             return event_id
@@ -62,22 +73,26 @@ def upsert_event_meta(connection: PgConnection, event: EventMetaRecord) -> int:
             """
             INSERT INTO events (
                 name, event_date, start_time, location, promotion_id, status,
-                image_url, tagline, broadcast, ticket_url, headliner, source, source_id
+                image_url, tagline, broadcast, ticket_url, headliner, source,
+                source_id, prelims_time, early_prelims_time
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (name, event_date, promotion_id) DO UPDATE SET
                 start_time = EXCLUDED.start_time, location = EXCLUDED.location,
                 status = EXCLUDED.status, image_url = EXCLUDED.image_url,
                 tagline = EXCLUDED.tagline, broadcast = EXCLUDED.broadcast,
                 ticket_url = EXCLUDED.ticket_url, headliner = EXCLUDED.headliner,
-                source = EXCLUDED.source, source_id = EXCLUDED.source_id
+                source = EXCLUDED.source, source_id = EXCLUDED.source_id,
+                -- Section times (BE6): never overwrite with NULL.
+                prelims_time = COALESCE(EXCLUDED.prelims_time, events.prelims_time),
+                early_prelims_time = COALESCE(EXCLUDED.early_prelims_time, events.early_prelims_time)
             RETURNING id
             """,
             (
                 event.name, event.event_date, event.start_time, event.location,
                 event.promotion_id, event.status, event.image_url, event.tagline,
                 event.broadcast, event.ticket_url, event.headliner, event.source,
-                event.source_id,
+                event.source_id, event.prelims_time, event.early_prelims_time,
             ),
         )
         return int(cursor.fetchone()[0])

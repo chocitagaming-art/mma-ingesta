@@ -1,0 +1,57 @@
+name: Refresh weigh-ins
+
+# Fase 5 / BE2: discovers each event's "Official Weigh-In Results" article via
+# ufc.com's server-rendered search and writes the per-fighter weights into
+# weigh_ins. Idempotent — INSERT ... ON CONFLICT (fight_id, fighter_id)
+# DO UPDATE with COALESCE (never overwrites with NULL) — so re-dispatching is
+# always safe.
+# Weekly cron (Fridays 20:00 UTC): official weigh-ins run Friday morning US
+# time and the article lands around noon ET (16:00 UTC), so 20:00 UTC catches
+# Saturday's card the evening before; the default window also re-covers the
+# previous weekend in case an article was published late.
+# REQUIRES migration db/migrations/011_fase5.sql applied first.
+on:
+  schedule:
+    - cron: "0 20 * * 5"
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: "Events within this many past days (default 7)"
+        required: false
+        default: ""
+      event_id:
+        description: "Process only this event id (overrides lookback)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry-run: parse + match, no writes"
+        type: boolean
+        default: false
+
+concurrency:
+  group: refresh-weighins
+  cancel-in-progress: false
+
+jobs:
+  weighins:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+      - run: pip install -r requirements-scrapers.txt
+      - name: Run weigh-in scraper
+        run: |
+          ARGS=""
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            if [ -n "${{ inputs.lookback_days || '' }}" ]; then ARGS="$ARGS --lookback-days ${{ inputs.lookback_days }}"; fi
+            if [ -n "${{ inputs.event_id || '' }}" ]; then ARGS="$ARGS --event-id ${{ inputs.event_id }}"; fi
+            if [ "${{ inputs.dry_run || false }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          fi
+          python -m src.scrapers.weigh_ins $ARGS
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

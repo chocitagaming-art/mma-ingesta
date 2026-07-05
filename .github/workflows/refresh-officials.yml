@@ -1,0 +1,57 @@
+name: Refresh fight officials
+
+# Fase 5 / BE8: for completed ufcstats fights still missing a referee, fetches
+# their fight-details page and writes fights.referee + the judges' scorecards
+# into fight_scorecards. Idempotent — referee = COALESCE(referee, parsed) and
+# INSERT ... ON CONFLICT (fight_id, judge_name) DO NOTHING — so re-dispatching
+# is always safe.
+# Weekly cron (Sundays 09:00 UTC): UFC cards end late Saturday night US time
+# (~06:00 UTC Sunday) and ufcstats publishes the full results within hours, so
+# Sunday morning covers the weekend card; the 30-day lookback re-covers any
+# fight whose page lagged.
+# REQUIRES migration db/migrations/011_fase5.sql applied first.
+on:
+  schedule:
+    - cron: "0 9 * * 0"
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: "Events within this many past days (default 30)"
+        required: false
+        default: ""
+      limit:
+        description: "Max fight pages to fetch this run"
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry-run: parse, no writes"
+        type: boolean
+        default: false
+
+concurrency:
+  group: refresh-officials
+  cancel-in-progress: false
+
+jobs:
+  officials:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+      - run: pip install -r requirements-scrapers.txt
+      - name: Run officials scraper
+        run: |
+          ARGS=""
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            if [ -n "${{ inputs.lookback_days || '' }}" ]; then ARGS="$ARGS --lookback-days ${{ inputs.lookback_days }}"; fi
+            if [ -n "${{ inputs.limit || '' }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
+            if [ "${{ inputs.dry_run || false }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          fi
+          python -m src.scrapers.fight_officials $ARGS
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

@@ -7,7 +7,9 @@ used for rankings; ufcespanol.com returns Varnish 403), which is a two-level sit
     timestamps, venue/location and ticket link, but only "LastName vs LastName" bout
     labels;
   - each event detail page gives the full card (full fighter names, weight class,
-    segment, order) plus poster image, broadcast and tagline.
+    segment, order) plus poster image, broadcast, tagline and the per-section
+    start times (Main Card / Prelims / Early Prelims broadcaster blocks -> BE6:
+    events.start_time / prelims_time / early_prelims_time, migration 011).
 
 Events are inserted with status='upcoming' and their bouts with NULL results
 (winner/method/end_*). Fighters are matched to `fighters` via espn.py's matcher
@@ -106,6 +108,11 @@ class ParsedEvent:
     broadcast: str | None = None
     tagline: str | None = None
     bouts: list[ParsedBout] = field(default_factory=list)
+    # Section start times from the detail page's broadcaster blocks (BE6).
+    # None = the section is not announced (far-out cards) and must never
+    # overwrite a stored value (COALESCE in upsert_event_meta).
+    prelims_time: datetime | None = None
+    early_prelims_time: datetime | None = None
 
 
 # --------------------------------------------------------------------------- fetch
@@ -230,6 +237,49 @@ def _parse_detail(soup: BeautifulSoup, event: ParsedEvent) -> None:
     event.image_url = _parse_detail_image(soup)
     event.broadcast = _derive_broadcast(event.name)
     event.bouts = _parse_bouts(soup, event.source_id)
+    section_times = _parse_section_times(soup)
+    event.prelims_time = section_times.get("prelims")
+    event.early_prelims_time = section_times.get("early_prelims")
+    # The listing already provides the main-card start; the detail page's own
+    # "Main Card" block fills it only when the listing timestamp was missing.
+    if event.start_time is None:
+        event.start_time = section_times.get("main")
+
+
+def _parse_section_times(soup: BeautifulSoup) -> dict[str, datetime]:
+    """Per-section start times from the event detail page (BE6).
+
+    ufc.com renders one broadcaster block per announced section:
+
+        <div class="c-event-fight-card-broadcaster__container">
+          <div class="c-event-fight-card-broadcaster__card-title">
+            <strong>Main Card</strong>   (or "Prelims" / "Early Prelims")
+          ...
+          <div class="c-event-fight-card-broadcaster__time tz-change-inner"
+               data-timestamp="1783818000" ...>
+            ... <time datetime="2026-07-11T21:00:00Z">Sat, Jul 11 / 9:00 PM</time>
+
+    ONLY the epoch data-timestamp is trusted (same convention as the listing's
+    data-main-card-timestamp). The inner <time datetime="...Z"> is NOT a
+    fallback: on the real page it carries the ET local time mislabeled with a
+    "Z" suffix (verified on /event/ufc-329: data-timestamp 1783818000 =
+    2026-07-12T01:00Z = 9:00 PM EDT, while the attribute claims
+    "2026-07-11T21:00:00Z"), so parsing it as UTC would shift every section
+    by 4-5 hours. Sections not yet announced (far-out cards) simply have no
+    block; the wrapper duplicates each block (desktop/mobile), so the dict
+    keeps the first occurrence per segment.
+    """
+    times: dict[str, datetime] = {}
+    for container in soup.select(".c-event-fight-card-broadcaster__container"):
+        title = container.select_one(".c-event-fight-card-broadcaster__card-title")
+        segment = _segment_from_text(title.get_text(" ", strip=True) if title else None)
+        if segment is None or segment in times:
+            continue
+        time_el = container.select_one(".c-event-fight-card-broadcaster__time")
+        ts_raw = (time_el.get("data-timestamp") or "") if time_el else ""
+        if ts_raw.isdigit():
+            times[segment] = datetime.fromtimestamp(int(ts_raw), tz=timezone.utc)
+    return times
 
 
 def _build_event_name(soup: BeautifulSoup, headliner: str | None) -> str | None:
@@ -556,6 +606,8 @@ def scrape_upcoming_events(dry_run: bool = False) -> Counter:
                     headliner=event.headliner,
                     source=SOURCE,
                     source_id=event.source_id,
+                    prelims_time=event.prelims_time,
+                    early_prelims_time=event.early_prelims_time,
                 )
                 event_id = upsert_event_meta(connection, record)
                 _write_event_bouts(connection, match, counts, event, event_id)
