@@ -1,14 +1,20 @@
 name: Backfill standing photos
 
-# Manual backfill (redesign round A): fills fighters.standing_body_url from the
+# Backfill (redesign round A): fills fighters.standing_body_url from the
 # standing full-body photo each ufc.com event bout view serves per corner.
 # Sweeps events with source='ufc.com' (upcoming AND completed — their pages stay
 # live) newest first. The newest scraped value wins (UFC refreshes the photo
 # after every fight) but NULL/empty never overwrites a stored value, so
-# re-dispatching is always safe. Manual only (no cron): the daily
-# refresh-upcoming run keeps upcoming cards current on its own.
+# re-dispatching is always safe.
+# Weekly cron (Mondays 07:00 UTC, after the 06:00 daily refresh) sweeps only
+# the most recent events (--limit 8): the daily refresh-upcoming run only
+# covers upcoming cards, so completed events were left without standing photos
+# — the owner spotted the missing photos as a bug. Manual dispatch remains
+# available for full or custom sweeps.
 # REQUIRES migration db/migrations/009_fighter_standing_photo.sql applied first.
 on:
+  schedule:
+    - cron: "0 7 * * 1"
   workflow_dispatch:
     inputs:
       limit:
@@ -39,8 +45,12 @@ jobs:
       - name: Run standing-photo backfill
         run: |
           ARGS=""
-          if [ -n "${{ inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
-          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            ARGS="--limit 8"
+          else
+            if [ -n "${{ inputs.limit || '' }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
+            if [ "${{ inputs.dry_run || false }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          fi
           python -m src.scrapers.backfill_standing_photos $ARGS
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
