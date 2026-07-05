@@ -14,8 +14,10 @@ Events are inserted with status='upcoming' and their bouts with NULL results
 (+ rankings' diacritic fallback); fighter_red_name/fighter_blue_name are ALWAYS
 filled (like rankings.fighter_name) so the frontend can render unmatched fighters.
 
-Idempotent: events upsert by (source, source_id); each event's bouts are deleted
-and re-inserted; upcoming events that have dropped off the ufc.com list are removed.
+Idempotent: events upsert by (source, source_id); each event's bouts upsert by
+their ufc.com fmid, bouts that dropped off the card are marked status='cancelled'
+(never deleted — a reappearing bout is reactivated by the upsert), and upcoming
+events that have dropped off the ufc.com list are completed once their date passes.
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ from .rankings import BROWSER_HEADERS, _build_folded_index, _match_fighter_folde
 from .repositories.events import EventMetaRecord, upsert_event_meta
 from .repositories.fights import (
     UpcomingFightRecord,
-    delete_upcoming_fights,
+    cancel_missing_upcoming_fights,
     upsert_upcoming_fight,
 )
 from .repositories.fighters import get_all_fighters, update_fighter_standing_photo
@@ -85,6 +87,9 @@ class ParsedBout:
     # debut fighters have no photo yet). Defaults keep old constructions valid.
     red_image_url: str | None = None
     blue_image_url: str | None = None
+    # "Title Bout" flag from the class text; already used for scheduled_rounds
+    # and now persisted into fights.is_title_fight (migration 010).
+    is_title: bool = False
 
 
 @dataclass
@@ -294,6 +299,7 @@ def _parse_bouts(soup: BeautifulSoup, event_source_id: str) -> list[ParsedBout]:
                 fmid=fmid if fmid else f"{event_source_id}#{order}",
                 red_image_url=_corner_image(bout, "red"),
                 blue_image_url=_corner_image(bout, "blue"),
+                is_title=is_title,
             )
         )
     return bouts
@@ -439,6 +445,60 @@ def _complete_dropped_upcoming(connection, current_source_ids: set[str]) -> int:
         return completed
 
 
+def _write_event_bouts(connection, match, counts: Counter, event: ParsedEvent, event_id: int) -> None:
+    """Reconcile one event's card: upsert every scraped bout (keyed by fmid),
+    then mark the bouts that are no longer on the card as status='cancelled'.
+
+    The old behaviour deleted the event's fights wholesale and re-inserted them,
+    which lost fight ids (and any row pointing at them) on every run and made a
+    dropped bout vanish without a trace. Now:
+      - each scraped bout upserts by (source, fmid); the conflict branch also
+        resets status to NULL, so a previously-cancelled pairing that REAPPEARS
+        on the card is reactivated;
+      - the upserted row ids are the survivors: every other row of this
+        (event, source) — i.e. every fighter pairing no longer scheduled — is
+        flipped to 'cancelled' by cancel_missing_upcoming_fights (bouts with a
+        result are never touched);
+      - untouched bouts keep their id, results columns and photos logic intact.
+    The frontend filters status='cancelled' wherever it counts or lists bouts.
+    """
+    kept_ids: list[int] = []
+    for bout in event.bouts:
+        red_id = match(bout.red_name)
+        blue_id = match(bout.blue_name)
+        fight_id = upsert_upcoming_fight(
+            connection,
+            UpcomingFightRecord(
+                event_id=event_id,
+                fighter_red_id=red_id,
+                fighter_blue_id=blue_id,
+                fighter_red_name=bout.red_name,
+                fighter_blue_name=bout.blue_name,
+                weight_class=bout.weight_class,
+                scheduled_rounds=bout.scheduled_rounds,
+                bout_order=bout.bout_order,
+                card_segment=bout.card_segment,
+                source=SOURCE,
+                source_id=bout.fmid,
+                is_title_fight=bout.is_title,
+            ),
+        )
+        kept_ids.append(fight_id)
+        # Standing full-body photo: newest scrape wins (UFC refreshes
+        # it after every fight); the repository never writes NULL/empty
+        # over an existing value.
+        for fighter_id, image_url in (
+            (red_id, bout.red_image_url),
+            (blue_id, bout.blue_image_url),
+        ):
+            if fighter_id is not None and image_url:
+                if update_fighter_standing_photo(connection, fighter_id, image_url):
+                    counts["standing_photos_updated"] += 1
+    counts["bouts_cancelled"] += cancel_missing_upcoming_fights(
+        connection, event_id, SOURCE, kept_ids
+    )
+
+
 def scrape_upcoming_events(dry_run: bool = False) -> Counter:
     settings = get_settings()
     counts: Counter = Counter()
@@ -498,36 +558,7 @@ def scrape_upcoming_events(dry_run: bool = False) -> Counter:
                     source_id=event.source_id,
                 )
                 event_id = upsert_event_meta(connection, record)
-                delete_upcoming_fights(connection, event_id, SOURCE)
-                for bout in event.bouts:
-                    red_id = match(bout.red_name)
-                    blue_id = match(bout.blue_name)
-                    upsert_upcoming_fight(
-                        connection,
-                        UpcomingFightRecord(
-                            event_id=event_id,
-                            fighter_red_id=red_id,
-                            fighter_blue_id=blue_id,
-                            fighter_red_name=bout.red_name,
-                            fighter_blue_name=bout.blue_name,
-                            weight_class=bout.weight_class,
-                            scheduled_rounds=bout.scheduled_rounds,
-                            bout_order=bout.bout_order,
-                            card_segment=bout.card_segment,
-                            source=SOURCE,
-                            source_id=bout.fmid,
-                        ),
-                    )
-                    # Standing full-body photo: newest scrape wins (UFC refreshes
-                    # it after every fight); the repository never writes NULL/empty
-                    # over an existing value.
-                    for fighter_id, image_url in (
-                        (red_id, bout.red_image_url),
-                        (blue_id, bout.blue_image_url),
-                    ):
-                        if fighter_id is not None and image_url:
-                            if update_fighter_standing_photo(connection, fighter_id, image_url):
-                                counts["standing_photos_updated"] += 1
+                _write_event_bouts(connection, match, counts, event, event_id)
                 connection.commit()
                 counts["events_written"] += 1
                 counts["bouts_written"] += len(event.bouts)
@@ -551,7 +582,7 @@ def _build_summary(counts: Counter) -> str:
     keys = [
         "events_found", "details_fetched", "detail_errors", "bouts_parsed",
         "fighters_in_db", "bouts_red_matched", "bouts_blue_matched",
-        "stale_completed", "events_written", "bouts_written",
+        "stale_completed", "events_written", "bouts_written", "bouts_cancelled",
         "standing_photos_updated", "write_errors",
     ]
     return json.dumps({key: counts.get(key, 0) for key in keys}, indent=2)

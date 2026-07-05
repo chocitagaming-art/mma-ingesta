@@ -205,16 +205,26 @@ def backfill(
                 counts["with_leg_reach"] += 1
             if data.trains_at:
                 counts["with_trains_at"] += 1
-            has_new_data = bool(data.full_body_url or data.leg_reach_cm or data.trains_at)
+            has_new_data = bool(
+                data.full_body_url
+                or data.leg_reach_cm
+                or data.trains_at
+                or data.birth_place
+                or data.octagon_debut
+            )
             if not dry_run and has_new_data:
                 # Additive-only write: COALESCE fills NULL/empty columns and a
-                # NULL argument never overwrites an existing value.
+                # NULL argument never overwrites an existing value. birth_place
+                # and octagon_debut (Fase 4 / BE5) ride along: the page is
+                # already fetched and name-verified, so they cost nothing here.
                 updated = update_fighter_enrichment(
                     connection,
                     fighter_id,
                     full_body_url=data.full_body_url,
                     leg_reach_cm=data.leg_reach_cm,
                     trains_at=data.trains_at,
+                    birth_place=data.birth_place,
+                    octagon_debut=data.octagon_debut,
                 )
                 if updated:
                     connection.commit()

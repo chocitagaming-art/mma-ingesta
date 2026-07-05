@@ -8,12 +8,15 @@ No network, no DB: resolve_athlete gets a fake session and writes go through the
 shared fakedb recorder.
 """
 
+from datetime import date
+
 from src.scrapers import enrich_fullbody
 from src.scrapers.enrich_photos_ufc import (
     AthleteData,
     _extract_bio_fields,
     _extract_full_body,
     _extract_headshot,
+    _parse_ufc_date,
     resolve_athlete,
 )
 from src.scrapers.repositories.fighters import update_fighter_enrichment
@@ -44,6 +47,10 @@ _BIO_BLOCK = """
 <div class="c-bio__field">
   <div class="c-bio__label">Place of Birth</div>
   <div class="c-bio__text">Chone, Ecuador</div>
+</div>
+<div class="c-bio__field">
+  <div class="c-bio__label">Octagon Debut</div>
+  <div class="c-bio__text">Nov. 15, 2014</div>
 </div>
 """
 
@@ -188,6 +195,64 @@ def test_headshot_extraction_unchanged_by_new_parsing():
     url = _extract_headshot(ATHLETE_HTML, "Marlon Vera")
     assert url is not None
     assert "event_results_athlete_headshot" in url
+
+
+# -------------------------------------------- extended bio (Fase 4 / BE5)
+
+
+def test_birth_place_and_octagon_debut_extracted():
+    session = _FakeSession(ATHLETE_HTML)
+    data = resolve_athlete(session, "Marlon Vera")
+    assert data is not None
+    # Raw place kept whole; nationality still derives the country from it.
+    assert data.birth_place == "Chone, Ecuador"
+    assert data.nationality == "Ecuador"
+    assert data.octagon_debut == date(2014, 11, 15)
+
+
+def test_parse_ufc_date_tolerates_format_variants():
+    # Real ufc.com format: abbreviated month with a trailing period.
+    assert _parse_ufc_date("Apr. 25, 2015") == date(2015, 4, 25)
+    # Tolerated drift: no period, full month name, stray whitespace.
+    assert _parse_ufc_date("Apr 25, 2015") == date(2015, 4, 25)
+    assert _parse_ufc_date("April 25, 2015") == date(2015, 4, 25)
+    assert _parse_ufc_date("  Jun. 5,   2021 ") == date(2021, 6, 5)
+    # Absent/garbage never raises, never yields a bogus date.
+    assert _parse_ufc_date(None) is None
+    assert _parse_ufc_date("") is None
+    assert _parse_ufc_date("TBD") is None
+    assert _parse_ufc_date("25/04/2015") is None
+
+
+def test_update_fighter_enrichment_guards_bio_extras_with_coalesce(fakedb):
+    conn = fakedb.Connection(lambda sql, params=None: [])
+    update_fighter_enrichment(
+        conn, 7, birth_place="Chone, Ecuador", octagon_debut=date(2014, 11, 15)
+    )
+    sql = " ".join(fakedb.mutating_statements(conn)[0].split())
+    # Same additive policy as every other bio column: fill only when empty.
+    assert "birth_place = COALESCE(NULLIF(birth_place, ''), %s)" in sql
+    assert "octagon_debut = COALESCE(octagon_debut, %s)" in sql
+    assert "(NULLIF(birth_place, '') IS NULL AND %s IS NOT NULL)" in sql
+    assert "(octagon_debut IS NULL AND %s IS NOT NULL)" in sql
+
+
+def test_backfill_persists_birth_place_and_debut(fakedb):
+    # A page with ONLY the two Fase-4 fields still counts as new data and is
+    # written through the same COALESCE-guarded update.
+    conn = fakedb.Connection(_responder(update_result=[(1,)]))
+    bio_only = lambda _s, name: AthleteData(  # noqa: E731
+        birth_place="Chone, Ecuador",
+        octagon_debut=date(2014, 11, 15),
+        page_name=name,
+    )
+    counts = enrich_fullbody.backfill(
+        conn, dry_run=False, resolver=bio_only, sleeper=lambda _s: None
+    )
+    assert counts["updated"] == 2
+    updates = fakedb.mutating_statements(conn)
+    assert len(updates) == 2
+    assert all("birth_place" in sql and "octagon_debut" in sql for sql in updates)
 
 
 # ------------------------------------------------- repository: never NULL over data

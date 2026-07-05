@@ -20,10 +20,20 @@ class UpcomingFightRecord:
     card_segment: str | None
     source: str
     source_id: str
+    # Title-fight flag parsed from ufc.com's class text ("... Title Bout").
+    # None means "unknown" and never overwrites a stored value (COALESCE);
+    # the default keeps old constructions valid.
+    is_title_fight: bool | None = None
 
 
 def delete_upcoming_fights(connection: PgConnection, event_id: int, source: str) -> int:
-    """Remove an event's previously-scraped bouts so re-runs reflect card changes."""
+    """Remove an event's previously-scraped bouts so re-runs reflect card changes.
+
+    LEGACY: the daily upcoming reconciliation no longer deletes — it marks the
+    bouts that dropped off the card as status='cancelled' instead (see
+    cancel_missing_upcoming_fights), so a fight the user has already seen never
+    vanishes. Kept for manual/one-off cleanups only.
+    """
     with connection.cursor() as cursor:
         cursor.execute(
             "DELETE FROM fights WHERE event_id = %s AND source = %s",
@@ -32,17 +42,57 @@ def delete_upcoming_fights(connection: PgConnection, event_id: int, source: str)
         return cursor.rowcount
 
 
+def cancel_missing_upcoming_fights(
+    connection: PgConnection, event_id: int, source: str, kept_fight_ids: list[int]
+) -> int:
+    """Mark this event's bouts that dropped off the latest scraped card as
+    status='cancelled' (instead of deleting them, the old behaviour).
+
+    ``kept_fight_ids`` are the row ids the current scrape just upserted — one
+    per bout actually on the card, keyed by ufc.com's per-fight fmid, which
+    names the fighter pairing — so every OTHER row of this (event, source) is a
+    pairing no longer scheduled. Guards:
+      - a bout that already has a result (winner/method) is never touched;
+      - already-cancelled rows are skipped (no row churn on every run);
+      - a cancelled bout that REAPPEARS is reactivated by upsert_upcoming_fight
+        itself (its ON CONFLICT sets status back to NULL).
+    Returns the number of rows flipped to cancelled.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE fights
+            SET status = 'cancelled', updated_at = NOW()
+            WHERE event_id = %s AND source = %s
+              AND winner_id IS NULL AND method IS NULL
+              AND status IS DISTINCT FROM 'cancelled'
+              AND NOT (id = ANY(%s))
+            """,
+            # Sentinel -1 keeps ANY() typed when the card parsed to zero bouts
+            # (psycopg2 cannot adapt an empty list); no real row has id -1.
+            (event_id, source, list(kept_fight_ids) or [-1]),
+        )
+        return cursor.rowcount
+
+
 def upsert_upcoming_fight(connection: PgConnection, fight: UpcomingFightRecord) -> int:
-    """Insert an upcoming bout (no result yet: winner/method/end_* stay NULL)."""
+    """Insert an upcoming bout (no result yet: winner/method/end_* stay NULL).
+
+    A bout present on the scraped card is by definition NOT cancelled, so the
+    conflict branch resets status to NULL: a fight cancelled on a previous run
+    that reappears on the card is reactivated here. is_title_fight follows the
+    no-NULL-overwrite policy (COALESCE both on insert — the column is NOT NULL
+    — and on update).
+    """
     with connection.cursor() as cursor:
         cursor.execute(
             """
             INSERT INTO fights (
                 event_id, fighter_red_id, fighter_blue_id, fighter_red_name,
                 fighter_blue_name, weight_class, scheduled_rounds, bout_order,
-                card_segment, source, source_id
+                card_segment, is_title_fight, source, source_id
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, FALSE), %s, %s)
             ON CONFLICT (source, source_id)
             DO UPDATE SET
                 event_id = EXCLUDED.event_id,
@@ -54,6 +104,13 @@ def upsert_upcoming_fight(connection: PgConnection, fight: UpcomingFightRecord) 
                 scheduled_rounds = EXCLUDED.scheduled_rounds,
                 bout_order = EXCLUDED.bout_order,
                 card_segment = EXCLUDED.card_segment,
+                -- Not EXCLUDED.is_title_fight: that already went through the
+                -- insert-side COALESCE(placeholder, FALSE), so a NULL argument
+                -- would arrive as FALSE and stomp a stored TRUE. The raw
+                -- argument is bound again (last parameter) so NULL really
+                -- means "keep the current value".
+                is_title_fight = COALESCE(%s, fights.is_title_fight),
+                status = NULL,
                 updated_at = NOW()
             RETURNING id
             """,
@@ -67,8 +124,10 @@ def upsert_upcoming_fight(connection: PgConnection, fight: UpcomingFightRecord) 
                 fight.scheduled_rounds,
                 fight.bout_order,
                 fight.card_segment,
+                fight.is_title_fight,
                 fight.source,
                 fight.source_id,
+                fight.is_title_fight,
             ),
         )
         return int(cursor.fetchone()[0])

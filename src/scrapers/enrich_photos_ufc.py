@@ -26,6 +26,7 @@ import time
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
+from datetime import date, datetime
 
 import requests
 
@@ -107,6 +108,11 @@ class AthleteData:
     full_body_url: str | None = None
     leg_reach_cm: float | None = None
     trains_at: str | None = None
+    # Extended bio (Fase 4 / BE5, migration 010): the raw "Place of Birth"
+    # field ("Chone, Ecuador" — nationality above keeps only the country) and
+    # the "Octagon Debut" date ("Apr. 25, 2015").
+    birth_place: str | None = None
+    octagon_debut: date | None = None
     # Name as rendered by the page's hero block (None if the page had none).
     # NOT persisted; used to verify the page really belongs to the DB fighter.
     page_name: str | None = None
@@ -232,6 +238,26 @@ def _nationality_from_birthplace(place: str | None) -> str | None:
     return country or None
 
 
+# ufc.com renders "Octagon Debut" as "Apr. 25, 2015" (abbreviated month with a
+# trailing period); tolerate the unabbreviated ("April 25, 2015") and
+# period-less ("Apr 25, 2015") variants too.
+_DEBUT_FORMATS = ("%b %d, %Y", "%B %d, %Y")
+
+
+def _parse_ufc_date(text: str | None) -> date | None:
+    """Date from ufc.com's bio format, or None when absent/unparseable."""
+    cleaned = " ".join((text or "").replace(".", " ").split())
+    if not cleaned:
+        return None
+    for fmt in _DEBUT_FORMATS:
+        try:
+            return datetime.strptime(cleaned, fmt).date()
+        except ValueError:
+            continue
+    LOGGER.debug("Unparseable ufc.com date: %r", text)
+    return None
+
+
 def resolve_athlete(session: requests.Session, name: str) -> AthleteData | None:
     url = ATHLETE_URL.format(slug=slugify(name))
     try:
@@ -264,6 +290,8 @@ def resolve_athlete(session: requests.Session, name: str) -> AthleteData | None:
         full_body_url=_extract_full_body(html, name),
         leg_reach_cm=round(leg_reach * IN_TO_CM, 1) if leg_reach else None,
         trains_at=fields.get("trains at") or None,
+        birth_place=fields.get("place of birth") or None,
+        octagon_debut=_parse_ufc_date(fields.get("octagon debut")),
         page_name=_extract_page_name(html),
     )
 
@@ -350,6 +378,8 @@ def enrich(dry_run: bool = False, scope: str = "upcoming", limit: int | None = N
                 full_body_url=data.full_body_url,
                 leg_reach_cm=data.leg_reach_cm,
                 trains_at=data.trains_at,
+                birth_place=data.birth_place,
+                octagon_debut=data.octagon_debut,
             )
             record_filled = False
             if data.has_record:
@@ -385,7 +415,8 @@ def main() -> None:
             data = resolve_athlete(session, name)
             payload = {"name": name, "slug": slugify(name)}
             payload.update(data.__dict__ if data else {"resolved": False})
-            print(json.dumps(payload, ensure_ascii=False))
+            # default=str: octagon_debut is a datetime.date.
+            print(json.dumps(payload, ensure_ascii=False, default=str))
         return
 
     scope = "all" if args.all_fighters else "upcoming"

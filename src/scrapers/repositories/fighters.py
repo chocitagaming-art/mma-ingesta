@@ -117,6 +117,8 @@ def update_fighter_enrichment(
     full_body_url: str | None = None,
     leg_reach_cm: float | None = None,
     trains_at: str | None = None,
+    birth_place: str | None = None,
+    octagon_debut: date | None = None,
 ) -> bool:
     """Fill ONLY empty columns (COALESCE keeps existing data; a NULL argument can
     never overwrite a populated value). Returns True if a row was updated."""
@@ -136,6 +138,8 @@ def update_fighter_enrichment(
                 full_body_url = COALESCE(NULLIF(full_body_url, ''), %s),
                 leg_reach_cm = COALESCE(leg_reach_cm, %s),
                 trains_at = COALESCE(NULLIF(trains_at, ''), %s),
+                birth_place = COALESCE(NULLIF(birth_place, ''), %s),
+                octagon_debut = COALESCE(octagon_debut, %s),
                 updated_at = NOW()
             WHERE id = %s
               AND (
@@ -150,6 +154,8 @@ def update_fighter_enrichment(
                 OR (NULLIF(full_body_url, '') IS NULL AND %s IS NOT NULL)
                 OR (leg_reach_cm IS NULL AND %s IS NOT NULL)
                 OR (NULLIF(trains_at, '') IS NULL AND %s IS NOT NULL)
+                OR (NULLIF(birth_place, '') IS NULL AND %s IS NOT NULL)
+                OR (octagon_debut IS NULL AND %s IS NOT NULL)
               )
             """,
             (
@@ -164,6 +170,8 @@ def update_fighter_enrichment(
                 full_body_url,
                 leg_reach_cm,
                 trains_at,
+                birth_place,
+                octagon_debut,
                 fighter_id,
                 nickname,
                 headshot_url,
@@ -176,6 +184,8 @@ def update_fighter_enrichment(
                 full_body_url,
                 leg_reach_cm,
                 trains_at,
+                birth_place,
+                octagon_debut,
             ),
         )
         return cursor.rowcount > 0
