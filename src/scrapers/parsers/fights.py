@@ -397,3 +397,28 @@ def _infer_scheduled_rounds(weight_class: str | None) -> int | None:
     if "title" in lowered or "main event" in lowered:
         return 5
     return 3
+
+
+_TIME_FORMAT_ROUNDS_RE = re.compile(r"(\d+)\s*rnd", re.IGNORECASE)
+
+
+def parse_scheduled_rounds(soup: BeautifulSoup) -> int | None:
+    """Scheduled rounds from a fight-details page's "Time format:" item.
+
+    The event page only allows INFERRING the rounds from the weight-class cell
+    (:func:`_infer_scheduled_rounds`: 3 unless the text says title/main event),
+    which is wrong for non-title 5-round main events — e.g. a Fight Night
+    headliner whose cell just says "Middleweight Bout". The fight's own detail
+    page states the truth ("Time format: 5 Rnd (5-5-5-5-5)"), so callers that
+    already fetch it should prefer this value. None when the item is missing
+    or carries no round count (e.g. "No Time Limit").
+    """
+    for item in soup.select("i.b-fight-details__text-item, i.b-fight-details__text-item_first"):
+        label = item.select_one("i.b-fight-details__label")
+        if label is None:
+            continue
+        if "time format" not in (label.get_text(" ", strip=True) or "").lower():
+            continue
+        match = _TIME_FORMAT_ROUNDS_RE.search(item.get_text(" ", strip=True))
+        return int(match.group(1)) if match else None
+    return None

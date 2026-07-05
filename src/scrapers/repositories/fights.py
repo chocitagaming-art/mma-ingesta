@@ -148,8 +148,12 @@ def upsert_fight(connection: PgConnection, fight: FightRecord) -> int:
                 event_id = EXCLUDED.event_id,
                 fighter_red_id = EXCLUDED.fighter_red_id,
                 fighter_blue_id = EXCLUDED.fighter_blue_id,
-                weight_class = EXCLUDED.weight_class,
-                scheduled_rounds = EXCLUDED.scheduled_rounds,
+                -- weight_class/scheduled_rounds come from markup that can drift
+                -- (weight cell unparsed -> NULL) or from inference: the #20
+                -- no-NULL-overwrite policy applies to them too, so a re-scrape
+                -- that resolves nothing never wipes a stored value.
+                weight_class = COALESCE(EXCLUDED.weight_class, fights.weight_class),
+                scheduled_rounds = COALESCE(EXCLUDED.scheduled_rounds, fights.scheduled_rounds),
                 -- Result / separately-enriched columns: a re-scrape that no longer
                 -- resolves these (HTML changed, or odds/weight come from other
                 -- sources and arrive NULL here) must never wipe a stored value (#20).
