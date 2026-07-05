@@ -3,6 +3,8 @@ name: Refresh news
 # Pulls the latest MMA news from the ESPN Deportes RSS feed, grabs each article's
 # image (og:image) and classifies it with Claude. Needs ANTHROPIC_API_KEY for the
 # classification step in addition to the DB. Writes to Neon.
+# After a successful scrape it POSTs to the app's /api/revalidate so the home
+# page (ISR 30 min) picks up the fresh headlines within seconds.
 on:
   schedule:
     - cron: "0 8 * * *" # daily at 08:00 UTC
@@ -29,3 +31,10 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      - name: Revalidate home page
+        run: |
+          curl -fsS -X POST "https://mma-app-ruby.vercel.app/api/revalidate" \
+            -H "Authorization: Bearer $REVALIDATE_SECRET" \
+            -o /dev/null -w "revalidate: HTTP %{http_code}\n"
+        env:
+          REVALIDATE_SECRET: ${{ secrets.REVALIDATE_SECRET }}
