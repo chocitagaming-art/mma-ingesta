@@ -1,0 +1,36 @@
+name: Seed Hall of Fame
+
+# Aplica la migración 014 (aditiva, idempotente: ADD COLUMN IF NOT EXISTS bio) y
+# luego seedea el Salón de la Fama (src/scrapers/seed_hall_of_fame.py): upsert
+# idempotente por (wing, display_name) que refresca los enlaces a fighters y
+# puebla subtitle/photo_url/bio de las alas Contributor y Fight (mostrados en el
+# modal del Salón). Manual (workflow_dispatch): re-ejecutar es siempre seguro.
+# Requiere la migración 013 ya aplicada (tabla hall_of_fame). Escribe a la BD de
+# prod (secrets.DATABASE_URL), como los demás refresh-*/enrich-* workflows.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: seed-hall-of-fame
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      # El seed solo necesita el driver de Postgres y dotenv (config = dataclass +
+      # dotenv; matching = stdlib). Instalación mínima y rápida.
+      - run: pip install psycopg2-binary python-dotenv
+      - name: Apply migration 014 (additive, idempotent)
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/014_hall_of_fame_bio.sql
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - name: Seed Hall of Fame
+        run: python -m src.scrapers.seed_hall_of_fame
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
