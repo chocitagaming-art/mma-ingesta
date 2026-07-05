@@ -24,6 +24,7 @@ from src.scrapers.fight_officials import (
     insert_scorecard,
     list_target_fights,
     parse_fight_officials,
+    resolve_first_person_is_red,
     update_fight_referee,
 )
 
@@ -192,6 +193,16 @@ def test_first_person_is_red_falls_back_to_names_then_positional():
     unknown = _fight(red_source_id=None, blue_source_id=None,
                      red_name="Someone Else", blue_name="Another Person")
     assert first_person_is_red(officials, unknown) is True
+
+
+def test_resolve_first_person_is_red_returns_none_when_unresolvable():
+    # Strict variant for callers without the ufcstats page-order guarantee
+    # (backfill_results' ufc.com bouts): no match -> None, never a guess.
+    officials = parse_fight_officials(_soup(DECISION_HTML))
+    unknown = _fight(red_source_id=None, blue_source_id=None,
+                     red_name="Someone Else", blue_name="Another Person")
+    assert resolve_first_person_is_red(officials, unknown) is None
+    assert resolve_first_person_is_red(officials, _fight()) is True
 
 
 # --------------------------------------------------------------------- write

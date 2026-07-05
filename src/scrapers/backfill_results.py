@@ -8,13 +8,21 @@ its own event rows (so re-importing would duplicate the event). This closes the
 gap onto the EXISTING ufc.com bout rows:
 
   1. Find past ufc.com events whose bouts still lack a result OR fight_stats
-     OR the per-round breakdown (fight_stats_rounds, migration 012 / BE4).
+     OR the per-round breakdown (fight_stats_rounds, migration 012 / BE4) OR —
+     with the result already filled — the referee (officials, migration 011 /
+     BE8: fight_officials only targets source='ufcstats' fights, so ufc.com
+     bouts would otherwise never get referee/scorecards).
   2. Match each to the corresponding ufcstats event by date (+ name tie-break).
   3. For each bout, open its ufcstats fight detail page once and fill the result
      (winner/method/round/time), the fight_stats (sig strikes + the #45
      head/body/leg + distance/clinch/ground breakdown) AND one
      fight_stats_rounds row per (fighter, round), matching fighters by name
      (corner-swap tolerant) so no duplicate events/fights are ever created.
+  4. From that SAME page (zero extra fetches), fill fights.referee and the
+     judges' fight_scorecards with fight_officials' parser/writers. Scorecard
+     orientation is resolved source-ids -> fuzzy names; unlike the ufcstats
+     path there is NO positional default (ufc.com corner order proves nothing
+     about ufcstats page order), so an unresolved bout is skipped and counted.
 
 Idempotent: results only fill where method is still NULL — or still one of the
 PROVISIONAL codes the ESPN live updater writes on fight night
@@ -45,6 +53,13 @@ from .config import get_settings
 from .db import connect
 from .enrich_ranked import _fold
 from .espn_live_results import ESPN_PROVISIONAL_METHODS
+from .fight_officials import (
+    TargetFight,
+    insert_scorecard,
+    parse_fight_officials,
+    resolve_first_person_is_red,
+    update_fight_referee,
+)
 from .http import UfcStatsClient
 from .logging_config import configure_logging
 from .parsers.events import parse_events_index
@@ -65,15 +80,27 @@ UFC_SOURCE = "ufc.com"
 UFCSTATS_EVENTS_URL = "http://ufcstats.com/statistics/events/completed"
 
 
+def _is_decision(method: str | None) -> bool:
+    """Whether a stored/scraped method means the fight went to the judges.
+
+    Matches every spelling in play: 'U-DEC'/'S-DEC'/'M-DEC' (ufcstats event
+    page), 'Decision - Unanimous' (detail page) and ESPN's provisional
+    'Decision'. Finishes never have scorecards, so anything else is False.
+    """
+    return method is not None and "dec" in method.lower()
+
+
 class _Bout:
     __slots__ = (
         "id", "red_id", "blue_id", "red_name", "blue_name", "method",
         "has_stats", "has_round_stats",
+        "referee", "has_scorecards", "red_source_id", "blue_source_id",
     )
 
     def __init__(
         self, id, red_id, blue_id, red_name, blue_name, method=None,
         has_stats=False, has_round_stats=False,
+        referee=None, has_scorecards=False, red_source_id=None, blue_source_id=None,
     ):
         self.id = id
         self.red_id = red_id
@@ -83,11 +110,25 @@ class _Bout:
         self.method = method
         self.has_stats = has_stats
         self.has_round_stats = has_round_stats
+        self.referee = referee
+        self.has_scorecards = has_scorecards
+        self.red_source_id = red_source_id
+        self.blue_source_id = blue_source_id
 
     def needs_result(self) -> bool:
         """No result yet, or only the PROVISIONAL one the ESPN live updater
         wrote on fight night — ufcstats detail upgrades that."""
         return self.method is None or self.method in ESPN_PROVISIONAL_METHODS
+
+    def needs_officials(self, method: str | None = None) -> bool:
+        """Referee still missing, or a decision without its judges' scorecards.
+
+        ``method`` lets _fill_event pass the fresher ufcstats method when the
+        stored one is still NULL/provisional (result filled this same pass).
+        """
+        if self.referee is None:
+            return True
+        return not self.has_scorecards and _is_decision(method or self.method)
 
     def key(self) -> frozenset[str]:
         return frozenset({_fold(self.red_name), _fold(self.blue_name)})
@@ -128,6 +169,11 @@ def _get_events_needing_results(connection, limit: int | None) -> list[tuple[int
                     -- ... and both fighters' per-round rows (migration 012 / BE4)
                     OR (SELECT COUNT(DISTINCT fsr.fighter_id)
                         FROM fight_stats_rounds fsr WHERE fsr.fight_id = fi.id) < 2
+                    -- result filled but the referee never was (migration 011 /
+                    -- BE8): officials for ufc.com bouts ride on the same fight
+                    -- page, so the event keeps qualifying until they land too
+                    OR (fi.referee IS NULL
+                        AND (fi.winner_id IS NOT NULL OR fi.method IS NOT NULL))
                   )
               )
             ORDER BY e.event_date DESC
@@ -149,7 +195,11 @@ def _get_bouts(connection, event_id: int) -> list[_Bout]:
                    fi.method,
                    (SELECT COUNT(*) FROM fight_stats fs WHERE fs.fight_id = fi.id) >= 2 AS has_stats,
                    (SELECT COUNT(DISTINCT fsr.fighter_id)
-                    FROM fight_stats_rounds fsr WHERE fsr.fight_id = fi.id) >= 2 AS has_round_stats
+                    FROM fight_stats_rounds fsr WHERE fsr.fight_id = fi.id) >= 2 AS has_round_stats,
+                   fi.referee,
+                   EXISTS (SELECT 1 FROM fight_scorecards sc
+                           WHERE sc.fight_id = fi.id) AS has_scorecards,
+                   red.source_id, blue.source_id
             FROM fights fi
             LEFT JOIN fighters red ON red.id = fi.fighter_red_id
             LEFT JOIN fighters blue ON blue.id = fi.fighter_blue_id
@@ -158,7 +208,10 @@ def _get_bouts(connection, event_id: int) -> list[_Bout]:
             (event_id,),
         )
         return [
-            _Bout(int(r[0]), r[1], r[2], r[3], r[4], r[5], bool(r[6]), bool(r[7]))
+            _Bout(
+                int(r[0]), r[1], r[2], r[3], r[4], r[5], bool(r[6]), bool(r[7]),
+                r[8], bool(r[9]), r[10], r[11],
+            )
             for r in cursor.fetchall()
         ]
 
@@ -227,7 +280,10 @@ def _fill_event(connection, client, settings, event_id, bouts, detail_url, count
     for bout in bouts:
         needs_result = bout.needs_result()
         needs_stats = not bout.has_stats or not bout.has_round_stats
-        if not needs_result and not needs_stats:
+        # DB-state check only here; re-checked against the ufcstats method
+        # below so a result filled THIS pass pulls its scorecards in too.
+        needs_officials = bout.needs_officials()
+        if not needs_result and not needs_stats and not needs_officials:
             continue
         fight = by_key.get(bout.key())
         if fight is None:
@@ -291,6 +347,10 @@ def _fill_event(connection, client, settings, event_id, bouts, detail_url, count
                     upsert_fight_stats(connection, build_fight_stats_record(bout.id, fighter_id, fighter_stats))
                 counts["stats_rows"] += 1
             _fill_round_stats(connection, bout, fight_page.soup, counts, dry_run)
+        # Officials come off the SAME soup already in hand (BE8 parity for
+        # ufc.com bouts, zero extra fetches).
+        if bout.needs_officials(fight.method):
+            _fill_officials(connection, bout, fight_page.soup, counts, dry_run)
 
 
 def _fill_round_stats(connection, bout, fight_page_soup, counts, dry_run) -> None:
@@ -317,6 +377,55 @@ def _fill_round_stats(connection, bout, fight_page_soup, counts, dry_run) -> Non
                 connection, build_fight_stats_round_record(bout.id, fighter_id, round_stats)
             )
         counts["round_stats_rows"] += 1
+
+
+def _fill_officials(connection, bout, fight_page_soup, counts, dry_run) -> None:
+    """Persist referee + judges' scorecards off a fight-details page (BE8).
+
+    Reuses fight_officials' parser and writers (referee COALESCE, scorecards
+    ON CONFLICT DO NOTHING), so re-runs never stomp or duplicate. The referee
+    is corner-agnostic and always safe to fill; scorecards need the page's
+    person order mapped onto the bout's corners, and a ufc.com bout gets NO
+    positional default — an unresolved orientation skips them (counted) rather
+    than risk writing every judge's scores swapped.
+    """
+    officials = parse_fight_officials(fight_page_soup)
+    if officials.referee is None and not officials.scorecards:
+        counts["officials_missing"] += 1
+        return
+    if bout.referee is None and officials.referee is not None:
+        counts["referees_filled"] += 1
+        if not dry_run:
+            update_fight_referee(connection, bout.id, officials.referee)
+    if bout.has_scorecards or not officials.scorecards:
+        return
+    # Orientation target: only the corner fields matter, source_id is unused.
+    target = TargetFight(
+        fight_id=bout.id,
+        source_id="",
+        red_source_id=bout.red_source_id,
+        blue_source_id=bout.blue_source_id,
+        red_name=bout.red_name,
+        blue_name=bout.blue_name,
+    )
+    red_first = resolve_first_person_is_red(officials, target)
+    if red_first is None:
+        counts["officials_unresolved"] += 1
+        LOGGER.warning(
+            "  cannot orient scorecards for bout %s (%s vs %s), skipping",
+            bout.id, bout.red_name, bout.blue_name,
+        )
+        return
+    for card in officials.scorecards:
+        red_score, blue_score = (
+            (card.first_score, card.second_score)
+            if red_first
+            else (card.second_score, card.first_score)
+        )
+        if dry_run:
+            counts["scorecards_inserted"] += 1
+        elif insert_scorecard(connection, bout.id, card.judge_name, red_score, blue_score):
+            counts["scorecards_inserted"] += 1
 
 
 def backfill(dry_run: bool = False, limit: int | None = None) -> dict:
@@ -363,7 +472,9 @@ def main() -> None:
     keys = [
         "events_candidate", "events_matched", "events_unmatched",
         "bouts_filled", "bouts_unmatched", "stats_rows", "stats_unmatched", "stats_empty",
-        "round_stats_rows", "round_stats_unmatched", "round_stats_empty", "event_errors",
+        "round_stats_rows", "round_stats_unmatched", "round_stats_empty",
+        "referees_filled", "scorecards_inserted", "officials_unresolved",
+        "officials_missing", "event_errors",
     ]
     print(json.dumps({k: counts.get(k, 0) for k in keys}, indent=2))
 
