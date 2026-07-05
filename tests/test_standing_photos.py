@@ -8,9 +8,12 @@ the athlete's name as alt. No network, no DB: the backfill gets an injected
 fetch() and writes go through the shared fakedb recorder.
 """
 
+from datetime import date
+
 from bs4 import BeautifulSoup
 
 from src.scrapers import backfill_standing_photos
+from src.scrapers.backfill_standing_photos import guess_ufc_slug
 from src.scrapers.repositories.fighters import update_fighter_standing_photo
 from src.scrapers.upcoming_events import ParsedBout, _parse_bouts
 
@@ -161,17 +164,30 @@ _FIGHTER_ROWS = [
 ]
 
 
-def _responder(fight_rows, update_result=((1,),), fighter_rows=_FIGHTER_ROWS):
+def _responder(
+    fight_rows,
+    update_result=((1,),),
+    fighter_rows=_FIGHTER_ROWS,
+    event_rows=_EVENT_ROWS,
+    deduced_rows=(),
+    claim_result=((1,),),
+):
     def responder(sql, params=None):
         flat = " ".join(sql.split())
         if flat.startswith("SELECT") and "FROM events" in flat:
-            return _EVENT_ROWS
+            # The lookback query (round B) filters on status='completed'; the
+            # source='ufc.com' target query carries no status filter.
+            if "status = 'completed'" in flat:
+                return list(deduced_rows)
+            return list(event_rows)
         if flat.startswith("SELECT") and "FROM fighters" in flat:
             return fighter_rows
         if flat.startswith("SELECT") and "FROM fights" in flat:
             return fight_rows
         if "UPDATE fighters" in flat:
             return list(update_result)
+        if "UPDATE events" in flat:
+            return list(claim_result)
         return []
 
     return responder
@@ -260,3 +276,167 @@ def test_backfill_targets_ufc_events_newest_first_with_limit(fakedb):
     assert flat.endswith("LIMIT %s")
     assert params == ("ufc.com", 5)
     assert events == [(10, "ufc-328")]
+
+
+# --------------------------------------------------------------- slug deduction
+
+
+def test_guess_ufc_slug_numbered_card():
+    slugs = guess_ufc_slug("UFC 328: Chimaev vs Strickland", date(2026, 5, 9))
+    assert slugs == ["ufc-328"]
+
+
+def test_guess_ufc_slug_fight_night_uses_english_month_and_unpadded_day():
+    # The real ufc.com format (HEAD /event/ufc-fight-night-april-25-2026 -> 200).
+    slugs = guess_ufc_slug("UFC Fight Night: Sterling vs. Zalal", date(2026, 4, 25))
+    assert slugs == ["ufc-fight-night-april-25-2026"]
+
+
+def test_guess_ufc_slug_short_day_adds_zero_padded_second_candidate():
+    slugs = guess_ufc_slug("UFC Fight Night: A vs B", date(2026, 4, 5))
+    assert slugs == [
+        "ufc-fight-night-april-5-2026",
+        "ufc-fight-night-april-05-2026",
+    ]
+
+
+def test_guess_ufc_slug_other_names_fall_back_to_fight_night_pattern():
+    assert guess_ufc_slug("UFC on ABC: X vs Y", date(2026, 3, 14)) == [
+        "ufc-fight-night-march-14-2026"
+    ]
+    # "The Ultimate Fighter 34 Finale" is not "UFC <n>": date fallback too.
+    assert guess_ufc_slug("The Ultimate Fighter 34 Finale", date(2026, 8, 1)) == [
+        "ufc-fight-night-august-1-2026",
+        "ufc-fight-night-august-01-2026",
+    ]
+
+
+def test_guess_ufc_slug_without_date_returns_no_candidates():
+    assert guess_ufc_slug("UFC Fight Night: X vs Y", None) == []
+
+
+# ----------------------------------------------- backfill via deduced slug (B)
+
+
+# ufcstats-imported completed event: no source, no slug. Fight rows carry no
+# ufc.com fmid either, so corners resolve through the central name matcher.
+_DEDUCED_ROWS = [(20, "UFC Fight Night: Sterling vs. Zalal", date(2026, 4, 25))]
+_DEDUCED_URL = "https://www.ufc.com/event/ufc-fight-night-april-25-2026"
+
+
+def _fetch_deduced(url: str) -> BeautifulSoup:
+    assert url == _DEDUCED_URL
+    return _soup()
+
+
+def _event_claims(conn):
+    return [
+        (" ".join(sql.split()), params)
+        for cur in conn.cursors
+        for sql, params in cur.executed
+        if "UPDATE events" in sql
+    ]
+
+
+def test_backfill_resolves_completed_event_without_source_via_deduced_slug(fakedb):
+    conn = fakedb.Connection(
+        _responder(fight_rows=[], event_rows=[], deduced_rows=_DEDUCED_ROWS)
+    )
+    counts = backfill_standing_photos.backfill(conn, _fetch_deduced)
+    assert counts["events"] == 1
+    assert counts["deduced_resolved"] == 1
+    assert counts["images_found"] == 2
+    assert counts["matched"] == 2  # via the name matcher: no ufc.com fmids here
+    assert counts["updated"] == 2
+    # The event row is claimed so future sweeps target it directly...
+    assert counts["source_claimed"] == 1
+    claims = _event_claims(conn)
+    assert len(claims) == 1
+    flat, params = claims[0]
+    assert "SET source = %s, source_id = %s" in flat
+    # ...but ONLY when both fields are still NULL (never clobbers a linkage),
+    # and never colliding with a ufc.com twin on the (source, source_id) index.
+    assert "source IS NULL AND source_id IS NULL" in flat
+    assert "NOT EXISTS" in flat
+    assert params[:3] == ("ufc.com", "ufc-fight-night-april-25-2026", 20)
+
+
+def test_backfill_deduced_lookback_query_shape(fakedb):
+    conn = fakedb.Connection(_responder(fight_rows=[], deduced_rows=_DEDUCED_ROWS))
+    rows = backfill_standing_photos._get_recent_events_without_source(conn, 120)
+    sql, params = conn.cursors[0].executed[0]
+    flat = " ".join(sql.split())
+    assert "status = 'completed'" in flat
+    assert "(source IS NULL OR source <> %s)" in flat
+    assert "event_date >= CURRENT_DATE - %s" in flat
+    assert "ORDER BY event_date DESC" in flat
+    assert params == ("ufc.com", 120)
+    assert rows == [(20, "UFC Fight Night: Sterling vs. Zalal", date(2026, 4, 25))]
+
+
+def test_backfill_deduced_tries_next_candidate_after_miss(fakedb):
+    rows = [(21, "UFC Fight Night: A vs B", date(2026, 4, 5))]
+    conn = fakedb.Connection(_responder(fight_rows=[], event_rows=[], deduced_rows=rows))
+    calls = []
+
+    def fetch(url: str) -> BeautifulSoup:
+        calls.append(url)
+        if url.endswith("ufc-fight-night-april-5-2026"):
+            raise RuntimeError("HTTP 404")  # miss: probe the padded variant
+        return _soup()
+
+    counts = backfill_standing_photos.backfill(conn, fetch)
+    assert calls == [
+        "https://www.ufc.com/event/ufc-fight-night-april-5-2026",
+        "https://www.ufc.com/event/ufc-fight-night-april-05-2026",
+    ]
+    assert counts["deduced_resolved"] == 1
+    assert counts["fetch_errors"] == 0  # candidate misses are not fetch errors
+    assert counts["updated"] == 2
+    assert [p[1] for _flat, p in _event_claims(conn)] == ["ufc-fight-night-april-05-2026"]
+
+
+def test_backfill_deduced_treats_boutless_page_as_unresolved(fakedb):
+    # Unknown slugs do NOT 404: ufc.com 302-redirects them to /search (200),
+    # whose page parses to zero bouts -> the candidate must count as a miss.
+    conn = fakedb.Connection(
+        _responder(fight_rows=[], event_rows=[], deduced_rows=_DEDUCED_ROWS)
+    )
+
+    def fetch(url: str) -> BeautifulSoup:
+        return BeautifulSoup("<html><body>search results</body></html>", "lxml")
+
+    counts = backfill_standing_photos.backfill(conn, fetch)
+    assert counts["deduced_unresolved"] == 1
+    assert counts["events"] == 0
+    assert counts["source_claimed"] == 0
+    assert fakedb.mutating_statements(conn) == []
+
+
+def test_backfill_deduced_never_overwrites_existing_source(fakedb):
+    # claim_result=() -> rowcount 0: the guarded UPDATE matched no row because
+    # the event already carried a non-NULL source (e.g. another provider).
+    # Photos still flow; the (source, source_id) linkage is left untouched.
+    conn = fakedb.Connection(
+        _responder(
+            fight_rows=[], event_rows=[], deduced_rows=_DEDUCED_ROWS, claim_result=()
+        )
+    )
+    counts = backfill_standing_photos.backfill(conn, _fetch_deduced)
+    assert counts["updated"] == 2
+    assert counts["source_claimed"] == 0
+    (flat, _params), = _event_claims(conn)
+    assert "source IS NULL AND source_id IS NULL" in flat  # SQL-level guard
+
+
+def test_backfill_deduced_dry_run_writes_nothing(fakedb):
+    conn = fakedb.Connection(
+        _responder(fight_rows=[], event_rows=[], deduced_rows=_DEDUCED_ROWS)
+    )
+    counts = backfill_standing_photos.backfill(conn, _fetch_deduced, dry_run=True)
+    assert counts["matched"] == 2
+    assert counts["updated"] == 0
+    assert counts["source_claimed"] == 0
+    assert fakedb.mutating_statements(conn) == []  # no photo writes, no claim
+    assert conn.commits == 0
+    assert conn.rollbacks == 1
