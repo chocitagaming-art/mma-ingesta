@@ -56,7 +56,7 @@ from bs4 import BeautifulSoup
 from .config import get_settings
 from .db import connect
 from .logging_config import configure_logging
-from .matching import IDENTITY_THRESHOLD, fuzzy_match
+from .matching import IDENTITY_THRESHOLD, fold, fuzzy_match
 from .repositories.events import _significant_tokens
 
 LOGGER = logging.getLogger(__name__)
@@ -239,11 +239,26 @@ def parse_bonus_awards(html: str) -> list[ParsedBonus]:
 
 # ------------------------------------------------------------------ matching
 
+# Scraped Wikipedia name (keyed by matching.fold) -> canonical name in the
+# fighters table, for fighters whose article name sits beyond fuzzy reach of
+# the stored one (e.g. Wikipedia's "Beatriz Mesquita" vs the stored
+# "Bia Mesquita": fold_ratio 0.79 < 0.92). Same precedent as
+# rankings.NAME_ALIASES. The alias is tried IN ADDITION to the literal scraped
+# name, so a DB that stores the long form keeps matching unchanged.
+NAME_ALIASES: dict[str, str] = {
+    "beatriz mesquita": "Bia Mesquita",
+}
+
 
 def _names_equal(scraped: str, stored: str | None) -> bool:
     # IDENTITY_THRESHOLD: the match attaches a DB id, so it keeps the strict
     # 0.92 cutoff every other fighter_id-linking path uses (see matching.py).
-    return bool(stored) and fuzzy_match(scraped, stored, IDENTITY_THRESHOLD)
+    if not stored:
+        return False
+    if fuzzy_match(scraped, stored, IDENTITY_THRESHOLD):
+        return True
+    alias = NAME_ALIASES.get(fold(scraped))
+    return alias is not None and fuzzy_match(alias, stored, IDENTITY_THRESHOLD)
 
 
 def match_fotn_fight(fights: list[EventFight], name_a: str, name_b: str) -> int | None:

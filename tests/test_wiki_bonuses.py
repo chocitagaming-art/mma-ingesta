@@ -187,6 +187,24 @@ def test_match_potn_skips_unlinked_corner():
     assert match_potn_fighter(_FIGHTS, "Somebody Unknown") is None
 
 
+def test_match_applies_scraped_name_alias():
+    # Wikipedia says "Beatriz Mesquita"; the DB stores "Bia Mesquita"
+    # (fold_ratio 0.79 < 0.92) -> only the NAME_ALIASES entry can bridge it.
+    fights = [EventFight(300, 31, 32, "Bia Mesquita", "Some Opponent")]
+    assert match_potn_fighter(fights, "Beatriz Mesquita") == 31
+    assert match_fotn_fight(fights, "Beatriz Mesquita", "Some Opponent") == 300
+
+
+def test_alias_is_additive_and_leaves_other_names_untouched():
+    # A DB that stores the LONG form still matches the literal scraped name
+    # (the alias is tried in addition, never instead).
+    fights = [EventFight(301, 41, 42, "Beatriz Mesquita", "Some Opponent")]
+    assert match_potn_fighter(fights, "Beatriz Mesquita") == 41
+    # Names without an alias keep matching exactly as before.
+    assert match_potn_fighter(_FIGHTS, "Bo Nickal") == 3
+    assert match_potn_fighter(_FIGHTS, "Bia Mesquita") is None
+
+
 # ---------------------------------------------------------------- db pipeline
 
 
@@ -271,6 +289,23 @@ def test_backfill_unmatched_bonus_is_counted_not_written(fakedb):
     assert counts["bonuses_unmatched"] == 1
     assert counts["bonuses_inserted"] == 1  # the POTN that did match
     assert [p for _sql, p in _bonus_inserts(conn)] == [(10, "POTN", None, 3)]
+
+
+def test_backfill_matches_bonus_through_name_alias(fakedb):
+    # End to end: the article awards "Beatriz Mesquita" a POTN and the event's
+    # fight stores her as "Bia Mesquita" -> the alias resolves the fighter_id.
+    html = """
+    <h2>Bonus awards</h2>
+    <ul>
+      <li>Performance of the Night: Beatriz Mesquita</li>
+    </ul>
+    """
+    fight_rows = [(150, 51, 52, "Bia Mesquita", "Some Opponent")]
+    conn = fakedb.Connection(_responder(fight_rows=fight_rows))
+    counts = wiki_bonuses.backfill(conn, _wiki_fetch(html=html))
+    assert counts["bonuses_unmatched"] == 0
+    assert counts["bonuses_inserted"] == 1
+    assert [p for _sql, p in _bonus_inserts(conn)] == [(10, "POTN", None, 51)]
 
 
 def test_backfill_dry_run_writes_nothing(fakedb):
