@@ -49,6 +49,27 @@ class FightRecord:
 
 
 @dataclass(frozen=True)
+class FightStatsRoundRecord:
+    """One fighter's core stats for ONE round (migration 012 / BE4).
+
+    fight_stats keeps the same metrics summed across rounds; this record is the
+    per-round breakdown parsed from the "Per round" table of a ufcstats
+    fight-details page. Rounds are 1-based and match fights.end_round.
+    """
+
+    fight_id: int
+    fighter_id: int
+    round: int
+    sig_strikes_landed: int | None
+    sig_strikes_attempted: int | None
+    takedowns_landed: int | None
+    takedowns_attempted: int | None
+    submission_attempts: int | None
+    control_time_seconds: int | None
+    knockdowns: int | None
+
+
+@dataclass(frozen=True)
 class FightStatsRecord:
     fight_id: int
     fighter_id: int

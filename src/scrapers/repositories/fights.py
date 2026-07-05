@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from psycopg2.extensions import connection as PgConnection
 
-from ..models import FightRecord, FightStatsRecord
+from ..models import FightRecord, FightStatsRecord, FightStatsRoundRecord
 
 
 @dataclass(frozen=True)
@@ -246,6 +246,114 @@ def upsert_fight_stats(connection: PgConnection, stats: FightStatsRecord) -> Non
                 stats.sig_str_ground_attempted,
             ),
         )
+
+
+def upsert_fight_stats_rounds(connection: PgConnection, stats: FightStatsRoundRecord) -> None:
+    """Upsert one fighter's stats for one round (migration 012 / BE4).
+
+    COALESCE on the conflict branch: a re-scrape that fails to parse a metric
+    (NULL) never wipes a stored value, mirroring the no-NULL-overwrite policy
+    of the fights result columns.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO fight_stats_rounds (
+                fight_id, fighter_id, round, sig_strikes_landed,
+                sig_strikes_attempted, takedowns_landed, takedowns_attempted,
+                submission_attempts, control_time_seconds, knockdowns
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (fight_id, fighter_id, round)
+            DO UPDATE SET
+                sig_strikes_landed = COALESCE(EXCLUDED.sig_strikes_landed, fight_stats_rounds.sig_strikes_landed),
+                sig_strikes_attempted = COALESCE(EXCLUDED.sig_strikes_attempted, fight_stats_rounds.sig_strikes_attempted),
+                takedowns_landed = COALESCE(EXCLUDED.takedowns_landed, fight_stats_rounds.takedowns_landed),
+                takedowns_attempted = COALESCE(EXCLUDED.takedowns_attempted, fight_stats_rounds.takedowns_attempted),
+                submission_attempts = COALESCE(EXCLUDED.submission_attempts, fight_stats_rounds.submission_attempts),
+                control_time_seconds = COALESCE(EXCLUDED.control_time_seconds, fight_stats_rounds.control_time_seconds),
+                knockdowns = COALESCE(EXCLUDED.knockdowns, fight_stats_rounds.knockdowns)
+            """,
+            (
+                stats.fight_id,
+                stats.fighter_id,
+                stats.round,
+                stats.sig_strikes_landed,
+                stats.sig_strikes_attempted,
+                stats.takedowns_landed,
+                stats.takedowns_attempted,
+                stats.submission_attempts,
+                stats.control_time_seconds,
+                stats.knockdowns,
+            ),
+        )
+
+
+def find_fight_id_by_fighters(
+    connection: PgConnection, event_id: int, fighter_a_id: int, fighter_b_id: int
+) -> int | None:
+    """Fight row of this event pairing these two fighters, either corner order.
+
+    Used by the ESPN live-results updater (BE1), which resolves fighters by
+    ESPN athlete id / name and therefore cannot key on (source, source_id).
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id
+            FROM fights
+            WHERE event_id = %s
+              AND (
+                (fighter_red_id = %s AND fighter_blue_id = %s)
+                OR (fighter_red_id = %s AND fighter_blue_id = %s)
+              )
+            ORDER BY id
+            LIMIT 1
+            """,
+            (event_id, fighter_a_id, fighter_b_id, fighter_b_id, fighter_a_id),
+        )
+        row = cursor.fetchone()
+        return int(row[0]) if row else None
+
+
+def fill_fight_result(
+    connection: PgConnection,
+    fight_id: int,
+    winner_id: int | None,
+    method: str | None,
+    end_round: int | None,
+    end_time: str | None,
+) -> bool:
+    """Fill ONLY the still-NULL result columns of a fight (BE1, casi-en-vivo).
+
+    COALESCE(column, %s): the STORED value always wins, so ESPN's provisional
+    result can never stomp data already written by ufcstats (better quality).
+    The WHERE guard skips the row entirely when nothing would be filled
+    (no churn on every 10-minute poll). Returns True if the row changed.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE fights
+            SET winner_id = COALESCE(winner_id, %s),
+                method = COALESCE(method, %s),
+                end_round = COALESCE(end_round, %s),
+                end_time = COALESCE(end_time, %s),
+                updated_at = NOW()
+            WHERE id = %s
+              AND (
+                (winner_id IS NULL AND %s IS NOT NULL)
+                OR (method IS NULL AND %s IS NOT NULL)
+                OR (end_round IS NULL AND %s IS NOT NULL)
+                OR (end_time IS NULL AND %s IS NOT NULL)
+              )
+            """,
+            (
+                winner_id, method, end_round, end_time, fight_id,
+                winner_id, method, end_round, end_time,
+            ),
+        )
+        return cursor.rowcount > 0
 
 
 def list_fights_for_winner_repair(connection: PgConnection) -> list[tuple[int, str]]:

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
 from ..config import Settings
-from ..models import FightStatsRecord
+from ..models import FightStatsRecord, FightStatsRoundRecord
 from ..utils import clean_text, parse_control_time_to_seconds, parse_int, parse_landed_attempted, source_id_from_url
 
 
@@ -33,6 +34,16 @@ class FightPageRecord:
 class ParsedFightStats:
     fighter_source_id: str | None
     fighter_name: str
+    stats: dict[str, int | None]
+
+
+@dataclass(frozen=True)
+class ParsedRoundStats:
+    """One fighter's core stats for ONE round of a fight-details page (BE4)."""
+
+    fighter_source_id: str | None
+    fighter_name: str
+    round: int
     stats: dict[str, int | None]
 
 
@@ -143,6 +154,94 @@ def parse_fight_stats(soup: BeautifulSoup) -> list[ParsedFightStats]:
             )
         )
     return parsed
+
+
+_ROUND_MARKER_RE = re.compile(r"round\s+(\d+)", re.IGNORECASE)
+
+
+def parse_fight_stats_rounds(soup: BeautifulSoup) -> list[ParsedRoundStats]:
+    """Parse the PER-ROUND core stats from a ufcstats fight-details page (BE4).
+
+    Same "overall" table (header contains 'KD') that :func:`parse_fight_stats`
+    sums: one data row per round, each preceded by a ``<thead>`` marker row
+    whose text is "Round N". The round number is read from that marker and
+    falls back to the row's document position, so both current markup and a
+    marker-less variant parse. A table without any Round marker (an all-rounds
+    totals table, older markup) is never mistaken for per-round data: rows are
+    only accepted when at least one marker exists in the table.
+    """
+    tables = soup.select("table.b-fight-details__table")
+    overall = _find_stats_table(tables, "KD") or (tables[0] if tables else None)
+    if overall is None:
+        return []
+    markers = overall.select("thead.b-fight-details__table-row_type_head")
+    if not markers:
+        return []  # totals-only table: no per-round breakdown on this page
+    rows = _data_rows(overall)
+    parsed: list[ParsedRoundStats] = []
+    for row_index, row in enumerate(rows):
+        round_number = _round_number_for_row(row, row_index)
+        fighter_links = _row_fighter_links(row)
+        for fighter_index, link in enumerate(fighter_links[:2]):
+            sig_landed, sig_attempted = parse_landed_attempted(_cell_value(row, 2, fighter_index))
+            td_landed, td_attempted = parse_landed_attempted(_cell_value(row, 5, fighter_index))
+            parsed.append(
+                ParsedRoundStats(
+                    fighter_source_id=source_id_from_url(link.get("href")) if link.get("href") else None,
+                    fighter_name=clean_text(link.get_text(" ", strip=True)) or "",
+                    round=round_number,
+                    stats={
+                        "sig_strikes_landed": sig_landed,
+                        "sig_strikes_attempted": sig_attempted,
+                        "takedowns_landed": td_landed,
+                        "takedowns_attempted": td_attempted,
+                        "submission_attempts": parse_int(_cell_value(row, 7, fighter_index)),
+                        "control_time_seconds": parse_control_time_to_seconds(_cell_value(row, 9, fighter_index)),
+                        "knockdowns": parse_int(_cell_value(row, 1, fighter_index)),
+                    },
+                )
+            )
+    return parsed
+
+
+def _row_fighter_links(row) -> list:
+    first_cells = row.find_all("td", recursive=False)
+    if not first_cells:
+        return []
+    return first_cells[0].select("a[href*='/fighter-details/']")
+
+
+def _round_number_for_row(row, row_index: int) -> int:
+    """Round of a per-round data row: nearest preceding "Round N" marker.
+
+    The per-round table interleaves ``<thead class="...__table-row_type_head">
+    <th>Round N</th></thead>`` with the data rows inside one tbody. Falls back
+    to the row's 1-based document position when no marker precedes it.
+    """
+    marker = row.find_previous_sibling("thead")
+    if marker is not None:
+        match = _ROUND_MARKER_RE.search(marker.get_text(" ", strip=True))
+        if match:
+            return int(match.group(1))
+    return row_index + 1
+
+
+def build_fight_stats_round_record(
+    fight_id: int, fighter_id: int, parsed: ParsedRoundStats
+) -> FightStatsRoundRecord:
+    stats = parsed.stats
+    return FightStatsRoundRecord(
+        fight_id=fight_id,
+        fighter_id=fighter_id,
+        round=parsed.round,
+        sig_strikes_landed=stats["sig_strikes_landed"],
+        sig_strikes_attempted=stats["sig_strikes_attempted"],
+        takedowns_landed=stats["takedowns_landed"],
+        takedowns_attempted=stats["takedowns_attempted"],
+        submission_attempts=stats["submission_attempts"],
+        control_time_seconds=stats["control_time_seconds"],
+        knockdowns=stats["knockdowns"],
+    )
 
 
 def build_fight_stats_record(fight_id: int, fighter_id: int, parsed: ParsedFightStats) -> FightStatsRecord:

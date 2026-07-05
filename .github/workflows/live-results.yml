@@ -1,0 +1,52 @@
+name: Live results (ESPN)
+
+# Casi-en-vivo (fase 6 / BE1): fills winner/method/round/time onto our bouts
+# from ESPN's public scoreboard minutes after each fight ends. Results are
+# PROVISIONAL ('Decision'/'Submission'/'KO/TKO') and only ever fill NULLs; the
+# daily backfill_results upgrades them with ufcstats detail afterwards.
+#
+# Schedule: every 10 min ONLY during the typical event windows —
+#   - Sun 00:00-08:59 UTC = Saturday night US (numbered cards / fight nights)
+#   - Sat 00:00-08:59 UTC = Friday night US (contender series / early cards)
+# Cheap guard: the module fetches the scoreboard FIRST and exits 0 without
+# touching the DB when no event of today/yesterday US is in/post (and after
+# read-only queries when none matches a DB event), so idle runs cost seconds.
+on:
+  schedule:
+    - cron: "*/10 0-8 * * 0"
+    - cron: "*/10 0-8 * * 6"
+  workflow_dispatch:
+    inputs:
+      dates:
+        description: "ESPN dates (YYYYMMDD or YYYYMMDD-YYYYMMDD, US local; empty = today+yesterday US)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry-run: match + report, no writes"
+        type: boolean
+        default: false
+
+concurrency:
+  group: live-results
+  cancel-in-progress: false
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+      - run: pip install -r requirements-scrapers.txt
+      - name: Fill live results from ESPN scoreboard
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.dates || '' }}" ]; then ARGS="$ARGS --dates ${{ inputs.dates }}"; fi
+          if [ "${{ inputs.dry_run || false }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python -m src.scrapers.espn_live_results $ARGS
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

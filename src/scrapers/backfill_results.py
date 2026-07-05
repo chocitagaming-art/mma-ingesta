@@ -7,17 +7,26 @@ because ufc.com never publishes them and the ufcstats historical importer keeps
 its own event rows (so re-importing would duplicate the event). This closes the
 gap onto the EXISTING ufc.com bout rows:
 
-  1. Find past ufc.com events whose bouts still lack a result OR fight_stats.
+  1. Find past ufc.com events whose bouts still lack a result OR fight_stats
+     OR the per-round breakdown (fight_stats_rounds, migration 012 / BE4).
   2. Match each to the corresponding ufcstats event by date (+ name tie-break).
   3. For each bout, open its ufcstats fight detail page once and fill the result
-     (winner/method/round/time) AND the fight_stats (sig strikes + the #45
-     head/body/leg + distance/clinch/ground breakdown), matching fighters by name
+     (winner/method/round/time), the fight_stats (sig strikes + the #45
+     head/body/leg + distance/clinch/ground breakdown) AND one
+     fight_stats_rounds row per (fighter, round), matching fighters by name
      (corner-swap tolerant) so no duplicate events/fights are ever created.
 
-Idempotent: results only fill where method is still NULL; stats upsert ON
-CONFLICT. Wired as the last step of refresh_upcoming.py, so every daily refresh
-fully ingests whatever just finished — that's how just-completed events get
-their strike stats without the historical re-import.
+Idempotent: results only fill where method is still NULL — or still one of the
+PROVISIONAL codes the ESPN live updater writes on fight night
+(espn_live_results.ESPN_PROVISIONAL_METHODS): ufcstats is the better source,
+so its detailed method ('U-DEC', 'KO/TKO - Punches', ...) upgrades the generic
+ESPN one, never the other way around. Stats upsert ON CONFLICT. Wired as the
+last step of refresh_upcoming.py, so every daily refresh fully ingests whatever
+just finished — that's how just-completed events get their strike stats without
+the historical re-import.
+
+REQUIRES migration db/migrations/012_fase6.sql applied first (the candidate
+query and the stats step touch fight_stats_rounds).
 
 Usage (writes to the DB):
     python -m src.scrapers.backfill_results --dry-run   # find + match + report, no writes
@@ -35,16 +44,19 @@ from collections import Counter
 from .config import get_settings
 from .db import connect
 from .enrich_ranked import _fold
+from .espn_live_results import ESPN_PROVISIONAL_METHODS
 from .http import UfcStatsClient
 from .logging_config import configure_logging
 from .parsers.events import parse_events_index
 from .parsers.fights import (
     FightPageRecord,
     build_fight_stats_record,
+    build_fight_stats_round_record,
     parse_event_fights,
     parse_fight_stats,
+    parse_fight_stats_rounds,
 )
-from .repositories.fights import upsert_fight_stats
+from .repositories.fights import upsert_fight_stats, upsert_fight_stats_rounds
 from .utils import clean_text
 
 LOGGER = logging.getLogger(__name__)
@@ -54,9 +66,15 @@ UFCSTATS_EVENTS_URL = "http://ufcstats.com/statistics/events/completed"
 
 
 class _Bout:
-    __slots__ = ("id", "red_id", "blue_id", "red_name", "blue_name", "method", "has_stats")
+    __slots__ = (
+        "id", "red_id", "blue_id", "red_name", "blue_name", "method",
+        "has_stats", "has_round_stats",
+    )
 
-    def __init__(self, id, red_id, blue_id, red_name, blue_name, method=None, has_stats=False):
+    def __init__(
+        self, id, red_id, blue_id, red_name, blue_name, method=None,
+        has_stats=False, has_round_stats=False,
+    ):
         self.id = id
         self.red_id = red_id
         self.blue_id = blue_id
@@ -64,6 +82,12 @@ class _Bout:
         self.blue_name = blue_name or ""
         self.method = method
         self.has_stats = has_stats
+        self.has_round_stats = has_round_stats
+
+    def needs_result(self) -> bool:
+        """No result yet, or only the PROVISIONAL one the ESPN live updater
+        wrote on fight night — ufcstats detail upgrades that."""
+        return self.method is None or self.method in ESPN_PROVISIONAL_METHODS
 
     def key(self) -> frozenset[str]:
         return frozenset({_fold(self.red_name), _fold(self.blue_name)})
@@ -97,13 +121,18 @@ def _get_events_needing_results(connection, limit: int | None) -> list[tuple[int
                 WHERE fi.event_id = e.id
                   AND (
                     fi.method IS NULL
+                    -- provisional ESPN live result -> upgrade with ufcstats detail
+                    OR fi.method = ANY(%s)
                     -- a real bout has 2 fighters -> needs both stat rows
                     OR (SELECT COUNT(*) FROM fight_stats fs WHERE fs.fight_id = fi.id) < 2
+                    -- ... and both fighters' per-round rows (migration 012 / BE4)
+                    OR (SELECT COUNT(DISTINCT fsr.fighter_id)
+                        FROM fight_stats_rounds fsr WHERE fsr.fight_id = fi.id) < 2
                   )
               )
             ORDER BY e.event_date DESC
             """,
-            (UFC_SOURCE,),
+            (UFC_SOURCE, list(ESPN_PROVISIONAL_METHODS)),
         )
         rows = [(int(r[0]), str(r[1]), r[2]) for r in cursor.fetchall()]
     return rows[:limit] if limit is not None else rows
@@ -118,7 +147,9 @@ def _get_bouts(connection, event_id: int) -> list[_Bout]:
                    COALESCE(red.name, fi.fighter_red_name) AS red_name,
                    COALESCE(blue.name, fi.fighter_blue_name) AS blue_name,
                    fi.method,
-                   (SELECT COUNT(*) FROM fight_stats fs WHERE fs.fight_id = fi.id) >= 2 AS has_stats
+                   (SELECT COUNT(*) FROM fight_stats fs WHERE fs.fight_id = fi.id) >= 2 AS has_stats,
+                   (SELECT COUNT(DISTINCT fsr.fighter_id)
+                    FROM fight_stats_rounds fsr WHERE fsr.fight_id = fi.id) >= 2 AS has_round_stats
             FROM fights fi
             LEFT JOIN fighters red ON red.id = fi.fighter_red_id
             LEFT JOIN fighters blue ON blue.id = fi.fighter_blue_id
@@ -126,7 +157,10 @@ def _get_bouts(connection, event_id: int) -> list[_Bout]:
             """,
             (event_id,),
         )
-        return [_Bout(int(r[0]), r[1], r[2], r[3], r[4], r[5], bool(r[6])) for r in cursor.fetchall()]
+        return [
+            _Bout(int(r[0]), r[1], r[2], r[3], r[4], r[5], bool(r[6]), bool(r[7]))
+            for r in cursor.fetchall()
+        ]
 
 
 def _match_event(event_name: str, event_date, index_records) -> str | None:
@@ -191,8 +225,8 @@ def _fill_event(connection, client, settings, event_id, bouts, detail_url, count
         frozenset({_fold(f.red_name), _fold(f.blue_name)}): f for f in fights
     }
     for bout in bouts:
-        needs_result = bout.method is None
-        needs_stats = not bout.has_stats
+        needs_result = bout.needs_result()
+        needs_stats = not bout.has_stats or not bout.has_round_stats
         if not needs_result and not needs_stats:
             continue
         fight = by_key.get(bout.key())
@@ -216,13 +250,24 @@ def _fill_event(connection, client, settings, event_id, bouts, detail_url, count
                 counts["bouts_filled"] += 1
             else:
                 with connection.cursor() as cursor:
+                    # method still NULL or a provisional ESPN live code: the
+                    # ufcstats result replaces it (better quality). Real
+                    # ufcstats methods are never re-written. COALESCE(%s, col)
+                    # keeps the ESPN winner/round/time when this scrape could
+                    # not resolve one (never degrade to NULL).
                     cursor.execute(
                         """
                         UPDATE fights
-                        SET winner_id = %s, method = %s, end_round = %s, end_time = %s
-                        WHERE id = %s AND method IS NULL
+                        SET winner_id = COALESCE(%s, winner_id),
+                            method = %s,
+                            end_round = COALESCE(%s, end_round),
+                            end_time = COALESCE(%s, end_time)
+                        WHERE id = %s AND (method IS NULL OR method = ANY(%s))
                         """,
-                        (winner_id, fight.method, fight.end_round, fight.end_time, bout.id),
+                        (
+                            winner_id, fight.method, fight.end_round, fight.end_time,
+                            bout.id, list(ESPN_PROVISIONAL_METHODS),
+                        ),
                     )
                     if cursor.rowcount:
                         counts["bouts_filled"] += 1
@@ -245,6 +290,33 @@ def _fill_event(connection, client, settings, event_id, bouts, detail_url, count
                 if not dry_run:
                     upsert_fight_stats(connection, build_fight_stats_record(bout.id, fighter_id, fighter_stats))
                 counts["stats_rows"] += 1
+            _fill_round_stats(connection, bout, fight_page.soup, counts, dry_run)
+
+
+def _fill_round_stats(connection, bout, fight_page_soup, counts, dry_run) -> None:
+    """Persist the per-round breakdown of a fight-details page (BE4).
+
+    One fight_stats_rounds row per (fighter, round), fighters matched by name
+    onto the bout's corners like the totals. Hollow rows (sig strikes didn't
+    parse) are skipped so the bout keeps re-qualifying, same policy as totals.
+    """
+    for round_stats in parse_fight_stats_rounds(fight_page_soup):
+        if round_stats.stats.get("sig_strikes_attempted") is None:
+            counts["round_stats_empty"] += 1
+            continue
+        fighter_id = bout.fighter_id_for(round_stats.fighter_name)
+        if fighter_id is None:
+            counts["round_stats_unmatched"] += 1
+            LOGGER.warning(
+                "  unmatched round-stats fighter %r on bout %s (%s vs %s)",
+                round_stats.fighter_name, bout.id, bout.red_name, bout.blue_name,
+            )
+            continue
+        if not dry_run:
+            upsert_fight_stats_rounds(
+                connection, build_fight_stats_round_record(bout.id, fighter_id, round_stats)
+            )
+        counts["round_stats_rows"] += 1
 
 
 def backfill(dry_run: bool = False, limit: int | None = None) -> dict:
@@ -290,7 +362,8 @@ def main() -> None:
     counts = backfill(dry_run=args.dry_run, limit=args.limit)
     keys = [
         "events_candidate", "events_matched", "events_unmatched",
-        "bouts_filled", "bouts_unmatched", "stats_rows", "stats_unmatched", "stats_empty", "event_errors",
+        "bouts_filled", "bouts_unmatched", "stats_rows", "stats_unmatched", "stats_empty",
+        "round_stats_rows", "round_stats_unmatched", "round_stats_empty", "event_errors",
     ]
     print(json.dumps({k: counts.get(k, 0) for k in keys}, indent=2))
 

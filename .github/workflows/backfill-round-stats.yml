@@ -1,0 +1,45 @@
+name: Backfill round stats
+
+# Fase 6 / BE4: fills fight_stats_rounds (per-round breakdown) for historical
+# ufcstats fights that already have fight_stats totals. Volume is large
+# (~8k fights at ~1.25s/req ≈ 3h), so this is DISPATCH-ONLY and meant to be
+# run in batches with `limit` (already-backfilled fights stop qualifying, so
+# each dispatch resumes where the last one ended). Idempotent: upsert
+# ON CONFLICT (fight_id, fighter_id, round) with COALESCE.
+# REQUIRES migration db/migrations/012_fase6.sql applied first.
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max fights this batch (empty = all pending; ~3h for the full history)"
+        required: false
+        default: "2000"
+      dry_run:
+        description: "Dry-run: parse + count, no writes"
+        type: boolean
+        default: false
+
+concurrency:
+  group: backfill-round-stats
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+      - run: pip install -r requirements-scrapers.txt
+      - name: Run round-stats backfill
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.limit || '' }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
+          if [ "${{ inputs.dry_run || false }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python -m src.scrapers.backfill_round_stats $ARGS
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
