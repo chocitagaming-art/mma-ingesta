@@ -75,6 +75,88 @@ def cancel_missing_upcoming_fights(
         return cursor.rowcount
 
 
+def reconcile_upcoming_fight_source_id(
+    connection: PgConnection,
+    event_id: int,
+    source: str,
+    source_id: str,
+    fighter_red_id: int | None,
+    fighter_blue_id: int | None,
+    fighter_red_name: str,
+    fighter_blue_name: str,
+) -> int | None:
+    """Adopt an existing bout row of the same (event, fighter pairing) whose
+    source_id has drifted, relabelling it to the incoming source_id so the
+    following upsert_upcoming_fight updates it IN PLACE instead of inserting a
+    phantom duplicate. Returns the adopted row id, or None if nothing matched.
+
+    Why this is needed: upcoming bouts are keyed by (source, source_id) where
+    source_id is ufc.com's per-fight fmid — which is NOT stable across scrapes.
+    An early-prelim first scraped without a data-fmid gets the fallback
+    "<event>#<order>"; once UFC assigns the real fmid, a re-scrape can't match
+    on (source, source_id) and inserts a NEW row, and the old one — no longer
+    among the kept ids — is flipped to 'cancelled'. Result: two rows for the
+    same pairing sharing a bout_order (a phantom 'cancelled' + the active one),
+    exactly what was seen on event 1060. The logical identity of an upcoming
+    bout is its (event, pairing), not the volatile fmid.
+
+    Matching is order-insensitive on the corners and works both by fighter id
+    (rows already linked) and by normalized name (rows stored before linking,
+    ids NULL) — never on the "TBD" placeholder. Guards:
+      - a bout with a result (winner/method) is never adopted (COALESCE policy
+        elsewhere already protects decided fights, but this makes it explicit);
+      - the relabel is skipped when a row already holds the incoming source_id,
+        so the UNIQUE (source, source_id) is never violated — the stale row is
+        then simply cancelled by the usual reconciliation (still one active).
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE fights
+            SET source_id = %(source_id)s, updated_at = NOW()
+            WHERE id = (
+                SELECT id FROM fights
+                WHERE event_id = %(event_id)s
+                  AND source = %(source)s
+                  AND source_id <> %(source_id)s
+                  AND winner_id IS NULL AND method IS NULL
+                  AND (
+                    (fighter_red_id = %(red_id)s AND fighter_blue_id = %(blue_id)s)
+                    OR (fighter_red_id = %(blue_id)s AND fighter_blue_id = %(red_id)s)
+                    OR (
+                        %(red_name)s <> 'TBD' AND %(blue_name)s <> 'TBD'
+                        AND (
+                          (LOWER(fighter_red_name) = LOWER(%(red_name)s)
+                           AND LOWER(fighter_blue_name) = LOWER(%(blue_name)s))
+                          OR (LOWER(fighter_red_name) = LOWER(%(blue_name)s)
+                              AND LOWER(fighter_blue_name) = LOWER(%(red_name)s))
+                        )
+                    )
+                  )
+                ORDER BY id
+                LIMIT 1
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM fights existing
+                WHERE existing.source = %(source)s
+                  AND existing.source_id = %(source_id)s
+            )
+            RETURNING id
+            """,
+            {
+                "event_id": event_id,
+                "source": source,
+                "source_id": source_id,
+                "red_id": fighter_red_id,
+                "blue_id": fighter_blue_id,
+                "red_name": fighter_red_name,
+                "blue_name": fighter_blue_name,
+            },
+        )
+        row = cursor.fetchone()
+        return int(row[0]) if row else None
+
+
 def upsert_upcoming_fight(connection: PgConnection, fight: UpcomingFightRecord) -> int:
     """Insert an upcoming bout (no result yet: winner/method/end_* stay NULL).
 
