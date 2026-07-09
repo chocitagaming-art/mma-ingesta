@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from bs4 import BeautifulSoup
 
 from src.scrapers.backfill_results import (
+    BACKFILL_WINDOW_DAYS,
     _Bout,
     _fill_event,
     _fill_officials,
@@ -176,7 +177,12 @@ def test_events_qualify_when_result_filled_but_referee_missing(fakedb):
     assert "(fi.winner_id IS NOT NULL OR fi.method IS NOT NULL)" in flat
     # Existing criteria (results/stats) stay untouched.
     assert "fi.method IS NULL" in flat
-    assert "CURRENT_DATE - INTERVAL '60 days'" in flat
+    # The retry window is a NAMED CONSTANT bound as a parameter (not a magic
+    # literal): self-documenting and configurable while still meaning 60 days —
+    # wide on purpose so late-published officials keep re-qualifying the event.
+    assert BACKFILL_WINDOW_DAYS == 60
+    assert "e.event_date >= CURRENT_DATE - (%s * INTERVAL '1 day')" in flat
+    assert BACKFILL_WINDOW_DAYS in _params
 
 
 def test_get_bouts_reads_officials_state(fakedb):

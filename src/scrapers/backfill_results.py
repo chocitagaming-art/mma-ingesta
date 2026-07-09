@@ -79,6 +79,16 @@ LOGGER = logging.getLogger(__name__)
 UFC_SOURCE = "ufc.com"
 UFCSTATS_EVENTS_URL = "http://ufcstats.com/statistics/events/completed"
 
+# How far back the daily backfill keeps RE-QUALIFYING a past event for another
+# pass. Winner/method/stats land on ufcstats within a day or two, but the
+# referee (fights.referee) and the judges' scorecards are often published or
+# corrected DAYS-to-WEEKS later; since those officials ride on the same
+# fight-details page the result came from, the event must stay eligible long
+# enough to catch them. 60 days is the deliberate ceiling: wide enough for
+# late officials, bounded so a permanently unmatchable bout (name divergence)
+# can't re-qualify forever and grow the cron's work without limit.
+BACKFILL_WINDOW_DAYS = 60
+
 
 def _is_decision(method: str | None) -> bool:
     """Whether a stored/scraped method means the fight went to the judges.
@@ -152,11 +162,11 @@ def _get_events_needing_results(connection, limit: int | None) -> list[tuple[int
             WHERE e.source = %s
               AND e.event_date IS NOT NULL
               AND e.event_date < CURRENT_DATE
-              -- Only retry recently-finished cards. ufcstats publishes results/stats
-              -- within a day or two; bounding the window stops a permanently
-              -- unmatchable bout (name divergence) from re-qualifying forever and
-              -- growing the daily cron's work without bound.
-              AND e.event_date >= CURRENT_DATE - INTERVAL '60 days'
+              -- Only retry cards within the backfill window (BACKFILL_WINDOW_DAYS):
+              -- wide enough to catch late-published referee/scorecards, bounded so
+              -- a permanently unmatchable bout can't re-qualify forever (see the
+              -- constant's docstring for the full rationale).
+              AND e.event_date >= CURRENT_DATE - (%s * INTERVAL '1 day')
               AND EXISTS (
                 SELECT 1 FROM fights fi
                 WHERE fi.event_id = e.id
@@ -178,7 +188,7 @@ def _get_events_needing_results(connection, limit: int | None) -> list[tuple[int
               )
             ORDER BY e.event_date DESC
             """,
-            (UFC_SOURCE, list(ESPN_PROVISIONAL_METHODS)),
+            (UFC_SOURCE, BACKFILL_WINDOW_DAYS, list(ESPN_PROVISIONAL_METHODS)),
         )
         rows = [(int(r[0]), str(r[1]), r[2]) for r in cursor.fetchall()]
     return rows[:limit] if limit is not None else rows
