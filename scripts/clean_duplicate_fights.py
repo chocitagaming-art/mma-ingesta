@@ -32,23 +32,47 @@ try:
 except Exception:  # pragma: no cover
     pass
 
-# Phantom cancelled twins: a cancelled undecided row whose (event, bout_order)
-# also has an active row. array of ids is what we would delete.
+# Phantom cancelled twins: a cancelled, undecided ufc.com row whose
+# (event_id, bout_order) ALSO has an active row FOR THE SAME PAIRING — the same
+# two fighters, matched by id in either corner order, or by normalised name
+# (never on the 'TBD' placeholder). Requiring the pairing to match is what
+# distinguishes a real fmid-drift phantom from a LEGITIMATE cancellation that
+# merely shares a bout_order slot with its (different) replacement fight — the
+# LATERAL twin lookup both enforces that and surfaces the active sibling so the
+# dry-run can print both pairings side by side for a human cross-check.
 CANDIDATES = """
     SELECT ph.id, ph.event_id, ph.bout_order, ph.source_id,
-           ph.fighter_red_name, ph.fighter_blue_name
+           ph.fighter_red_name, ph.fighter_blue_name,
+           act.id, act.fighter_red_name, act.fighter_blue_name
     FROM fights ph
+    JOIN LATERAL (
+        SELECT a.id, a.fighter_red_name, a.fighter_blue_name
+        FROM fights a
+        WHERE a.event_id = ph.event_id
+          AND a.bout_order = ph.bout_order
+          AND a.id <> ph.id
+          AND a.status IS DISTINCT FROM 'cancelled'
+          AND (
+                 (a.fighter_red_id = ph.fighter_red_id
+                  AND a.fighter_blue_id = ph.fighter_blue_id)
+              OR (a.fighter_red_id = ph.fighter_blue_id
+                  AND a.fighter_blue_id = ph.fighter_red_id)
+              OR (
+                  ph.fighter_red_name <> 'TBD' AND ph.fighter_blue_name <> 'TBD'
+                  AND (
+                        (lower(a.fighter_red_name) = lower(ph.fighter_red_name)
+                         AND lower(a.fighter_blue_name) = lower(ph.fighter_blue_name))
+                     OR (lower(a.fighter_red_name) = lower(ph.fighter_blue_name)
+                         AND lower(a.fighter_blue_name) = lower(ph.fighter_red_name))
+                  )
+              )
+          )
+        LIMIT 1
+    ) act ON true
     WHERE ph.source = 'ufc.com'
       AND ph.status = 'cancelled'
       AND ph.winner_id IS NULL AND ph.method IS NULL
       AND ph.bout_order IS NOT NULL
-      AND EXISTS (
-          SELECT 1 FROM fights act
-          WHERE act.event_id = ph.event_id
-            AND act.bout_order = ph.bout_order
-            AND act.id <> ph.id
-            AND act.status IS DISTINCT FROM 'cancelled'
-      )
     ORDER BY ph.event_id, ph.bout_order
 """
 
@@ -92,7 +116,8 @@ def main() -> None:
             print(f"Phantom candidates found: {len(candidates)}\n")
 
             deletable: list[int] = []
-            for fid, event_id, order, source_id, red, blue in candidates:
+            for (fid, event_id, order, source_id, red, blue,
+                 act_id, act_red, act_blue) in candidates:
                 refs = []
                 for table, column in child_tables:
                     cur.execute(
@@ -105,8 +130,11 @@ def main() -> None:
                     "SKIP (has children: " + ", ".join(refs) + ")"
                     if refs else "DELETE"
                 )
-                print(f"  id={fid} event={event_id} bout_order={order} "
-                      f"src={source_id} [{red} vs {blue}] -> {tag}")
+                print(f"  event={event_id} bout_order={order} -> {tag}")
+                print(f"      phantom id={fid} src={source_id} "
+                      f"[{red} vs {blue}]")
+                print(f"      active  id={act_id} "
+                      f"[{act_red} vs {act_blue}]")
                 if not refs:
                     deletable.append(fid)
 
