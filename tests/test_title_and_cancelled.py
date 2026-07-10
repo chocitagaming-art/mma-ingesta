@@ -218,3 +218,44 @@ def test_write_event_bouts_upserts_then_cancels_the_missing(fakedb):
     (cancel_flat, cancel_params), = cancels
     assert statements.index(cancels[0]) > statements.index(inserts[1])
     assert cancel_params == (7, "ufc.com", [11, 12])
+
+
+# ------------------------------------ BE7b: fmid-drift dedup (reconcile step)
+
+
+def test_write_event_bouts_reconciles_source_id_before_each_upsert(fakedb):
+    # ufc.com's fmid is not stable across scrapes; before upserting each bout,
+    # _write_event_bouts must relabel any existing row of the same pairing to
+    # the incoming fmid, so a drifted fmid updates in place instead of inserting
+    # a phantom 'cancelled' twin. (Behaviour proven against real Postgres in
+    # test_upcoming_fmid_dedup.py; here we lock the wiring in the DB-less suite.)
+    upserted = iter([11, 12])
+
+    def responder(sql, params=None):
+        flat = " ".join(sql.split())
+        if flat.startswith("INSERT INTO fights"):
+            return [(next(upserted),)]
+        return []  # reconcile RETURNING + cancel -> nothing in this flow mock
+
+    conn = fakedb.Connection(responder)
+    _write_event_bouts(conn, lambda name: None, Counter(), _event(_bouts()), 7)
+
+    statements = [
+        (" ".join(sql.split()), params)
+        for cur in conn.cursors
+        for sql, params in cur.executed
+    ]
+    reconciles = [
+        s for s in statements
+        if s[0].startswith("UPDATE fights") and "SET source_id =" in s[0]
+    ]
+    inserts = [s for s in statements if s[0].startswith("INSERT INTO fights")]
+    # one reconcile per scraped bout, each keyed by the incoming fmid + pairing,
+    # and each runs BEFORE its own upsert.
+    assert len(reconciles) == 2
+    assert statements.index(reconciles[0]) < statements.index(inserts[0])
+    assert statements.index(reconciles[1]) < statements.index(inserts[1])
+    assert reconciles[0][1]["source_id"] == "9001"  # first bout's data-fmid
+    assert reconciles[0][1]["event_id"] == 7
+    # order-insensitive pairing match never fires on the TBD placeholder.
+    assert "<> 'TBD'" in reconciles[0][0]

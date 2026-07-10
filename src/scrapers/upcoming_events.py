@@ -47,6 +47,7 @@ from .repositories.events import EventMetaRecord, upsert_event_meta
 from .repositories.fights import (
     UpcomingFightRecord,
     cancel_missing_upcoming_fights,
+    reconcile_upcoming_fight_source_id,
     upsert_upcoming_fight,
 )
 from .repositories.fighters import get_all_fighters, update_fighter_standing_photo
@@ -516,6 +517,14 @@ def _write_event_bouts(connection, match, counts: Counter, event: ParsedEvent, e
     for bout in event.bouts:
         red_id = match(bout.red_name)
         blue_id = match(bout.blue_name)
+        # ufc.com's per-fight fmid is not stable across scrapes: adopt any
+        # existing row of this (event, pairing) whose source_id drifted so the
+        # upsert updates it in place instead of inserting a phantom duplicate
+        # (a 'cancelled' twin sharing the bout_order — see event 1060).
+        reconcile_upcoming_fight_source_id(
+            connection, event_id, SOURCE, bout.fmid,
+            red_id, blue_id, bout.red_name, bout.blue_name,
+        )
         fight_id = upsert_upcoming_fight(
             connection,
             UpcomingFightRecord(
