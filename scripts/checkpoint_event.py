@@ -101,8 +101,11 @@ def main() -> None:
     for (order, st, red, blue, winner, method, rnd, etime, ref, cards, stats) in active:
         res = f"{winner} def." if winner else "— (no result)"
         meth = f"{method}{'*' if method in PROVISIONAL else ''}" if method else "—"
+        # bout_order is NULL for fights ingested via ufcstats (upsert_fight never
+        # sets it), so guard the width format like the other nullable fields below.
+        ord_s = f"{order}" if order is not None else "-"
         print(
-            f"  #{order:<2} {red} vs {blue}\n"
+            f"  #{ord_s:<2} {red} vs {blue}\n"
             f"       {res}  {meth}  R{rnd or '-'} {etime or '-'}  "
             f"ref={ref or '—'}  cards={cards}  stats={stats}"
         )
