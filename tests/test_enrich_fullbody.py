@@ -16,6 +16,7 @@ from src.scrapers.enrich_photos_ufc import (
     _extract_bio_fields,
     _extract_full_body,
     _extract_headshot,
+    _is_placeholder_image,
     _parse_ufc_date,
     resolve_athlete,
 )
@@ -135,6 +136,41 @@ def test_full_body_url_normalizes_protocol_relative_src():
 
 def test_full_body_placeholder_silhouette_rejected():
     assert _extract_full_body(PLACEHOLDER_HTML, "Marlon Vera") is None
+
+
+# UFC also serves generic "shadow / full-length" silhouettes whose filenames
+# carry NONE of the old placeholder tokens (no "silhouette"/"nophoto"), so the
+# original guard stored them and heroes rendered a black silhouette.
+SHADOW_PLACEHOLDER_HTML = f"""
+<html><body>
+<div class="hero-profile__image-wrap">
+  <img class="hero-profile__image"
+       src="/images/styles/athlete_bio_full_body/s3/image/fighter_images/SHADOW_Fighter_fullLength_RED.png?itok=x">
+</div>
+{_BIO_BLOCK}
+</body></html>
+"""
+
+SHADOW_WOMAN_PLACEHOLDER_HTML = SHADOW_PLACEHOLDER_HTML.replace(
+    "SHADOW_Fighter_fullLength_RED.png",
+    "Fighter_fullLength_Shadow-woman-blue.png",
+)
+
+
+def test_full_body_shadow_fulllength_placeholder_rejected():
+    # Both real-world variants that slipped past the old guard must be rejected.
+    assert _extract_full_body(SHADOW_PLACEHOLDER_HTML, "Marlon Vera") is None
+    assert _extract_full_body(SHADOW_WOMAN_PLACEHOLDER_HTML, "Marlon Vera") is None
+
+
+def test_is_placeholder_image_matches_shadow_variants():
+    base = "https://www.ufc.com/images/styles/athlete_bio_full_body/s3/image/fighter_images/"
+    assert _is_placeholder_image(base + "SHADOW_Fighter_fullLength_RED.png")
+    assert _is_placeholder_image(base + "Fighter_fullLength_Shadow-woman-blue.png")
+    # A real, named athlete photo is NOT a placeholder.
+    assert not _is_placeholder_image(
+        "https://www.ufc.com/images/styles/athlete_bio_full_body/s3/2025-04/VERA_MARLON_L_04-12.png"
+    )
 
 
 def test_full_body_falls_back_to_named_candidate_when_hero_missing():

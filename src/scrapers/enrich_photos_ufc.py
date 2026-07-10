@@ -87,7 +87,13 @@ _NAME_SUFFIXES = {"JR", "SR", "II", "III", "IV"}
 OG_IMAGE_RE = re.compile(
     r"""<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']""", re.IGNORECASE
 )
-_PLACEHOLDER_RE = re.compile(r"silhouette|nophoto|no-photo|default[-_]?(athlete|headshot)", re.IGNORECASE)
+# 'shadow'/'fighter_fulllength' catch UFC's generic full-length shadow
+# silhouettes (e.g. SHADOW_Fighter_fullLength_RED, Fighter_fullLength_Shadow-woman-blue)
+# whose filenames carry none of the older placeholder tokens.
+_PLACEHOLDER_RE = re.compile(
+    r"silhouette|nophoto|no-photo|default[-_]?(athlete|headshot)|shadow|fighter_fulllength",
+    re.IGNORECASE,
+)
 
 
 def _is_placeholder_image(url: str | None) -> bool:
