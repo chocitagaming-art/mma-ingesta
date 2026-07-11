@@ -6,9 +6,12 @@ name: Keep-alive prediction service
 # instancia no llegue a dormirse. Repos públicos → minutos de Actions gratis;
 # una instancia siempre despierta cabe en las 750 h/mes del plan free de
 # Render. El endpoint /health hace un SELECT 1 a Neon (coste despreciable).
+# Cadencia 10 min (no 12): el schedule de Actions es best-effort y puede
+# retrasarse varios minutos; con 10 min de base hay margen frente al umbral
+# de sueño (~15 min) de Render.
 on:
   schedule:
-    - cron: "*/12 * * * *"
+    - cron: "*/10 * * * *"
   workflow_dispatch: {}
 
 concurrency:
@@ -18,11 +21,13 @@ concurrency:
 jobs:
   ping:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 4
     steps:
       - name: Ping /health
         run: |
-          # --max-time 90: presupuesto de sobra para un arranque en frío; si el
+          # --max-time es POR intento: 2 intentos x 70s + 5s de pausa = 145s,
+          # por debajo del timeout del job (4 min). --retry-all-errors cubre
+          # también connection-refused mientras la instancia arranca. Si el
           # servicio estaba dormido, este mismo ping lo despierta.
-          curl -fsS --max-time 90 --retry 2 --retry-delay 5 \
+          curl -fsS --max-time 70 --retry 1 --retry-delay 5 --retry-all-errors \
             https://mma-prediction.onrender.com/health
