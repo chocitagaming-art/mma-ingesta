@@ -25,8 +25,11 @@ fighter already populated is NEVER re-translated (no tokens re-spent, no data
 overwritten). A translation whose shape does not match the source (different
 count of facts/answers) is discarded and counted, never stored.
 
-Default scope = fighters on UPCOMING cards with both columns NULL (fast, cheap,
-mirrors the weekly cron). ``--all`` sweeps the whole table (~2.8k pages).
+Default scope = fighters on UPCOMING cards with at least one column NULL
+(fast, cheap, mirrors the weekly cron; interviews often land later than facts,
+so a half-populated fighter stays selectable and COALESCE protects the stored
+half). ``--all`` sweeps the whole table (~2.8k pages). Fighters whose exact
+name is shared by another DB row are excluded (homonym safety).
 
 Usage:
     python -m src.scrapers.enrich_facts --probe "Joel Alvarez"   # no DB: fetch+parse+translate, print JSON
@@ -40,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import time
 import unicodedata
@@ -49,7 +53,7 @@ from dataclasses import dataclass
 
 import requests
 from anthropic import Anthropic
-from bs4 import BeautifulSoup, NavigableString, Tag
+from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 
 from .config import get_settings
 from .db import connect
@@ -102,10 +106,24 @@ def parse_fighter_facts(soup: BeautifulSoup) -> list[str]:
     return facts
 
 
+def _looks_like_question(text: str) -> bool:
+    """Real ufc.com questions end in '?' or ':' (verified against live pages);
+    a bold WITHOUT that shape appearing mid-answer is emphasis, not a question."""
+    return text.endswith("?") or text.endswith(":")
+
+
 def parse_fighter_qa(soup: BeautifulSoup) -> list[dict[str, str]]:
-    """Every <strong> inside the qna field is a question; its answer is all the
-    text until the next <strong> (crossing <br> and <p> boundaries, which
-    covers both the one-big-<p> and the one-<p>-per-pair layouts)."""
+    """Every top-level <strong> inside the qna field opens a question; its
+    answer is all the text until the next question (crossing <br> and <p>
+    boundaries, which covers both the one-big-<p> and the one-<p>-per-pair
+    layouts). CMS artifacts hardened after adversarial review:
+      - HTML comments (Comment is a NavigableString subclass) are never answer text.
+      - Adjacent <strong>s with no text between them are ONE question split by
+        the editor, not two questions.
+      - A bold run inside an answer that does not look like a question
+        ('It means <strong>everything</strong> to me') stays inside the answer.
+      - Nested <strong>s are read once via the outermost tag's get_text.
+    """
     container = soup.select_one("div.field--name-qna")
     if container is None:
         return []
@@ -125,9 +143,25 @@ def parse_fighter_qa(soup: BeautifulSoup) -> list[dict[str, str]]:
 
     for node in container.descendants:
         if isinstance(node, Tag) and node.name == "strong":
-            flush()
-            question = node.get_text(" ", strip=True)
+            if node.find_parent("strong") is not None:
+                # Nested <strong>: the outer tag's get_text already covered it.
+                continue
+            text = _clean_text(node.get_text(" ", strip=True))
+            if not text:
+                continue
+            if question is not None and not _clean_text(" ".join(answer_parts)):
+                # Adjacent/split <strong>s: same question continued.
+                question = f"{question} {text}".strip()
+            elif question is not None and answer_parts and not _looks_like_question(text):
+                # Bold emphasis inside the answer, not a new question.
+                answer_parts.append(text)
+            else:
+                flush()
+                question = text
         elif isinstance(node, NavigableString):
+            if isinstance(node, Comment):
+                # Theme/analytics/MSO comments must never leak into answers.
+                continue
             # Strings inside the <strong> belong to the question, not the answer.
             if node.find_parent("strong") is not None:
                 continue
@@ -224,19 +258,36 @@ def build_translator(client: Anthropic) -> Translator:
 def _get_target_fighters(
     connection, limit: int | None = None, all_scope: bool = False
 ) -> list[Target]:
-    """Fighters with BOTH columns NULL (a populated fighter is never redone).
+    """Fighters with at least one of the two columns still NULL.
+
+    OR (not AND, adversarial-review fix): ufc.com publishes facts and the Q&A
+    interview at different times (interviews land in fight week), so a fighter
+    stored with only one half must stay selectable — COALESCE in the writer
+    guarantees the stored half is never re-written, so retrying is safe.
+
+    HOMONYM EXCLUSION (adversarial-review fix): two DB fighters with the exact
+    same name resolve the SAME ufc.com slug and the hero-name guard validates
+    both, which would attribute one person's interview to the other — those
+    names are skipped entirely (the real-world case: the two Bruno Silva).
 
     Default scope: fighters booked on an upcoming event (small, mirrors the
     weekly cron). ``all_scope``: the whole table, ordered by product priority
     (latest-rankings members, then upcoming cards, then anyone with a headshot,
     then the rest) so partial passes cover the most visible fighters first.
     """
+    homonym_free = """
+              AND NOT EXISTS (
+                SELECT 1 FROM fighters dup
+                WHERE dup.id <> f.id AND lower(dup.name) = lower(f.name)
+              )
+    """
     if all_scope:
-        sql = """
+        sql = f"""
             SELECT f.id, f.name, (f.headshot_url ILIKE %s) AS ufc_confirmed
             FROM fighters f
             WHERE f.name IS NOT NULL AND f.name <> ''
-              AND f.fighter_facts IS NULL AND f.fighter_qa IS NULL
+              AND (f.fighter_facts IS NULL OR f.fighter_qa IS NULL)
+              {homonym_free}
             ORDER BY
                 EXISTS (
                     SELECT 1 FROM rankings r
@@ -253,14 +304,15 @@ def _get_target_fighters(
                 f.name
         """
     else:
-        sql = """
+        sql = f"""
             SELECT DISTINCT f.id, f.name, (f.headshot_url ILIKE %s) AS ufc_confirmed
             FROM fighters f
             JOIN fights fi ON fi.fighter_red_id = f.id OR fi.fighter_blue_id = f.id
             JOIN events e ON e.id = fi.event_id
             WHERE e.status = 'upcoming'
               AND f.name IS NOT NULL AND f.name <> ''
-              AND f.fighter_facts IS NULL AND f.fighter_qa IS NULL
+              AND (f.fighter_facts IS NULL OR f.fighter_qa IS NULL)
+              {homonym_free}
             ORDER BY f.name
         """
     params: list = ["%ufc.com%"]
@@ -346,7 +398,8 @@ def backfill(
 
 def probe(names: list[str], translator: Translator | None) -> None:
     """No-DB check: fetch + parse (+ translate when a translator is available)
-    and print the result as JSON. QA helper for real pages."""
+    and print the result as JSON. QA helper for real pages. A translation
+    failure reports the error and continues with the next name."""
     session = requests.Session()
     for name in names:
         page = resolve_facts(session, name)
@@ -362,9 +415,13 @@ def probe(names: list[str], translator: Translator | None) -> None:
             "qa_en_count": len(page.qa),
         }
         if translator and (page.facts or page.qa):
-            facts_es, qa_es = translator(page.facts, page.qa)
-            result["facts_es"] = facts_es
-            result["qa_es"] = qa_es
+            try:
+                facts_es, qa_es = translator(page.facts, page.qa)
+            except Exception as exc:  # noqa: BLE001 - keep probing the rest
+                result["translate_error"] = str(exc)
+            else:
+                result["facts_es"] = facts_es
+                result["qa_es"] = qa_es
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
@@ -373,21 +430,35 @@ def main() -> None:
         description="Scrape ufc.com Fighter Facts + Q&A, translate to Spanish and store (JSONB)."
     )
     parser.add_argument("--dry-run", action="store_true", help="Resolve + translate + report, no writes.")
-    parser.add_argument("--limit", type=int, default=None, help="Process at most this many fighters (resumes the gap).")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help=(
+            "Process at most this many fighters. NOTE: re-runs walk the same "
+            "ordered scope from the top — only fighters with stored content drop "
+            "out, so no_content/unresolved pages are re-visited (a partial pass "
+            "does NOT advance towards the tail)."
+        ),
+    )
     parser.add_argument("--all", action="store_true", dest="all_scope", help="Whole-table scope (default: upcoming cards only).")
-    parser.add_argument("--probe", nargs="+", default=None, help="No DB: fetch/parse/translate these names and print JSON.")
+    parser.add_argument("--probe", nargs="+", default=None, help="No DB: fetch/parse/translate these names and print JSON (only needs ANTHROPIC_API_KEY).")
     args = parser.parse_args()
     configure_logging()
 
-    settings = get_settings()
-    if not settings.anthropic_api_key:
+    # --probe is documented as "no DB": read the key straight from the env
+    # (config.load_dotenv already ran on import) instead of get_settings(),
+    # which would demand DATABASE_URL (adversarial-review fix).
+    anthropic_api_key = (os.getenv("ANTHROPIC_API_KEY") or "").strip() or None
+    if not anthropic_api_key:
         raise RuntimeError("ANTHROPIC_API_KEY is required to translate facts/Q&A.")
-    translator = build_translator(Anthropic(api_key=settings.anthropic_api_key))
+    translator = build_translator(Anthropic(api_key=anthropic_api_key))
 
     if args.probe:
         probe(args.probe, translator)
         return
 
+    settings = get_settings()
     with connect(settings.database_url) as connection:
         counts = backfill(
             connection,
@@ -404,6 +475,16 @@ def main() -> None:
     print(json.dumps({key: counts.get(key, 0) for key in keys}, indent=2))
     if args.dry_run:
         print("Dry-run: nothing was written. Re-run without --dry-run to persist.")
+
+    # A dead API key / exhausted credit must NOT leave the cron green: if half
+    # or more of the pages WITH content failed to translate, fail the run so
+    # GitHub notifies the owner (adversarial-review fix).
+    translate_errors = counts.get("translate_error", 0)
+    with_content = counts.get("with_content", 0)
+    if translate_errors and translate_errors >= max(1, with_content // 2):
+        raise SystemExit(
+            f"{translate_errors}/{with_content} translations failed — check ANTHROPIC_API_KEY/credit."
+        )
 
 
 if __name__ == "__main__":

@@ -116,6 +116,65 @@ def test_parse_qa_question_without_answer_is_dropped():
     assert pairs == []
 
 
+# --- endurecimientos de la revisión adversarial (11-jul) ---
+
+
+def test_parse_qa_html_comments_never_leak_into_answers():
+    pairs = parse_fighter_qa(
+        _soup(
+            '<div class="field--name-qna"><p><strong>Q1?</strong> Real answer.'
+            "<!-- THEME DEBUG --> more text<!--[if !supportLists]--></p></div>"
+        )
+    )
+    assert pairs == [{"q": "Q1?", "a": "Real answer. more text"}]
+
+
+def test_parse_qa_adjacent_split_strongs_are_one_question():
+    pairs = parse_fighter_qa(
+        _soup(
+            '<div class="field--name-qna"><p><strong>When and why did you </strong>'
+            "<strong>start training?</strong> I started in 2013.</p></div>"
+        )
+    )
+    assert pairs == [{"q": "When and why did you start training?", "a": "I started in 2013."}]
+
+
+def test_parse_qa_bold_emphasis_inside_answer_is_not_a_question():
+    pairs = parse_fighter_qa(
+        _soup(
+            '<div class="field--name-qna"><p><strong>What does this sport mean to you?</strong>'
+            " It means <strong>everything</strong> to me and my family.</p></div>"
+        )
+    )
+    assert pairs == [
+        {"q": "What does this sport mean to you?", "a": "It means everything to me and my family."}
+    ]
+
+
+def test_parse_qa_bold_question_shape_still_starts_new_pair():
+    # Una negrita intermedia que SÍ parece pregunta ('...?' / '...:') corta el par.
+    pairs = parse_fighter_qa(
+        _soup(
+            '<div class="field--name-qna"><p><strong>Q1?</strong> A1.'
+            "<br><br><strong>Favorite technique:</strong> Kimura</p></div>"
+        )
+    )
+    assert pairs == [
+        {"q": "Q1?", "a": "A1."},
+        {"q": "Favorite technique:", "a": "Kimura"},
+    ]
+
+
+def test_parse_qa_nested_strong_keeps_full_question_once():
+    pairs = parse_fighter_qa(
+        _soup(
+            '<div class="field--name-qna"><p><strong>Outer <strong>inner</strong> question?</strong>'
+            " The answer.</p></div>"
+        )
+    )
+    assert pairs == [{"q": "Outer inner question?", "a": "The answer."}]
+
+
 # ----------------------------------------------------------------------- guard
 
 
@@ -250,6 +309,19 @@ def test_backfill_translation_failure_skips_row(fakedb):
     assert counts["translate_error"] == 1
     assert counts["updated"] == 0
     assert fakedb.mutating_statements(conn) == []
+
+
+def test_target_selection_is_or_and_homonym_safe(fakedb):
+    # Revisión adversarial: OR (una mitad publicada más tarde sigue entrando)
+    # y exclusión de nombres exactamente duplicados (caso Bruno Silva).
+    conn = fakedb.Connection(lambda sql, params=None: [])
+    enrich_facts._get_target_fighters(conn, all_scope=True)
+    enrich_facts._get_target_fighters(conn, all_scope=False)
+    assert len(conn.cursors) == 2
+    for cur in conn.cursors:
+        sql = " ".join(cur.executed[0][0].split())
+        assert "(f.fighter_facts IS NULL OR f.fighter_qa IS NULL)" in sql
+        assert "lower(dup.name) = lower(f.name)" in sql
 
 
 # ------------------------------------------------------------------ repository
