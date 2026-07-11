@@ -9,6 +9,7 @@ from typing import Any
 from .config import get_settings
 from .db import connect
 from .matching import casefold_name as _normalize_name
+from .repositories.espn_history import transfer_espn_assets
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,9 @@ def _merge_group(connection, rows: list[FighterRow]) -> dict[str, Any]:
         )
 
         for duplicate_id in deleted_ids:
+            # S3-G: historial ESPN + espn_id al keeper antes del DELETE (el
+            # CASCADE de la migración 016 los destruiría en silencio).
+            transfer_espn_assets(cursor, duplicate_id, keeper.id)
             cursor.execute(
                 "UPDATE fights SET fighter_red_id = %s WHERE fighter_red_id = %s",
                 (keeper.id, duplicate_id),

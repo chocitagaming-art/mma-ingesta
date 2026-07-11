@@ -136,3 +136,66 @@ def stamp_history_checked(connection: PgConnection, fighter_id: int) -> None:
             "UPDATE fighters SET espn_history_checked_at = NOW() WHERE id = %s",
             (fighter_id,),
         )
+
+
+def transfer_espn_assets(cursor, from_id: int, to_id: int) -> None:
+    """Antes de que una fusión borre al duplicado `from_id`: mueve su historial
+    ESPN y su identidad espn_id al keeper `to_id`.
+
+    Sin esto, el DELETE FROM fighters del duplicado dispararía el ON DELETE
+    CASCADE de la migración 016 y destruiría en silencio las filas de
+    fight_history_espn (hallazgo de la revisión adversarial de S3-G: la guarda
+    3 no cubría el camino de borrado). A nivel de cursor porque los tres
+    scripts de fusión (consolidate_fighters, merge_duplicate_fighters,
+    reconcile) lo invocan dentro de su propia transacción, justo antes de su
+    DELETE. No-op si la migración 016 no está aplicada.
+    """
+    cursor.execute("SELECT to_regclass('fight_history_espn') IS NOT NULL")
+    row = cursor.fetchone()
+    if not row or not row[0]:
+        return
+    # Peleas que el keeper ya tiene (misma competición ESPN): la copia del
+    # duplicado sobra y chocaría con UNIQUE(fighter_id, espn_competition_id).
+    cursor.execute(
+        """
+        DELETE FROM fight_history_espn
+        WHERE fighter_id = %s
+          AND EXISTS (
+            SELECT 1 FROM fight_history_espn existing
+            WHERE existing.fighter_id = %s
+              AND existing.espn_competition_id = fight_history_espn.espn_competition_id
+          )
+        """,
+        (from_id, to_id),
+    )
+    cursor.execute(
+        "UPDATE fight_history_espn SET fighter_id = %s WHERE fighter_id = %s",
+        (to_id, from_id),
+    )
+    # Enlaces de rival: reasignar (el ON DELETE SET NULL los perdería) y
+    # anular los que quedarían apuntándose a sí mismos tras la fusión.
+    cursor.execute(
+        "UPDATE fight_history_espn SET opponent_fighter_id = %s WHERE opponent_fighter_id = %s",
+        (to_id, from_id),
+    )
+    cursor.execute(
+        "UPDATE fight_history_espn SET opponent_fighter_id = NULL "
+        "WHERE fighter_id = %s AND opponent_fighter_id = %s",
+        (to_id, to_id),
+    )
+    # Identidad ESPN: liberar la del duplicado y heredarla si el keeper no
+    # tiene (espn_history_checked_at a NULL para que el cron re-barra la
+    # carrera bajo la identidad fusionada).
+    cursor.execute("SELECT espn_id FROM fighters WHERE id = %s", (from_id,))
+    row = cursor.fetchone()
+    duplicate_espn_id = row[0] if row else None
+    if duplicate_espn_id:
+        cursor.execute("UPDATE fighters SET espn_id = NULL WHERE id = %s", (from_id,))
+        cursor.execute(
+            """
+            UPDATE fighters
+            SET espn_id = %s, espn_history_checked_at = NULL, updated_at = NOW()
+            WHERE id = %s AND espn_id IS NULL
+            """,
+            (duplicate_espn_id, to_id),
+        )

@@ -8,8 +8,12 @@
 --      siendo solo UFC; el frontend fusiona esta tabla ÚNICAMENTE al pintar
 --      la tabla del historial.
 --   3. Los scripts de mantenimiento (cleanup_orphan_fights, cleanup_non_espn,
---      consolidate_fighters, recover_winners, dedupe...) operan sobre `fights`
---      y no pueden tocar estas filas.
+--      recover_winners, dedupe...) operan sobre `fights` y no leen estas
+--      filas. ÚNICA vía de contacto: las FUSIONES de fighters borran al
+--      duplicado y el ON DELETE CASCADE arrastraría su historial — por eso
+--      consolidate_fighters/merge_duplicate_fighters/reconcile llaman a
+--      transfer_espn_assets (repositories/espn_history.py) antes de su
+--      DELETE: historial, enlaces de rival y espn_id pasan al keeper.
 --   4. Sin duplicados UFC: el import SALTA la liga UFC de ESPN (l:3321);
 --      las peleas UFC viven solo en `fights` (ufcstats/ufc.com).
 --

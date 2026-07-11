@@ -53,6 +53,7 @@ from .matching import (
     fold,
     ratio,
 )
+from .repositories.espn_history import transfer_espn_assets
 
 # Guarantee ASCII-safe stdout: the Windows console is cp1252 and chokes on accented
 # fighter names ("Procházka"). All report payloads are emitted with ensure_ascii=True,
@@ -358,6 +359,9 @@ def _apply_merges(
                 keeper_id = group["keeper"]["id"]
                 for dup in group["duplicates"]:
                     dup_id = dup["id"]
+                    # S3-G: historial ESPN + espn_id al keeper antes del DELETE
+                    # (el CASCADE de la migración 016 los destruiría en silencio).
+                    transfer_espn_assets(cursor, dup_id, keeper_id)
                     cursor.execute(
                         "UPDATE fights SET fighter_red_id = %s WHERE fighter_red_id = %s",
                         (keeper_id, dup_id),

@@ -36,7 +36,8 @@ import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -58,6 +59,11 @@ ATHLETE_CAREER_URL = "https://site.web.api.espn.com/apis/common/v3/sports/mma/at
 REQUEST_DELAY_SECONDS = 0.35
 PROGRESS_EVERY = 50
 
+# Convención de fecha-de-evento del repo (ver candidate_event_dates en
+# espn_live_results.py): un main card del sábado noche US llega de ESPN como
+# domingo en UTC; la fecha "del evento" es la del Este de EE.UU.
+US_EASTERN = ZoneInfo("America/New_York")
+
 LEAGUE_UFC = "3321"
 LEAGUE_LABELS = {"3323": "Bellator"}
 _UID_RE = re.compile(r"l:(\d+)~e:(\d+)~c:(\d+)")
@@ -66,7 +72,10 @@ _PARENS_RE = re.compile(r"\(([^)]+)\)")
 
 # Prefijos de evento que delatan una pelea UFC aunque ESPN la liste bajo otra
 # liga (defensa extra contra duplicados; el filtro principal es l:3321).
-_UFC_NAME_PREFIXES = ("UFC", "THE ULTIMATE FIGHTER", "TUF", "DANA WHITE")
+# CON LÍMITE DE PALABRA (\b): "TUF 33" sí es UFC, pero "Tuff-N-Uff 143" es una
+# promoción regional real de Las Vegas y "UFCF" una noventera — sin \b ambas
+# se descartaban en silencio (hallazgo de la revisión adversarial).
+_UFC_NAME_RE = re.compile(r"^(?:UFC|THE ULTIMATE FIGHTER|TUF|DANA WHITE)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -91,8 +100,12 @@ class ParsedBout:
 # fetcher(session, espn_id) -> payload dict | None (404). Inyectable en tests.
 Fetcher = Callable[[requests.Session, str], "dict | None"]
 
-# Target: (fighter_id, name, espn_id)
-Target = tuple[int, str, str]
+# Target: (fighter_id, name, espn_id, seeded). seeded=True cuando el espn_id
+# proviene del source_id de una fila source='espn': el enlace id->atleta es
+# correcto POR CONSTRUCCIÓN, así que el guard de nombre no aplica (ESPN
+# renombra atletas — caso real "Zachary Reese" -> "Zach Reese" — y el guard
+# solo puede producir falsos positivos ahí).
+Target = tuple[int, str, str, bool]
 
 
 def promotion_label(league_id: str, event_name: str | None, short_name: str | None) -> str:
@@ -159,12 +172,25 @@ def canonical_method(result_token: str | None, display_name: str | None) -> str 
 
 
 def _parse_game_date(raw: object) -> date | None:
+    """gameDate es un timestamp UTC del inicio de la cartelera. Truncarlo tal
+    cual fechaba +1 día las carteleras nocturnas americanas (un sábado 21:00 ET
+    llega como domingo 02:00Z). Misma convención que candidate_event_dates en
+    espn_live_results: la fecha 'del evento' es la del Este de EE.UU."""
     if not isinstance(raw, str) or len(raw) < 10:
         return None
+    if len(raw) == 10:
+        # Solo fecha, sin hora: no hay nada que convertir.
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            return None
     try:
-        return date.fromisoformat(raw[:10])
+        stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(US_EASTERN).date()
 
 
 def parse_career(payload: dict) -> tuple[list[ParsedBout], Counter]:
@@ -192,8 +218,7 @@ def parse_career(payload: dict) -> tuple[list[ParsedBout], Counter]:
         event_name = str(entry.get("name") or "").strip() or None
         short_name = str(entry.get("shortName") or "").strip() or None
         promotion = promotion_label(league_id, event_name, short_name)
-        upper_name = (event_name or "").upper()
-        if promotion.upper().startswith("UFC") or upper_name.startswith(_UFC_NAME_PREFIXES):
+        if _UFC_NAME_RE.match(promotion) or _UFC_NAME_RE.match(event_name or ""):
             counts["skipped_ufc_named"] += 1
             continue
 
@@ -266,7 +291,8 @@ def _get_target_fighters(
     priorizados como enrich_facts para que un pase parcial cubra lo visible."""
     if all_scope:
         sql = """
-            SELECT f.id, f.name, f.espn_id
+            SELECT f.id, f.name, f.espn_id,
+                (f.source = 'espn' AND f.espn_id = f.source_id) AS seeded
             FROM fighters f
             WHERE f.espn_id IS NOT NULL
             ORDER BY
@@ -286,7 +312,8 @@ def _get_target_fighters(
         """
     else:
         sql = """
-            SELECT f.id, f.name, f.espn_id
+            SELECT f.id, f.name, f.espn_id,
+                (f.source = 'espn' AND f.espn_id = f.source_id) AS seeded
             FROM fighters f
             WHERE f.espn_id IS NOT NULL
               AND (
@@ -306,7 +333,10 @@ def _get_target_fighters(
         params.append(limit)
     with connection.cursor() as cursor:
         cursor.execute(sql, tuple(params))
-        return [(int(row[0]), str(row[1]), str(row[2])) for row in cursor.fetchall()]
+        return [
+            (int(row[0]), str(row[1]), str(row[2]), bool(row[3]))
+            for row in cursor.fetchall()
+        ]
 
 
 def backfill(
@@ -328,7 +358,7 @@ def backfill(
     )
     espn_to_fighter = get_espn_id_to_fighter_map(connection)
 
-    for idx, (fighter_id, name, espn_id) in enumerate(targets, 1):
+    for idx, (fighter_id, name, espn_id, seeded) in enumerate(targets, 1):
         try:
             payload = fetcher(session, espn_id)
         except (requests.RequestException, ValueError) as exc:
@@ -347,12 +377,21 @@ def backfill(
 
         page_name = _athlete_page_name(payload)
         if page_name is not None and fold_ratio(name, page_name) < IDENTITY_THRESHOLD:
-            counts["name_mismatch"] += 1
-            LOGGER.warning(
-                "Identity mismatch for id=%d %r: ESPN %s renders %r — skipping import",
-                fighter_id, name, espn_id, page_name,
-            )
-            continue
+            if seeded:
+                # El id vino del source_id de la propia fila ESPN: el enlace es
+                # correcto por construcción y la divergencia es un renombrado
+                # del lado de ESPN ("Zachary Reese" -> "Zach Reese"). Importar.
+                LOGGER.info(
+                    "Seeded id=%d %r renamed on ESPN to %r — importing anyway",
+                    fighter_id, name, page_name,
+                )
+            else:
+                counts["name_mismatch"] += 1
+                LOGGER.warning(
+                    "Identity mismatch for id=%d %r: ESPN %s renders %r — skipping import",
+                    fighter_id, name, espn_id, page_name,
+                )
+                continue
 
         bouts, parse_counts = parse_career(payload)
         for key in ("skipped_ufc", "skipped_ufc_named", "skipped_no_result", "missing_entry", "bad_uid"):

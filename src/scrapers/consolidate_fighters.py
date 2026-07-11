@@ -21,6 +21,7 @@ from .espn_import_all import (
 )
 from .logging_config import configure_logging
 from .models import FighterRecord
+from .repositories.espn_history import transfer_espn_assets
 from .repositories.fighters import upsert_fighter
 
 
@@ -80,6 +81,9 @@ def _get_json(session: requests.Session, url: str, params: dict[str, Any] | None
 # ---------------------------------------------------------------------------
 
 def _reassign_references(cursor, from_id: int, to_id: int) -> None:
+    # S3-G: el historial ESPN y el espn_id del duplicado pasan al keeper ANTES
+    # del DELETE (el CASCADE de la migración 016 los destruiría en silencio).
+    transfer_espn_assets(cursor, from_id, to_id)
     cursor.execute("UPDATE fights SET fighter_red_id = %s WHERE fighter_red_id = %s", (to_id, from_id))
     cursor.execute("UPDATE fights SET fighter_blue_id = %s WHERE fighter_blue_id = %s", (to_id, from_id))
     cursor.execute("UPDATE fights SET winner_id = %s WHERE winner_id = %s", (to_id, from_id))
