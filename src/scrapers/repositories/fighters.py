@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import date
 
@@ -187,6 +188,43 @@ def update_fighter_enrichment(
                 birth_place,
                 octagon_debut,
             ),
+        )
+        return cursor.rowcount > 0
+
+
+def update_fighter_facts(
+    connection: PgConnection,
+    fighter_id: int,
+    *,
+    facts: list[str] | None = None,
+    qa: list[dict[str, str]] | None = None,
+) -> bool:
+    """Store the Spanish-translated Fighter Facts / Q&A (JSONB, migration 015).
+
+    Additive-only like update_fighter_enrichment, but for JSONB (no NULLIF):
+    COALESCE(column, %s::jsonb) keeps whatever is already stored, so a fighter
+    is NEVER re-translated once populated. Empty lists are treated as NULL and
+    never written. Returns True if a row was updated.
+    """
+    facts_json = json.dumps(facts, ensure_ascii=False) if facts else None
+    qa_json = json.dumps(qa, ensure_ascii=False) if qa else None
+    if facts_json is None and qa_json is None:
+        return False
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE fighters
+            SET
+                fighter_facts = COALESCE(fighter_facts, %s::jsonb),
+                fighter_qa = COALESCE(fighter_qa, %s::jsonb),
+                updated_at = NOW()
+            WHERE id = %s
+              AND (
+                (fighter_facts IS NULL AND %s::jsonb IS NOT NULL)
+                OR (fighter_qa IS NULL AND %s::jsonb IS NOT NULL)
+              )
+            """,
+            (facts_json, qa_json, fighter_id, facts_json, qa_json),
         )
         return cursor.rowcount > 0
 

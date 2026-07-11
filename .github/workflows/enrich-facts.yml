@@ -1,0 +1,58 @@
+name: Enrich fighter facts (ufc.com)
+
+# Scrapes ufc.com "Fighter Facts" + Q&A blocks and stores them ALREADY
+# TRANSLATED to Spanish (Claude haiku, 1 call per fighter) in
+# fighters.fighter_facts / fighter_qa (JSONB, migration 015). Writes are
+# additive (COALESCE on JSONB): a populated fighter is never re-translated,
+# so re-running is always safe and never re-spends tokens.
+# Default scope (cron) = fighters on UPCOMING cards with both columns NULL
+# (small, ~1-2 min). Manual dispatch with all=true sweeps the whole table
+# (~2.8k pages, 30-45 min — hence the 90 min timeout).
+# Weekly cron Mondays 05:45 UTC, staggered after enrich-fullbody (05:00) and
+# enrich-photos (05:30) so ufc.com is not hit by all three at once.
+on:
+  schedule:
+    - cron: "45 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max fighters to process (empty = all in scope)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry-run: resolve + translate + report, no writes"
+        type: boolean
+        default: false
+      all:
+        description: "Whole-table scope: every fighter with a gap, not just upcoming cards"
+        type: boolean
+        default: false
+
+concurrency:
+  group: enrich-facts
+  cancel-in-progress: false
+
+jobs:
+  enrich:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+      - run: pip install -r requirements-scrapers.txt
+      - name: Run fighter facts enrichment
+        run: |
+          ARGS=""
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            if [ -n "${{ inputs.limit || '' }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
+            if [ "${{ inputs.dry_run || false }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+            if [ "${{ inputs.all || false }}" = "true" ]; then ARGS="$ARGS --all"; fi
+          fi
+          python -m src.scrapers.enrich_facts $ARGS
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
