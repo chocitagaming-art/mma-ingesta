@@ -36,6 +36,14 @@ process exits without even connecting to the DB when no event of the window
 has a fight in/post; it exits after read-only queries when none matches a DB
 event (find_existing_event_id, name+date tolerant).
 
+T3-A fase B (2026-07-11): además de los resultados, cada pasada escribe la
+fila VIVA de las peleas in/post en live_fight_stats (migración 017, tabla
+aparte): estado fino (Walkouts/In Progress/End of Round), asalto, reloj y
+las stats de ambos luchadores desde la core API (espn_live_stats). Las
+peleas en curso se re-escriben en cada pasada; las terminadas una sola vez
+(state='post' con stats == final provisional guardado). Nada de esto toca
+fights/fight_stats: la única lectora es la página /en-vivo.
+
 Usage:
     python -m src.scrapers.espn_live_results --dry-run           # report only
     python -m src.scrapers.espn_live_results                     # today+yesterday US
@@ -60,11 +68,17 @@ import requests
 from .config import get_settings
 from .db import connect
 from .espn import _build_exact_name_index, _build_normalized_name_index, _match_fighter
+from .espn_live_stats import collect_fight_stats
 from .logging_config import configure_logging
 from .models import EventRecord
 from .repositories.events import find_existing_event_id
 from .repositories.fighters import get_all_fighters, get_fighter_id_by_source
 from .repositories.fights import fill_fight_result, find_fight_id_by_fighters
+from .repositories.live_stats import (
+    get_final_stats_fight_ids,
+    prune_live_fight_stats,
+    upsert_live_fight_stats,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -104,6 +118,11 @@ class LiveFight:
     method: str | None
     end_round: int | None
     end_time: str | None
+    # T3-A fase B: estado fino de ESPN para la fila viva (live_fight_stats).
+    # En una pelea en curso period/displayClock (arriba, como end_round/
+    # end_time) son el asalto y el reloj ACTUALES, no los finales.
+    status_name: str | None = None
+    status_detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +175,12 @@ def _parse_competition(competition: dict[str, Any]) -> LiveFight | None:
         method=method_from_details(competition.get("details") or []),
         end_round=status.get("period") if isinstance(status.get("period"), int) else None,
         end_time=str(status.get("displayClock")) if status.get("displayClock") else None,
+        status_name=str(status_type.get("name")) if status_type.get("name") else None,
+        status_detail=(
+            str(status_type.get("shortDetail") or status_type.get("detail"))
+            if (status_type.get("shortDetail") or status_type.get("detail"))
+            else None
+        ),
     )
 
 
@@ -262,9 +287,10 @@ def _resolve_fighter(connection, espn_id, name, exact_index, normalized_index, c
     return None
 
 
-def _process_fight(
-    connection, event_id, fight: LiveFight, exact_index, normalized_index, counts, *, dry_run: bool
-) -> None:
+def _resolve_bout(
+    connection, event_id, fight: LiveFight, exact_index, normalized_index, counts
+) -> tuple[int, int, int] | None:
+    """(red_db_id, blue_db_id, fight_id) de una pelea ESPN, o None sin match."""
     red_id = _resolve_fighter(
         connection, fight.red_espn_id, fight.red_name, exact_index, normalized_index, counts
     )
@@ -277,12 +303,22 @@ def _process_fight(
             "  unresolved fighters for %s vs %s (red_id=%s blue_id=%s)",
             fight.red_name, fight.blue_name, red_id, blue_id,
         )
-        return
+        return None
     fight_id = find_fight_id_by_fighters(connection, event_id, red_id, blue_id)
     if fight_id is None:
         counts["fights_unmatched"] += 1
         LOGGER.info("  no DB fight on event %s for %s vs %s", event_id, fight.red_name, fight.blue_name)
+        return None
+    return red_id, blue_id, fight_id
+
+
+def _process_fight(
+    connection, event_id, fight: LiveFight, exact_index, normalized_index, counts, *, dry_run: bool
+) -> None:
+    bout = _resolve_bout(connection, event_id, fight, exact_index, normalized_index, counts)
+    if bout is None:
         return
+    red_id, blue_id, fight_id = bout
     if fight.winner_espn_id == fight.red_espn_id:
         winner_id, winner_name = red_id, fight.red_name
     elif fight.winner_espn_id == fight.blue_espn_id:
@@ -312,8 +348,71 @@ def _process_fight(
         counts["fights_already_filled"] += 1
 
 
-def process_events(connection, events: list[LiveEvent], promotion_id: int, *, dry_run: bool) -> Counter:
-    """Map live ESPN events onto DB events/fights and fill finished results."""
+def _process_live_stats(
+    connection, session, event: LiveEvent, event_id, exact_index, normalized_index,
+    counts, *, dry_run: bool
+) -> None:
+    """T3-A fase B: fila viva (estado fino + stats) por pelea in/post.
+
+    Verificado con muestras reales (UFC 329): las stats se actualizan EN
+    DIRECTO durante el asalto. Las peleas en curso se piden en cada pasada;
+    las terminadas UNA vez (al guardar su total final con state='post' dejan
+    de pedirse — get_final_stats_fight_ids). El matching reutiliza el mismo
+    _resolve_bout que los resultados, con un Counter aparte para no inflar
+    los contadores de la pasada de resultados."""
+    candidates = [
+        fight for fight in event.fights
+        if fight.completed or fight.state in ("in", "post")
+    ]
+    if not candidates:
+        return
+    resolve_counts: Counter = Counter()
+    resolved: list[tuple[LiveFight, int, int, int]] = []
+    for fight in candidates:
+        bout = _resolve_bout(
+            connection, event_id, fight, exact_index, normalized_index, resolve_counts
+        )
+        if bout is None:
+            counts["live_stats_unresolved"] += 1
+            continue
+        resolved.append((fight, *bout))
+    if not resolved:
+        return
+    final_ids = get_final_stats_fight_ids(connection, [item[3] for item in resolved])
+    for fight, red_id, blue_id, fight_id in resolved:
+        if fight_id in final_ids:
+            counts["live_stats_skipped_final"] += 1
+            continue
+        state = "post" if (fight.completed or fight.state == "post") else "in"
+        stats = collect_fight_stats(
+            session, event.espn_id, fight.competition_id,
+            [(fight.red_espn_id, red_id), (fight.blue_espn_id, blue_id)],
+        )
+        LOGGER.info(
+            "  LIVE-STATS %s vs %s [%s %s R%s %s] sides=%d (fight %s%s)",
+            fight.red_name, fight.blue_name, state, fight.status_detail,
+            fight.end_round, fight.end_time, len(stats or {}), fight_id,
+            ", dry-run" if dry_run else "",
+        )
+        if dry_run:
+            counts["live_stats_written"] += 1
+            continue
+        upsert_live_fight_stats(
+            connection, fight_id, state, fight.status_name, fight.status_detail,
+            fight.end_round, fight.end_time, stats,
+        )
+        counts["live_stats_written"] += 1
+
+
+def process_events(
+    connection, events: list[LiveEvent], promotion_id: int, *, dry_run: bool,
+    stats_session: requests.Session | None = None,
+) -> Counter:
+    """Map live ESPN events onto DB events/fights and fill finished results.
+
+    Con stats_session (T3-A fase B) añade, por evento, la pasada de stats en
+    vivo sobre live_fight_stats; sin ella (tests, llamadas antiguas) se
+    comporta exactamente como antes."""
     counts: Counter = Counter()
     fighters = get_all_fighters(connection)
     exact_index = _build_exact_name_index(fighters)
@@ -334,6 +433,11 @@ def process_events(connection, events: list[LiveEvent], promotion_id: int, *, dr
                 _process_fight(
                     connection, event_id, fight, exact_index, normalized_index, counts,
                     dry_run=dry_run,
+                )
+            if stats_session is not None:
+                _process_live_stats(
+                    connection, stats_session, event, event_id,
+                    exact_index, normalized_index, counts, dry_run=dry_run,
                 )
             if dry_run:
                 connection.rollback()
@@ -366,7 +470,8 @@ def _build_session(settings) -> requests.Session:
 def refresh_live_results(dates: str | None = None, dry_run: bool = False) -> Counter:
     settings = get_settings()
     window = dates or default_dates_window()
-    payload = fetch_scoreboard(_build_session(settings), window)
+    session = _build_session(settings)
+    payload = fetch_scoreboard(session, window)
     events = parse_scoreboard(payload)
     live_events = events_worth_processing(events)
     counts: Counter = Counter(
@@ -379,8 +484,18 @@ def refresh_live_results(dates: str | None = None, dry_run: bool = False) -> Cou
         return counts
     with connect(settings.database_url) as connection:
         counts.update(
-            process_events(connection, live_events, settings.promotion_id_ufc, dry_run=dry_run)
+            process_events(
+                connection, live_events, settings.promotion_id_ufc,
+                dry_run=dry_run, stats_session=session,
+            )
         )
+        if not dry_run:
+            # T3-A fase B: la tabla viva se poda sola (la web solo consulta
+            # el evento del día). Commit propio: independiente de los eventos.
+            pruned = prune_live_fight_stats(connection)
+            connection.commit()
+            if pruned:
+                counts["live_stats_pruned"] = pruned
     return counts
 
 
@@ -388,6 +503,7 @@ SUMMARY_KEYS = [
     "scoreboard_events", "live_events", "events_matched", "events_unmatched",
     "fights_updated", "fights_already_filled", "fights_pending",
     "fights_no_winner", "fights_unmatched", "fighters_unresolved", "event_errors",
+    "live_stats_written", "live_stats_skipped_final", "live_stats_unresolved",
 ]
 
 
