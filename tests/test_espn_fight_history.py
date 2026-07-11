@@ -173,6 +173,15 @@ class TestPromotionLabel:
         assert promotion_label("3359", None, "ROC 18") == "ROC"
         assert promotion_label("3359", None, None) == "Regional"
 
+    def test_sub_brand_suffix_after_dash_is_dropped(self):
+        assert promotion_label(
+            "3359",
+            "Tech-Krep FC - Ermak Prime Challenge: Prime Selection",
+            None,
+        ) == "Tech-Krep FC"
+        # El guion SIN espacios es parte del nombre, no sub-marca.
+        assert promotion_label("3359", "K-1: World GP", None) == "K-1"
+
 
 class TestCanonicalMethod:
     def test_decisions(self):

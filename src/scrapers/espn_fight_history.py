@@ -108,6 +108,9 @@ def promotion_label(league_id: str, event_name: str | None, short_name: str | No
         base = short_name
     elif event_name:
         base = event_name
+    # Sub-marcas tras " - " no son la promoción ("Tech-Krep FC - Ermak Prime
+    # Challenge" -> "Tech-Krep FC"); además desbordan el badge de la ficha.
+    base = base.split(" - ", 1)[0]
     base = _TRAILING_NUMBER_RE.sub("", base.strip()).strip()
     return base or "Regional"
 
