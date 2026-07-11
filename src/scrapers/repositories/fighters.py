@@ -229,6 +229,26 @@ def update_fighter_facts(
         return cursor.rowcount > 0
 
 
+def set_fighter_espn_id(connection: PgConnection, fighter_id: int, espn_id: str) -> bool:
+    """Store the resolved ESPN athlete id (migration 016). Additive-only: an
+    already-populated espn_id is never overwritten. The partial UNIQUE index
+    (fighters_espn_id_key) rejects attaching one athlete to two DB rows — the
+    caller must handle psycopg2.errors.UniqueViolation (rollback + skip).
+    Returns True if a row was updated."""
+    if not espn_id:
+        return False
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE fighters
+            SET espn_id = %s, updated_at = NOW()
+            WHERE id = %s AND espn_id IS NULL
+            """,
+            (espn_id, fighter_id),
+        )
+        return cursor.rowcount > 0
+
+
 def update_fighter_standing_photo(
     connection: PgConnection,
     fighter_id: int,

@@ -1,0 +1,67 @@
+name: ESPN fight history (Bellator/regionales)
+
+# Pipeline S3-G en dos pasos:
+#   1. resolve_espn_ids  — resuelve fighters.espn_id (Search API, umbral de
+#      identidad 0.92, guardas anti-homónimo/ambigüedad).
+#   2. espn_fight_history — 1 GET por luchador al endpoint common/v3 y upsert
+#      de las peleas NO-UFC en la tabla APARTE fight_history_espn (016).
+# `fights`/`events` no se tocan NUNCA (garantía para el modelo ML y las
+# stats solo-UFC de la ficha). Escrituras aditivas e idempotentes: re-lanzar
+# siempre es seguro.
+# Scope del cron = luchadores nuevos (espn_id/sello NULL) + carteleras
+# próximas (~1-5 min). Dispatch con all=true para el barrido completo
+# (~2.8k búsquedas + ~2.4k carreras ≈ 60-75 min).
+# Cron semanal martes 05:00 UTC: día sin otros crons (los lunes van fullbody
+# 05:00 / photos 05:30 / facts 06:30 / standing 07:00 / bonuses 08:00).
+on:
+  schedule:
+    - cron: "0 5 * * 2"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max fighters per step (empty = all in scope)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry-run: fetch + report, no writes"
+        type: boolean
+        default: false
+      all:
+        description: "Whole-table scope for both steps"
+        type: boolean
+        default: false
+
+concurrency:
+  group: espn-history
+  cancel-in-progress: false
+
+jobs:
+  espn-history:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+      - run: pip install -r requirements-scrapers.txt
+      - name: Build shared args
+        id: args
+        run: |
+          ARGS=""
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            if [ -n "${{ inputs.limit || '' }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
+            if [ "${{ inputs.dry_run || false }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+            if [ "${{ inputs.all || false }}" = "true" ]; then ARGS="$ARGS --all"; fi
+          fi
+          echo "value=$ARGS" >> "$GITHUB_OUTPUT"
+      - name: Resolve ESPN athlete ids
+        run: python -m src.scrapers.resolve_espn_ids ${{ steps.args.outputs.value }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - name: Import non-UFC fight history
+        run: python -m src.scrapers.espn_fight_history ${{ steps.args.outputs.value }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
