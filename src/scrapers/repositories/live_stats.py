@@ -7,9 +7,12 @@ ni el dataset del modelo. Ver la cabecera de
 db/migrations/017_live_fight_stats.sql.
 
 A diferencia de fill_fight_result (COALESCE, el almacenado gana), aquí el
-UPSERT pisa la fila entera: es dato vivo y la última lectura es la buena.
-Única excepción: stats con NULL entrante conserva el último JSON conocido
-(un fallo puntual del endpoint de stats no borra lo ya mostrado).
+UPSERT pisa el estado vivo (asalto, reloj, estado fino): es dato vivo y la
+última lectura es la buena. Las stats, en cambio, se MEZCLAN por lado
+(`stats || EXCLUDED.stats`): un fetch parcial de un solo luchador actualiza
+su lado sin borrar al rival (hallazgo 2), y un fetch NULL total conserva lo
+ya mostrado. Además el estado 'post' es PEGAJOSO e is_final MONOTÓNICA para
+que un escritor solapado no retroceda un final ya bueno (hallazgo 4).
 """
 
 from __future__ import annotations
@@ -28,22 +31,37 @@ def upsert_live_fight_stats(
     period: int | None,
     display_clock: str | None,
     stats: dict[str, dict[str, int]] | None,
+    is_final: bool = False,
 ) -> None:
-    """Escribe/pisa la fila viva de una pelea (una fila por fight_id)."""
+    """Escribe/pisa la fila viva de una pelea (una fila por fight_id).
+
+    is_final: solo TRUE cuando el llamador confirmó stats FRESCAS de ambos
+    lados en 'post' (ver _process_live_stats). Se guarda con OR sobre el valor
+    almacenado: una vez sellado, ningún escritor posterior lo desella."""
     with connection.cursor() as cursor:
         cursor.execute(
             """
             INSERT INTO live_fight_stats
                 (fight_id, state, status_name, status_detail, period,
-                 display_clock, stats, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                 display_clock, stats, is_final, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
             ON CONFLICT (fight_id) DO UPDATE SET
-                state = EXCLUDED.state,
+                -- 'post' pegajoso: una pelea terminada no vuelve a 'in' aunque
+                -- un escritor solapado llegue con un scoreboard rezagado.
+                state = CASE
+                    WHEN live_fight_stats.state = 'post' THEN 'post'
+                    ELSE EXCLUDED.state
+                END,
                 status_name = EXCLUDED.status_name,
                 status_detail = EXCLUDED.status_detail,
                 period = EXCLUDED.period,
                 display_clock = EXCLUDED.display_clock,
-                stats = COALESCE(EXCLUDED.stats, live_fight_stats.stats),
+                -- Merge por lado: el JSON entrante (aunque sea de un solo
+                -- luchador) actualiza SU clave y conserva la del rival; NULL
+                -- entrante deja intacto lo guardado.
+                stats = COALESCE(live_fight_stats.stats, '{}'::jsonb)
+                        || COALESCE(EXCLUDED.stats, '{}'::jsonb),
+                is_final = live_fight_stats.is_final OR EXCLUDED.is_final,
                 updated_at = NOW()
             """,
             (
@@ -54,15 +72,16 @@ def upsert_live_fight_stats(
                 period,
                 display_clock,
                 json.dumps(stats, ensure_ascii=False) if stats is not None else None,
+                is_final,
             ),
         )
 
 
 def get_final_stats_fight_ids(connection: PgConnection, fight_ids: list[int]) -> set[int]:
-    """Peleas cuyo total final provisional ya quedó guardado (state='post'
-    CON stats): el bucle deja de re-pedirlas a ESPN. Una fila 'post' sin
-    stats (el endpoint falló justo al acabar) NO cuenta como final y se
-    reintenta en la siguiente pasada."""
+    """Peleas cuyo total final SELLADO (is_final) ya está guardado: el bucle
+    deja de re-pedirlas a ESPN. Una fila 'post' que NO llegó a is_final (el
+    endpoint de stats falló o solo respondió un lado en la pasada de cierre)
+    se reintenta barato en cada pasada hasta capturar el total completo."""
     if not fight_ids:
         return set()
     with connection.cursor() as cursor:
@@ -71,12 +90,18 @@ def get_final_stats_fight_ids(connection: PgConnection, fight_ids: list[int]) ->
             SELECT fight_id
             FROM live_fight_stats
             WHERE fight_id = ANY(%s)
-              AND state = 'post'
-              AND stats IS NOT NULL
+              AND is_final = true
             """,
             (fight_ids,),
         )
         return {int(row[0]) for row in cursor.fetchall()}
+
+
+def delete_live_fight_stats(connection: PgConnection, fight_id: int) -> None:
+    """Borra la fila viva de una pelea (p. ej. cancelada/aplazada a mitad de
+    evento): sin fila, /en-vivo no pinta un 'Final 0/0' de algo que no ocurrió."""
+    with connection.cursor() as cursor:
+        cursor.execute("DELETE FROM live_fight_stats WHERE fight_id = %s", (fight_id,))
 
 
 def prune_live_fight_stats(connection: PgConnection, older_than_hours: int = 48) -> int:

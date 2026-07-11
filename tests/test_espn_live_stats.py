@@ -21,6 +21,7 @@ from src.scrapers.espn_live_stats import (
     parse_stat_values,
 )
 from src.scrapers.repositories.live_stats import (
+    delete_live_fight_stats,
     get_final_stats_fight_ids,
     prune_live_fight_stats,
     upsert_live_fight_stats,
@@ -163,7 +164,7 @@ def test_collect_fight_stats_partial_and_empty_sides():
 # --------------------------------------------------------------- repositorio
 
 
-def test_upsert_live_fight_stats_overwrites_but_keeps_last_stats(fakedb):
+def test_upsert_live_fight_stats_merges_per_side_and_sticky_post(fakedb):
     conn = fakedb.Connection(lambda sql, params=None: [])
     upsert_live_fight_stats(
         conn, 11, "in", "STATUS_END_OF_ROUND", "End R2", 2, "2:37",
@@ -173,13 +174,21 @@ def test_upsert_live_fight_stats_overwrites_but_keeps_last_stats(fakedb):
     flat = " ".join(sql.split())
     assert "INSERT INTO live_fight_stats" in flat
     assert "ON CONFLICT (fight_id) DO UPDATE" in flat
-    # Dato VIVO: la última lectura pisa estado/asalto/reloj...
-    assert "state = EXCLUDED.state" in flat
+    # Dato VIVO: la última lectura pisa asalto/reloj...
     assert "period = EXCLUDED.period" in flat
-    # ...pero un fallo puntual del endpoint (stats NULL) no borra lo mostrado.
-    assert "stats = COALESCE(EXCLUDED.stats, live_fight_stats.stats)" in flat
+    # ...pero 'post' es pegajoso (no retrocede a 'in' con un escritor rezagado).
+    assert "WHEN live_fight_stats.state = 'post' THEN 'post'" in flat
+    # Merge por lado: un fetch parcial actualiza su clave sin borrar al rival;
+    # NULL entrante deja intacto lo guardado (hallazgos 2 y 4).
+    assert (
+        "stats = COALESCE(live_fight_stats.stats, '{}'::jsonb) "
+        "|| COALESCE(EXCLUDED.stats, '{}'::jsonb)" in flat
+    )
+    # is_final monotónica: una vez sellado, no se desella.
+    assert "is_final = live_fight_stats.is_final OR EXCLUDED.is_final" in flat
     assert params[0] == 11 and params[1] == "in"
     assert '"ctrl": 61' in params[6]
+    assert params[7] is False  # 'in' nunca sella
 
 
 def test_upsert_live_fight_stats_null_stats_written_as_sql_null(fakedb):
@@ -187,15 +196,27 @@ def test_upsert_live_fight_stats_null_stats_written_as_sql_null(fakedb):
     upsert_live_fight_stats(conn, 11, "in", None, "Walkouts", 0, "-", None)
     _, params = conn.cursors[0].executed[0]
     assert params[6] is None
+    assert params[7] is False
 
 
-def test_get_final_stats_fight_ids_only_post_with_stats(fakedb):
+def test_upsert_live_fight_stats_seals_with_is_final(fakedb):
+    conn = fakedb.Connection(lambda sql, params=None: [])
+    upsert_live_fight_stats(
+        conn, 11, "post", "STATUS_FINAL", "Final", 3, "5:00",
+        {"201": EXPECTED_COMPACT, "202": EXPECTED_COMPACT}, is_final=True,
+    )
+    _, params = conn.cursors[0].executed[0]
+    assert params[1] == "post" and params[7] is True
+
+
+def test_get_final_stats_fight_ids_only_sealed_finals(fakedb):
     conn = fakedb.Connection(lambda sql, params=None: [(11,), (13,)])
     assert get_final_stats_fight_ids(conn, [11, 12, 13]) == {11, 13}
     sql, params = conn.cursors[0].executed[0]
     flat = " ".join(sql.split())
-    # 'post' sin stats NO es final: se reintenta en la siguiente pasada.
-    assert "state = 'post'" in flat and "stats IS NOT NULL" in flat
+    # Solo is_final cuenta como final: una 'post' sin sellar se reintenta.
+    assert "is_final = true" in flat
+    assert "stats IS NOT NULL" not in flat
     assert params == ([11, 12, 13],)
     assert get_final_stats_fight_ids(conn, []) == set()
 
@@ -206,6 +227,14 @@ def test_prune_live_fight_stats_deletes_by_age(fakedb):
     sql, params = conn.cursors[0].executed[0]
     assert "DELETE FROM live_fight_stats" in sql
     assert params == (48,)
+
+
+def test_delete_live_fight_stats_by_fight_id(fakedb):
+    conn = fakedb.Connection(lambda sql, params=None: [])
+    delete_live_fight_stats(conn, 11)
+    sql, params = conn.cursors[0].executed[0]
+    assert "DELETE FROM live_fight_stats WHERE fight_id = %s" in " ".join(sql.split())
+    assert params == (11,)
 
 
 # ------------------------------------------------------- cableado del bucle
@@ -309,9 +338,72 @@ def test_process_events_writes_live_rows_for_in_and_post(fakedb):
     by_fight = {params[0]: params for _, params in inserts}
     assert by_fight[11][1] == "in" and by_fight[11][3] == "End R2" and by_fight[11][4] == 2
     assert by_fight[12][1] == "post"
+    # La 'in' nunca sella; la 'post' con ambos lados frescos SÍ (is_final).
+    assert by_fight[11][7] is False
+    assert by_fight[12][7] is True
     # Stats con claves = NUESTROS fighter ids.
     assert '"201"' in by_fight[11][6] and '"202"' in by_fight[11][6]
     assert conn.commits >= 1
+
+
+def test_post_fight_not_sealed_when_a_side_fetch_fails(fakedb):
+    # En la pasada de cierre falla el GET de un lado -> stats parciales -> la
+    # pelea NO se sella (is_final=False) y se reintentará (hallazgos 1/2).
+    conn = fakedb.Connection(_responder(final_ids_rows=[]))
+    # La sesión solo sirve al ganador de la pelea terminada (203); su rival 204
+    # falla -> collect devuelve {"203": ...}, parcial.
+    session = _FakeSession({"3155424": STATS_PAYLOAD})
+    events = parse_scoreboard(_scoreboard_with_one_live_fight())
+    process_events(conn, events, promotion_id=1, dry_run=False, stats_session=session)
+    inserts = {
+        params[0]: params
+        for cur in conn.cursors
+        for sql, params in cur.executed
+        if "INSERT INTO live_fight_stats" in sql
+    }
+    # fight 12 (post) llegó parcial -> no sellada; el merge conserva al rival.
+    assert inserts[12][1] == "post"
+    assert inserts[12][7] is False
+
+
+def _scoreboard_with_cancelled_fight():
+    board = _scoreboard_with_one_live_fight()
+    # La pelea terminada (12) pasa a cancelada: state='post', completed=False,
+    # STATUS_CANCELED (taxonomía de ESPN para un scratch a mitad de evento).
+    cancelled = board["events"][0]["competitions"][1]
+    cancelled["status"]["type"] = {
+        "name": "STATUS_CANCELED", "state": "post", "completed": False,
+        "description": "Canceled", "detail": "Canceled", "shortDetail": "Canceled",
+    }
+    cancelled["details"] = []
+    cancelled["competitors"][0]["winner"] = False
+    return board
+
+
+def test_cancelled_fight_is_deleted_and_skipped(fakedb):
+    # La 12 aparece cancelada: no se pide ni se sella; se borra su fila viva.
+    conn = fakedb.Connection(_responder(final_ids_rows=[]))
+    session = _FakeSession({aid: STATS_PAYLOAD for aid in ESPN_TO_DB})
+    events = parse_scoreboard(_scoreboard_with_cancelled_fight())
+    counts = process_events(conn, events, promotion_id=1, dry_run=False, stats_session=session)
+    assert counts["live_stats_cancelled"] == 1
+    # Solo se escribe la fila viva de la 11 (en curso); la 12 no.
+    inserts = [
+        params for cur in conn.cursors for sql, params in cur.executed
+        if "INSERT INTO live_fight_stats" in sql
+    ]
+    assert {p[0] for p in inserts} == {11}
+    # Y se emite el DELETE de la fila de la 12.
+    deletes = [
+        params for cur in conn.cursors for sql, params in cur.executed
+        if "DELETE FROM live_fight_stats WHERE fight_id" in " ".join(sql.split())
+    ]
+    assert (12,) in deletes
+    # No se pidieron stats de la cancelada a ESPN.
+    assert not any(
+        "/competitors/3155424/statistics" in url or "/competitors/3155425/statistics" in url
+        for url in session.requested
+    )
 
 
 def test_process_events_skips_fights_with_final_stats(fakedb):

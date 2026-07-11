@@ -75,6 +75,7 @@ from .repositories.events import find_existing_event_id
 from .repositories.fighters import get_all_fighters, get_fighter_id_by_source
 from .repositories.fights import fill_fight_result, find_fight_id_by_fighters
 from .repositories.live_stats import (
+    delete_live_fight_stats,
     get_final_stats_fight_ids,
     prune_live_fight_stats,
     upsert_live_fight_stats,
@@ -103,6 +104,21 @@ _UNOFFICIAL_WINNER_PREFIX = "unofficial winner"
 # The provisional codes this module writes; backfill_results treats a stored
 # method equal to one of these as still-fillable from ufcstats.
 ESPN_PROVISIONAL_METHODS = tuple(sorted(set(METHOD_BY_DETAIL.values())))
+
+# ESPN marca una pelea cancelada/aplazada a mitad de evento con state='post'
+# (completed=False) y un status_type.name como STATUS_CANCELED/STATUS_POSTPONED.
+# El endpoint de statistics sirve 42 métricas A CERO antes de que la pelea
+# empiece, así que sin este guard una cancelada se sellaría como "Final 0/0".
+# Marcadores por subcadena para tolerar variantes (CANCELED/CANCELLED...).
+_CANCELLED_STATUS_MARKERS = ("CANCEL", "POSTPON", "FORFEIT", "ABANDON", "SUSPEND")
+
+
+def is_cancelled_status(status_name: str | None) -> bool:
+    """¿El estado fino de ESPN indica una pelea cancelada/aplazada/suspendida?"""
+    if not status_name:
+        return False
+    upper = status_name.upper()
+    return any(marker in upper for marker in _CANCELLED_STATUS_MARKERS)
 
 
 @dataclass(frozen=True)
@@ -356,8 +372,10 @@ def _process_live_stats(
 
     Verificado con muestras reales (UFC 329): las stats se actualizan EN
     DIRECTO durante el asalto. Las peleas en curso se piden en cada pasada;
-    las terminadas UNA vez (al guardar su total final con state='post' dejan
-    de pedirse — get_final_stats_fight_ids). El matching reutiliza el mismo
+    una terminada deja de pedirse solo cuando su total queda SELLADO (is_final,
+    con stats frescas de ambos lados) — get_final_stats_fight_ids. Si el fetch
+    de cierre falla o llega parcial, is_final=False y se reintenta barato. Las
+    canceladas/aplazadas se borran y se saltan. El matching reutiliza el mismo
     _resolve_bout que los resultados, con un Counter aparte para no inflar
     los contadores de la pasada de resultados."""
     candidates = [
@@ -380,18 +398,35 @@ def _process_live_stats(
         return
     final_ids = get_final_stats_fight_ids(connection, [item[3] for item in resolved])
     for fight, red_id, blue_id, fight_id in resolved:
+        # Cancelada/aplazada a mitad de evento: ni la sellamos ni la pintamos.
+        # Borramos cualquier fila (p. ej. walkouts escritos antes de anularla).
+        if is_cancelled_status(fight.status_name):
+            counts["live_stats_cancelled"] += 1
+            if not dry_run:
+                delete_live_fight_stats(connection, fight_id)
+            continue
         if fight_id in final_ids:
             counts["live_stats_skipped_final"] += 1
             continue
-        state = "post" if (fight.completed or fight.state == "post") else "in"
+        is_post = fight.completed or fight.state == "post"
+        state = "post" if is_post else "in"
+        athletes = [(fight.red_espn_id, red_id), (fight.blue_espn_id, blue_id)]
         stats = collect_fight_stats(
-            session, event.espn_id, fight.competition_id,
-            [(fight.red_espn_id, red_id), (fight.blue_espn_id, blue_id)],
+            session, event.espn_id, fight.competition_id, athletes,
         )
+        # is_final: solo sellamos el total cuando, ya en 'post', tenemos stats
+        # FRESCAS de cada lado que ESPN puede servir en ESTA pasada (con espn
+        # id). Un fallo de red o un lado que llega tarde deja is_final=False y
+        # se reintenta barato; un lado sin espn id nunca llega y no bloquea.
+        fetchable_ids = [db_id for espn_id, db_id in athletes if espn_id]
+        have_all_fresh = stats is not None and all(
+            str(db_id) in stats for db_id in fetchable_ids
+        )
+        is_final = is_post and bool(fetchable_ids) and have_all_fresh
         LOGGER.info(
-            "  LIVE-STATS %s vs %s [%s %s R%s %s] sides=%d (fight %s%s)",
+            "  LIVE-STATS %s vs %s [%s %s R%s %s] sides=%d final=%s (fight %s%s)",
             fight.red_name, fight.blue_name, state, fight.status_detail,
-            fight.end_round, fight.end_time, len(stats or {}), fight_id,
+            fight.end_round, fight.end_time, len(stats or {}), is_final, fight_id,
             ", dry-run" if dry_run else "",
         )
         if dry_run:
@@ -399,7 +434,7 @@ def _process_live_stats(
             continue
         upsert_live_fight_stats(
             connection, fight_id, state, fight.status_name, fight.status_detail,
-            fight.end_round, fight.end_time, stats,
+            fight.end_round, fight.end_time, stats, is_final,
         )
         counts["live_stats_written"] += 1
 
@@ -504,6 +539,7 @@ SUMMARY_KEYS = [
     "fights_updated", "fights_already_filled", "fights_pending",
     "fights_no_winner", "fights_unmatched", "fighters_unresolved", "event_errors",
     "live_stats_written", "live_stats_skipped_final", "live_stats_unresolved",
+    "live_stats_cancelled",
 ]
 
 
