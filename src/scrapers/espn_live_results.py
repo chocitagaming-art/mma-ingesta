@@ -391,6 +391,46 @@ SUMMARY_KEYS = [
 ]
 
 
+def run_bounded_loop(
+    dates: str | None,
+    dry_run: bool,
+    duration_minutes: int,
+    interval_seconds: int,
+) -> Counter:
+    """T3-A: ventana de evento en CI — una pasada cada interval_seconds hasta
+    agotar duration_minutes (deadline con time.monotonic, patrón de
+    capture_live_samples). GitHub retrasa los crons */10, así que un único job
+    largo es lo que garantiza la cadencia durante la noche de evento.
+
+    Guardas: si la PRIMERA pasada ve el scoreboard vacío no hay evento en la
+    ventana — salida barata y en verde (espíritu del guard del cron). Un fallo
+    de red/BD en una pasada se loguea y NO tumba la ventana entera (cada pasada
+    es idempotente: COALESCE, el valor almacenado gana)."""
+    deadline = time.monotonic() + duration_minutes * 60
+    totals: Counter = Counter()
+    iterations = 0
+    failures = 0
+    while True:
+        iterations += 1
+        try:
+            counts = refresh_live_results(dates=dates, dry_run=dry_run)
+            totals.update(counts)
+            print(json.dumps({key: counts.get(key, 0) for key in SUMMARY_KEYS}), flush=True)
+            if iterations == 1 and counts.get("scoreboard_events", 0) == 0:
+                LOGGER.info("Bounded loop: scoreboard vacío en la 1ª pasada; sin evento en la ventana.")
+                break
+        except Exception:  # noqa: BLE001 - una pasada mala no mata la ventana
+            failures += 1
+            LOGGER.exception(
+                "Bounded loop: falló la pasada %s (%s fallos acumulados)", iterations, failures
+            )
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(max(1, interval_seconds))
+    print(json.dumps({"loop_iterations": iterations, "loop_failures": failures}), flush=True)
+    return totals
+
+
 def main() -> None:
     configure_logging()
     parser = argparse.ArgumentParser(description="Fill near-live fight results from ESPN's scoreboard.")
@@ -404,7 +444,24 @@ def main() -> None:
         "--loop", action="store_true",
         help=f"Poll forever every {LOOP_SLEEP_SECONDS}s (local fight-night use).",
     )
+    parser.add_argument(
+        "--duration-minutes", type=int, default=None,
+        help="Bucle ACOTADO de ventana de evento (CI): pasadas hasta agotar los "
+             "minutos indicados y salir. Tiene prioridad sobre --loop.",
+    )
+    parser.add_argument(
+        "--interval-seconds", type=int, default=120,
+        help="Segundos entre pasadas del bucle acotado (con --duration-minutes).",
+    )
     args = parser.parse_args()
+    if args.duration_minutes is not None:
+        run_bounded_loop(
+            dates=args.dates,
+            dry_run=args.dry_run,
+            duration_minutes=args.duration_minutes,
+            interval_seconds=args.interval_seconds,
+        )
+        return
     while True:
         counts = refresh_live_results(dates=args.dates, dry_run=args.dry_run)
         print(json.dumps({key: counts.get(key, 0) for key in SUMMARY_KEYS}, indent=2))

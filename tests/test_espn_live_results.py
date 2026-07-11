@@ -319,3 +319,85 @@ def test_draw_or_unscored_fight_writes_nothing(fakedb):
     # Sin ganador señalado no se escribe método: un empate/NC lo decide ufcstats.
     assert counts["fights_no_winner"] == 1
     assert fakedb.mutating_statements(conn) == []
+
+
+# --------------------------------------------------- bounded loop (T3-A)
+
+
+def _patch_clock(monkeypatch, module, step_seconds):
+    """time.monotonic avanza step_seconds por consulta; time.sleep no duerme."""
+    clock = {"now": 0.0}
+    sleeps = []
+
+    def fake_monotonic():
+        clock["now"] += step_seconds
+        return clock["now"]
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(module.time, "sleep", fake_sleep)
+    return sleeps
+
+
+def test_run_bounded_loop_stops_at_deadline(monkeypatch):
+    from src.scrapers import espn_live_results as module
+
+    sleeps = _patch_clock(monkeypatch, module, step_seconds=60.0)
+    calls = []
+
+    def fake_refresh(dates=None, dry_run=False):
+        calls.append((dates, dry_run))
+        return Counter({"scoreboard_events": 1, "live_events": 1})
+
+    monkeypatch.setattr(module, "refresh_live_results", fake_refresh)
+    totals = module.run_bounded_loop(
+        dates="20260711", dry_run=True, duration_minutes=5, interval_seconds=120
+    )
+    # Deadline en monotonic=360 (60 de arranque + 5*60); una consulta por
+    # vuelta => ~4-5 pasadas, todas con los args intactos y agregadas.
+    assert len(calls) >= 2
+    assert all(call == ("20260711", True) for call in calls)
+    assert sleeps and all(seconds == 120 for seconds in sleeps)
+    assert totals["scoreboard_events"] == len(calls)
+
+
+def test_run_bounded_loop_exits_early_on_empty_scoreboard(monkeypatch):
+    from src.scrapers import espn_live_results as module
+
+    sleeps = _patch_clock(monkeypatch, module, step_seconds=60.0)
+    calls = []
+
+    def fake_refresh(dates=None, dry_run=False):
+        calls.append(1)
+        return Counter({"scoreboard_events": 0})
+
+    monkeypatch.setattr(module, "refresh_live_results", fake_refresh)
+    module.run_bounded_loop(
+        dates=None, dry_run=False, duration_minutes=235, interval_seconds=120
+    )
+    # Guard: sin eventos en la ventana, una sola pasada y sin dormir.
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+def test_run_bounded_loop_survives_iteration_errors(monkeypatch):
+    from src.scrapers import espn_live_results as module
+
+    _patch_clock(monkeypatch, module, step_seconds=60.0)
+    calls = []
+
+    def flaky_refresh(dates=None, dry_run=False):
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("ESPN hiccup")
+        return Counter({"scoreboard_events": 1, "live_events": 1})
+
+    monkeypatch.setattr(module, "refresh_live_results", flaky_refresh)
+    totals = module.run_bounded_loop(
+        dates=None, dry_run=False, duration_minutes=5, interval_seconds=120
+    )
+    # El fallo de la segunda pasada no tumba la ventana: se sigue iterando.
+    assert len(calls) >= 3
+    assert totals["scoreboard_events"] == len(calls) - 1

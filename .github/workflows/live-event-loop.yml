@@ -1,0 +1,73 @@
+# T3-A: bucle ACOTADO de resultados en vivo para la noche de evento.
+#
+# El cron */10 de live-results.yml lo retrasa el scheduler de GitHub (medido
+# 11-jul-2026: cadencia efectiva ~1 h). Este job arranca al inicio de cada
+# ventana y SE QUEDA VIVO ~4 h haciendo una pasada cada 2 min con el mismo
+# codigo idempotente (COALESCE, el valor almacenado gana). live-results.yml
+# sigue activo como respaldo: solaparse es inocuo por construccion.
+#
+# Guard barato: si la primera pasada ve el scoreboard vacio (no hay evento en
+# la ventana), el job sale en verde en segundos.
+name: Live event loop (ESPN)
+
+on:
+  schedule:
+    # Inicio de las ventanas de sabado noche US (mismas que live-results.yml):
+    # 20:45 UTC cubre prelims tempranos europeos; 00:45 UTC el main card US.
+    # Con concurrency, si el primer job sigue vivo el segundo queda en cola y
+    # encadena al terminar: cobertura continua de la noche.
+    - cron: "45 20 * * 6"
+    - cron: "45 0 * * 0"
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: "Duracion de la ventana en minutos"
+        default: "235"
+      interval_seconds:
+        description: "Segundos entre pasadas"
+        default: "120"
+      dates:
+        description: "Filtro ESPN YYYYMMDD (opcional; por defecto hoy+ayer US Eastern)"
+        default: ""
+      dry_run:
+        description: "Match + report sin escrituras"
+        type: boolean
+        default: false
+
+concurrency:
+  group: live-event-loop
+  cancel-in-progress: false
+
+jobs:
+  live-loop:
+    runs-on: ubuntu-latest
+    # Margen sobre los 235 min por defecto; tope duro de GitHub: 360.
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-scrapers.txt
+
+      - name: Run bounded live loop
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        # En los eventos schedule los inputs llegan vacios: defaults defensivos
+        # con || (mismo patron que enrich-fullbody.yml).
+        run: |
+          ARGS="--duration-minutes ${{ inputs.duration_minutes || '235' }}"
+          ARGS="$ARGS --interval-seconds ${{ inputs.interval_seconds || '120' }}"
+          if [ -n "${{ inputs.dates }}" ]; then
+            ARGS="$ARGS --dates ${{ inputs.dates }}"
+          fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          echo "python -m src.scrapers.espn_live_results $ARGS"
+          python -m src.scrapers.espn_live_results $ARGS
