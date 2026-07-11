@@ -1,0 +1,84 @@
+name: Monitor web
+
+# S3-H (Tanda 2): vigila la web en producción cada 15 min sin cuentas nuevas.
+# Comprueba portada, /api/health (BD Neon), una ficha, /eventos, el
+# microservicio de predicción de Render y /api/search. Si algo falla, abre (o
+# comenta en) UN único Issue con la etiqueta 'monitor' — GitHub le manda el
+# email al dueño — y el job termina en rojo (doble señal). Al recuperarse todo,
+# comenta y cierra el Issue. Anti-spam: nunca hay más de un Issue abierto.
+# El dispatch manual acepta test_failure=true para probar el canal de alertas
+# end-to-end con un fallo forzado (una URL que no existe).
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      test_failure:
+        description: "Forzar un fallo de prueba (verifica el canal de alertas)"
+        type: boolean
+        default: false
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      BASE: https://mma-app-ruby.vercel.app
+    steps:
+      - name: Comprobar endpoints
+        run: |
+          : > /tmp/failures.md
+          check() {
+            local name="$1" url="$2" sniff="$3" maxtime="${4:-30}"
+            local body
+            # --retry 1: un parpadeo transitorio de red no debe abrir un Issue.
+            if body=$(curl -fsSL --max-time "$maxtime" --retry 1 --retry-delay 5 "$url" 2>/dev/null); then
+              if [ -n "$sniff" ] && ! printf '%s' "$body" | grep -q "$sniff"; then
+                echo "- **$name**: responde 200 pero sin el contenido esperado (\`$sniff\`) — $url" >> /tmp/failures.md
+              fi
+            else
+              echo "- **$name**: sin respuesta o error HTTP — $url" >> /tmp/failures.md
+            fi
+          }
+          check "Portada" "$BASE/" "MMA STATUS"
+          check "API health (BD Neon)" "$BASE/api/health" '"ok":true'
+          check "Ficha de luchador" "$BASE/fighters/6493" "MMA STATUS"
+          check "Eventos" "$BASE/eventos" "MMA STATUS"
+          # Render duerme ~50s en frío si el keepalive fallara; margen amplio.
+          check "Prediccion (Render)" "https://mma-prediction.onrender.com/health" "" 75
+          check "Busqueda" "$BASE/api/search?q=test" "" 30
+          if [ "${{ inputs.test_failure || false }}" = "true" ]; then
+            check "Fallo de PRUEBA (test_failure=true)" "$BASE/api/esta-ruta-no-existe" ""
+          fi
+
+      - name: Gestionar Issue de alerta
+        run: |
+          ISSUE=$(gh issue list --repo "$REPO" --label monitor --state open --json number --jq '.[0].number // empty')
+          STAMP=$(date -u +'%Y-%m-%d %H:%M UTC')
+          if [ -s /tmp/failures.md ]; then
+            BODY=$(printf '⛔ **%s** — el monitor ha detectado fallos:\n\n%s\n\n[Ver el run](%s)' "$STAMP" "$(cat /tmp/failures.md)" "$RUN_URL")
+            if [ -n "$ISSUE" ]; then
+              gh issue comment "$ISSUE" --repo "$REPO" --body "$BODY"
+            else
+              gh label create monitor --repo "$REPO" --color D73A4A --description "Alertas del monitor de la web" --force
+              gh issue create --repo "$REPO" --title "🔴 Monitor: la web tiene problemas" --label monitor --body "$BODY"
+            fi
+            echo "Fallos detectados:"; cat /tmp/failures.md
+            exit 1
+          fi
+          if [ -n "$ISSUE" ]; then
+            gh issue comment "$ISSUE" --repo "$REPO" --body "✅ **$STAMP** — todas las comprobaciones vuelven a pasar. Cierro la alerta. [Run]($RUN_URL)"
+            gh issue close "$ISSUE" --repo "$REPO"
+          fi
+          echo "Todo OK"
