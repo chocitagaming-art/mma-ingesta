@@ -1,14 +1,20 @@
 name: Enrich full-body photos
 
-# Manual backfill (Phase 2 of the redesign): fills fighters.full_body_url,
-# leg_reach_cm and trains_at from ufc.com athlete pages. Manual only (no cron):
-# the pass walks every fighter still missing one of the three columns (slug
-# guessed from the name; ranked + upcoming + with-headshot fighters first) at a
-# 0.4s delay, every UPDATE is additive (COALESCE, only fills NULLs), and pages
-# whose rendered name does not match the DB fighter are skipped (anti-homonym
-# guard), so re-dispatching is always safe and resumes whatever gap is left.
+# Fills fighters.full_body_url, leg_reach_cm and trains_at from ufc.com athlete
+# pages. The pass walks every fighter still missing one of the three columns
+# (slug guessed from the name; ranked + upcoming + with-headshot fighters first)
+# at a 0.4s delay, every UPDATE is additive (COALESCE, only fills NULLs), and
+# pages whose rendered name does not match the DB fighter are skipped
+# (anti-homonym guard), so every run is safe and resumes whatever gap is left.
+# Weekly cron (Mondays 05:00 UTC, owner request 11-jul): newcomers' half-body
+# photos used to depend on a manual dispatch — now they land on their own as
+# soon as ufc.com publishes them. The scheduled pass runs with no args (full
+# gap sweep; fighters with no ufc.com page are skipped again each week, ~10
+# min, well under the timeout). Manual dispatch remains for custom passes.
 # REQUIRES migration db/migrations/008_fighter_bio_extras.sql applied first.
 on:
+  schedule:
+    - cron: "0 5 * * 1"
   workflow_dispatch:
     inputs:
       limit:
@@ -43,9 +49,11 @@ jobs:
       - name: Run full-body enrichment backfill
         run: |
           ARGS=""
-          if [ -n "${{ inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
-          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
-          if [ "${{ inputs.solo_ufc }}" = "true" ]; then ARGS="$ARGS --solo-ufc"; fi
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            if [ -n "${{ inputs.limit || '' }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
+            if [ "${{ inputs.dry_run || false }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+            if [ "${{ inputs.solo_ufc || false }}" = "true" ]; then ARGS="$ARGS --solo-ufc"; fi
+          fi
           python -m src.scrapers.enrich_fullbody $ARGS
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

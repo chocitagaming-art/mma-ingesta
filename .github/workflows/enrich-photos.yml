@@ -1,0 +1,59 @@
+name: Enrich headshots (ufc.com)
+
+# Fills fighters.headshot_url (plus record/measurements/bio gaps) from ufc.com
+# athlete pages. Default scope = only fighters on UPCOMING cards that still
+# have a gap (headshot NULL/empty or 0-0-0 record), so a pass is small and
+# fast (~1-2 min). Every UPDATE is additive (COALESCE, only fills NULLs) and
+# the record is only written when the stored one is 0-0-0, so re-running is
+# always safe. Placeholder/silhouette images are rejected by the
+# _is_placeholder_image guard — the DB never stores ufc.com shadow images.
+# Weekly cron (Mondays 05:30 UTC, owner request 11-jul, staggered 30 min after
+# enrich-fullbody so ufc.com is not hit by both at once): newcomers whose
+# headshot ESPN could not provide (the daily refresh-upcoming path) now get
+# the official ufc.com one on their own as soon as it is published.
+# Manual dispatch remains for custom passes (--all sweeps the whole table).
+on:
+  schedule:
+    - cron: "30 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max fighters to process (empty = all in scope)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry-run: resolve + report, no writes"
+        type: boolean
+        default: false
+      all:
+        description: "Whole-table scope: every fighter with a gap, not just upcoming cards"
+        type: boolean
+        default: false
+
+concurrency:
+  group: enrich-photos
+  cancel-in-progress: false
+
+jobs:
+  enrich:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+      - run: pip install -r requirements-scrapers.txt
+      - name: Run ufc.com headshot enrichment
+        run: |
+          ARGS=""
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            if [ -n "${{ inputs.limit || '' }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
+            if [ "${{ inputs.dry_run || false }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+            if [ "${{ inputs.all || false }}" = "true" ]; then ARGS="$ARGS --all"; fi
+          fi
+          python -m src.scrapers.enrich_photos_ufc $ARGS
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
