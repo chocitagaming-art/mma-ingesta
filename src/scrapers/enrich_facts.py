@@ -238,8 +238,14 @@ def build_translator(client: Anthropic) -> Translator:
             "los nombres propios (peleadores, gimnasios, ciudades, promociones como UFC, "
             "Bellator o AFL), los apodos y las cifras. Suena natural y periodístico, no "
             "literal. Devuelve SOLO un objeto JSON con las claves \"facts\" (array de "
-            "strings, misma cantidad y orden que el original) y \"qa\" (array de objetos "
-            'con claves "q" y "a", misma cantidad y orden que el original).\n\n'
+            "strings) y \"qa\" (array de objetos con claves \"q\" y \"a\").\n"
+            "REGLAS ESTRICTAS DE FORMA (obligatorias): traduce elemento a elemento, 1:1. "
+            "\"facts\" debe tener EXACTAMENTE la misma cantidad de elementos y en el mismo "
+            "orden que el original, y \"qa\" EXACTAMENTE la misma cantidad de pares {q,a} y "
+            "en el mismo orden. NO muevas contenido entre \"facts\" y \"qa\", NO fusiones ni "
+            "dividas entradas, NO reclasifiques nada aunque parezca mal categorizado: si "
+            "\"facts\" llega vacío, devuélvelo vacío. Cada \"q\" traduce SOLO esa pregunta o "
+            "etiqueta y cada \"a\" SOLO esa respuesta.\n\n"
             f"{payload}"
         )
         response = client.messages.create(
