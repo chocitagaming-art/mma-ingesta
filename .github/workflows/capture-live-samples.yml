@@ -1,0 +1,60 @@
+name: Capture live ESPN samples (recon)
+
+# RECON temporal para la futura página "En vivo" (aprobado por el dueño,
+# 11-jul-2026): durante las ventanas de evento captura los JSON crudos que
+# publica ESPN (scoreboard, fightcenter, stats de la pelea en curso) y los
+# sube como artifact (7 días). READ-ONLY: sin DATABASE_URL, sin escrituras;
+# completamente independiente de live-results.yml.
+# Crons alineados con las ventanas de live-results (sáb noche + madrugada del
+# domingo UTC). Si no hay cartelera ese día, el guard sale en segundos.
+# >>> Desactivar este workflow cuando la página "En vivo" esté diseñada. <<<
+on:
+  schedule:
+    - cron: "50 20 * * 6"
+    - cron: "50 0 * * 0"
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: "Cuántos minutos capturar"
+        required: false
+        default: "235"
+      interval_seconds:
+        description: "Segundos entre pasadas"
+        required: false
+        default: "120"
+      dates:
+        description: "YYYYMMDD (vacío = hoy UTC)"
+        required: false
+        default: ""
+
+concurrency:
+  group: capture-live-samples
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - name: Capture samples
+        run: |
+          ARGS="--out samples"
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            if [ -n "${{ inputs.duration_minutes || '' }}" ]; then ARGS="$ARGS --duration-minutes ${{ inputs.duration_minutes }}"; fi
+            if [ -n "${{ inputs.interval_seconds || '' }}" ]; then ARGS="$ARGS --interval-seconds ${{ inputs.interval_seconds }}"; fi
+            if [ -n "${{ inputs.dates || '' }}" ]; then ARGS="$ARGS --dates ${{ inputs.dates }}"; fi
+          fi
+          python -m scripts.capture_live_samples $ARGS
+      - name: Upload samples artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: espn-live-samples-${{ github.run_id }}
+          path: samples/
+          retention-days: 7
+          if-no-files-found: warn
