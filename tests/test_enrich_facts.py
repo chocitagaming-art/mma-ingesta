@@ -175,6 +175,26 @@ def test_parse_qa_nested_strong_keeps_full_question_once():
     assert pairs == [{"q": "Outer inner question?", "a": "The answer."}]
 
 
+def test_parse_qa_condit_style_label_headers_stay_separate_pairs():
+    # Estilo legado real (Carlos Condit): strongs-etiqueta sin '?'/':' como
+    # cabecera de cada entrada, separados por <br><br> o por <p> — cada uno
+    # abre su propio par porque viene tras frontera de bloque.
+    pairs = parse_fighter_qa(
+        _soup(
+            '<div class="field--name-qna">'
+            "<p><strong>Fighter facts</strong> Has won nine of his last 17.</p>"
+            "<p><strong>UFC 264</strong> (7/10/21) Condit lost a three round decision to Max Griffin"
+            "<br><br><strong>UFC on ABC</strong> (1/16/21) Condit won a three round decision over Matt Brown</p>"
+            "</div>"
+        )
+    )
+    assert pairs == [
+        {"q": "Fighter facts", "a": "Has won nine of his last 17."},
+        {"q": "UFC 264", "a": "(7/10/21) Condit lost a three round decision to Max Griffin"},
+        {"q": "UFC on ABC", "a": "(1/16/21) Condit won a three round decision over Matt Brown"},
+    ]
+
+
 # ----------------------------------------------------------------------- guard
 
 

@@ -106,22 +106,27 @@ def parse_fighter_facts(soup: BeautifulSoup) -> list[str]:
     return facts
 
 
-def _looks_like_question(text: str) -> bool:
-    """Real ufc.com questions end in '?' or ':' (verified against live pages);
-    a bold WITHOUT that shape appearing mid-answer is emphasis, not a question."""
-    return text.endswith("?") or text.endswith(":")
+# Tags cuyo comienzo marca frontera de bloque en el Q&A: una negrita que abre
+# justo después de una de ellas es una pregunta/etiqueta nueva; una negrita en
+# mitad de una frase es énfasis dentro de la respuesta.
+_BLOCK_BOUNDARY_TAGS = frozenset({"p", "br", "div", "li", "ul", "ol"})
 
 
 def parse_fighter_qa(soup: BeautifulSoup) -> list[dict[str, str]]:
-    """Every top-level <strong> inside the qna field opens a question; its
-    answer is all the text until the next question (crossing <br> and <p>
-    boundaries, which covers both the one-big-<p> and the one-<p>-per-pair
-    layouts). CMS artifacts hardened after adversarial review:
+    """Every top-level <strong> at a BLOCK BOUNDARY inside the qna field opens
+    a question/label; its answer is all the text until the next one (crossing
+    <br> and <p> boundaries, which covers both the one-big-<p> and the
+    one-<p>-per-pair layouts, and the legacy "label" style — Carlos Condit's
+    page uses strongs like 'UFC 264' as headers of each entry).
+
+    CMS artifacts hardened after adversarial review:
       - HTML comments (Comment is a NavigableString subclass) are never answer text.
       - Adjacent <strong>s with no text between them are ONE question split by
         the editor, not two questions.
-      - A bold run inside an answer that does not look like a question
-        ('It means <strong>everything</strong> to me') stays inside the answer.
+      - A bold run in the MIDDLE of a sentence ('It means
+        <strong>everything</strong> to me') is emphasis: it stays inside the
+        answer because no block boundary precedes it. A '?'/':' shape still
+        opens a question wherever it appears.
       - Nested <strong>s are read once via the outermost tag's get_text.
     """
     container = soup.select_one("div.field--name-qna")
@@ -130,6 +135,7 @@ def parse_fighter_qa(soup: BeautifulSoup) -> list[dict[str, str]]:
     pairs: list[dict[str, str]] = []
     question: str | None = None
     answer_parts: list[str] = []
+    at_block_start = True
 
     def flush() -> None:
         nonlocal question, answer_parts
@@ -142,22 +148,27 @@ def parse_fighter_qa(soup: BeautifulSoup) -> list[dict[str, str]]:
         answer_parts = []
 
     for node in container.descendants:
-        if isinstance(node, Tag) and node.name == "strong":
-            if node.find_parent("strong") is not None:
-                # Nested <strong>: the outer tag's get_text already covered it.
-                continue
-            text = _clean_text(node.get_text(" ", strip=True))
-            if not text:
-                continue
-            if question is not None and not _clean_text(" ".join(answer_parts)):
-                # Adjacent/split <strong>s: same question continued.
-                question = f"{question} {text}".strip()
-            elif question is not None and answer_parts and not _looks_like_question(text):
-                # Bold emphasis inside the answer, not a new question.
-                answer_parts.append(text)
-            else:
-                flush()
-                question = text
+        if isinstance(node, Tag):
+            if node.name in _BLOCK_BOUNDARY_TAGS:
+                at_block_start = True
+            elif node.name == "strong":
+                if node.find_parent("strong") is not None:
+                    # Nested <strong>: the outer tag's get_text already covered it.
+                    continue
+                text = _clean_text(node.get_text(" ", strip=True))
+                if not text:
+                    continue
+                is_question_shaped = text.endswith("?") or text.endswith(":")
+                if question is not None and not _clean_text(" ".join(answer_parts)):
+                    # Adjacent/split <strong>s: same question continued.
+                    question = f"{question} {text}".strip()
+                elif question is not None and not at_block_start and not is_question_shaped:
+                    # Bold emphasis mid-answer, not a new question.
+                    answer_parts.append(text)
+                else:
+                    flush()
+                    question = text
+                at_block_start = False
         elif isinstance(node, NavigableString):
             if isinstance(node, Comment):
                 # Theme/analytics/MSO comments must never leak into answers.
@@ -166,6 +177,8 @@ def parse_fighter_qa(soup: BeautifulSoup) -> list[dict[str, str]]:
             if node.find_parent("strong") is not None:
                 continue
             answer_parts.append(str(node))
+            if str(node).strip():
+                at_block_start = False
     flush()
     return pairs
 
