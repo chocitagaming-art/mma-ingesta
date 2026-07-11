@@ -1,0 +1,28 @@
+name: Keep-alive prediction service
+
+# Render free duerme el microservicio de predicción a los ~15 min sin tráfico
+# y el arranque en frío tarda ~50s (el dueño veía fallar la 1ª predicción).
+# Ping cada 12 min a /health (verifica modelo cargado + BD viva) para que la
+# instancia no llegue a dormirse. Repos públicos → minutos de Actions gratis;
+# una instancia siempre despierta cabe en las 750 h/mes del plan free de
+# Render. El endpoint /health hace un SELECT 1 a Neon (coste despreciable).
+on:
+  schedule:
+    - cron: "*/12 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: keepalive-prediction
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping /health
+        run: |
+          # --max-time 90: presupuesto de sobra para un arranque en frío; si el
+          # servicio estaba dormido, este mismo ping lo despierta.
+          curl -fsS --max-time 90 --retry 2 --retry-delay 5 \
+            https://mma-prediction.onrender.com/health
