@@ -199,12 +199,27 @@ def _fetch(url: str) -> BeautifulSoup:
 
 
 def _standing_updates(fakedb, conn):
-    return [
-        (" ".join(sql.split()), params)
-        for cur in conn.cursors
-        for sql, params in cur.executed
-        if "UPDATE fighters" in sql
-    ]
+    """Only the LEGACY standing_body_url writes (not the directional _l/_r ones)."""
+    out = []
+    for cur in conn.cursors:
+        for sql, params in cur.executed:
+            flat = " ".join(sql.split())
+            if "UPDATE fighters SET standing_body_url = %s" in flat:
+                out.append((flat, params))
+    return out
+
+
+def _standing_variant_updates(fakedb, conn):
+    """The directional standing writes (migration 019), tagged with 'L' or 'R'."""
+    out = []
+    for cur in conn.cursors:
+        for sql, params in cur.executed:
+            flat = " ".join(sql.split())
+            if "standing_body_url_l = %s" in flat:
+                out.append(("L", params))
+            elif "standing_body_url_r = %s" in flat:
+                out.append(("R", params))
+    return out
 
 
 def test_backfill_updates_both_corners_via_fights_source_id(fakedb):
@@ -217,6 +232,11 @@ def test_backfill_updates_both_corners_via_fights_source_id(fakedb):
     assert counts["unmatched"] == 0
     updates = _standing_updates(fakedb, conn)
     assert [(p[0], p[1]) for _sql, p in updates] == [(RED_URL, 1), (BLUE_URL, 2)]
+    # F1: la escritura direccional escribe la variante por token de esquina
+    # (RED_URL _L_ -> columna _l del rojo; BLUE_URL _R_ -> columna _r del azul).
+    variants = _standing_variant_updates(fakedb, conn)
+    assert variants == [("L", (RED_URL, 1)), ("R", (BLUE_URL, 2))]
+    assert counts["updated_directional"] == 2
     assert conn.commits == 1  # one commit per event
 
 

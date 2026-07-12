@@ -59,7 +59,11 @@ from bs4 import BeautifulSoup
 from .config import get_settings
 from .db import connect
 from .logging_config import configure_logging
-from .repositories.fighters import get_all_fighters, update_fighter_standing_photo
+from .repositories.fighters import (
+    get_all_fighters,
+    update_fighter_standing_photo,
+    update_fighter_standing_variant,
+)
 from .upcoming_events import (
     HOME_URL,
     SOURCE,
@@ -68,6 +72,7 @@ from .upcoming_events import (
     _make_matcher,
     _new_session,
     _parse_bouts,
+    _standing_direction,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -235,8 +240,16 @@ def _apply_bouts(
                 counts["unmatched"] += 1
                 continue
             counts["matched"] += 1
-            if not dry_run and update_fighter_standing_photo(connection, fighter_id, image_url):
-                counts["updated"] += 1
+            if not dry_run:
+                if update_fighter_standing_photo(connection, fighter_id, image_url):
+                    counts["updated"] += 1
+                # F1: also fill the directional column for this corner (only if
+                # that direction is still NULL — first-writer-wins, newest-first).
+                direction = _standing_direction(image_url)
+                if direction and update_fighter_standing_variant(
+                    connection, fighter_id, image_url, direction
+                ):
+                    counts["updated_directional"] += 1
 
 
 def backfill(
@@ -350,6 +363,7 @@ def main() -> None:
 
     keys = [
         "events", "fetch_errors", "images_found", "matched", "unmatched", "updated",
+        "updated_directional",
         "deduced_resolved", "deduced_unresolved", "source_claimed",
     ]
     print(json.dumps({key: counts.get(key, 0) for key in keys}, indent=2))

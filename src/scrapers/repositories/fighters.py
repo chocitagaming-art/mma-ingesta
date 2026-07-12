@@ -277,6 +277,41 @@ def update_fighter_standing_photo(
         return cursor.rowcount > 0
 
 
+def update_fighter_standing_variant(
+    connection: PgConnection,
+    fighter_id: int,
+    standing_body_url: str,
+    direction: str,
+) -> bool:
+    """Store the directional standing photo (migration 019, F1 Tanda 4).
+
+    direction is 'L' or 'R' (the token embedded in the ufc.com card URL, which
+    encodes the corner the fighter fought in: red -> _L_, blue -> _R_). Writes
+    standing_body_url_l for 'L' and standing_body_url_r for 'R'.
+
+    Unlike update_fighter_standing_photo (legacy column, new-value-wins), this is
+    FIRST-WRITER-WINS PER DIRECTION: it only fills the column while it is NULL
+    (WHERE ... IS NULL). Callers sweep events newest-first, so the first URL seen
+    for a direction is the freshest one — and re-running only fills the gaps
+    (idempotent), which is exactly what the coverage cron needs. Returns True if
+    a row was updated.
+    """
+    if not standing_body_url or direction not in ("L", "R"):
+        return False
+    column = "standing_body_url_l" if direction == "L" else "standing_body_url_r"
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            UPDATE fighters
+            SET {column} = %s, updated_at = NOW()
+            WHERE id = %s
+              AND {column} IS NULL
+            """,
+            (standing_body_url, fighter_id),
+        )
+        return cursor.rowcount > 0
+
+
 def update_fighter_record(
     connection: PgConnection,
     fighter_id: int,

@@ -50,7 +50,11 @@ from .repositories.fights import (
     reconcile_upcoming_fight_source_id,
     upsert_upcoming_fight,
 )
-from .repositories.fighters import get_all_fighters, update_fighter_standing_photo
+from .repositories.fighters import (
+    get_all_fighters,
+    update_fighter_standing_photo,
+    update_fighter_standing_variant,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -75,6 +79,20 @@ SEGMENT_WRAPPER_CLASSES = {
 # into fighters.standing_body_url (migration 009); anything else in the corner
 # (flag icons, ranking badges, another style) is ignored.
 STANDING_IMAGE_STYLE = "event_fight_card_upper_body_of_standing_athlete"
+
+# F1 Tanda 4: the card image URL carries a corner token (..._L_MM-DD.png /
+# ..._R_MM-DD.png). Red corner -> _L_ (faces right), blue -> _R_ (faces left).
+# Each direction is stored in its own column (migration 019) so the face-off
+# picks the correctly-facing variant per corner.
+_STANDING_TOKEN_RE = re.compile(r"_([LR])_\d")
+
+
+def _standing_direction(image_url: str | None) -> str | None:
+    """'L' or 'R' from the ufc.com card URL token, or None if absent."""
+    if not image_url:
+        return None
+    match = _STANDING_TOKEN_RE.search(image_url)
+    return match.group(1) if match else None
 
 
 @dataclass
@@ -553,6 +571,12 @@ def _write_event_bouts(connection, match, counts: Counter, event: ParsedEvent, e
             if fighter_id is not None and image_url:
                 if update_fighter_standing_photo(connection, fighter_id, image_url):
                     counts["standing_photos_updated"] += 1
+                # F1: fill this corner's directional column (first-writer-wins).
+                direction = _standing_direction(image_url)
+                if direction and update_fighter_standing_variant(
+                    connection, fighter_id, image_url, direction
+                ):
+                    counts["standing_directional_updated"] += 1
     counts["bouts_cancelled"] += cancel_missing_upcoming_fights(
         connection, event_id, SOURCE, kept_ids
     )
