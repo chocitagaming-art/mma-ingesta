@@ -74,3 +74,48 @@ def test_parse_rankings_keeps_distinct_divisions():
 
     assert {d.slug for d in divisions} == {"heavyweight", "lightweight"}
     assert counts["duplicate_groupings"] == 0
+
+
+# ------------------------------------- F7: slot-uniqueness guard (_build_records)
+
+from datetime import date  # noqa: E402
+
+import pytest  # noqa: E402
+
+from src.scrapers.rankings import _assert_no_duplicate_rank_slots  # noqa: E402
+from src.scrapers.repositories.rankings import RankingRecord  # noqa: E402
+
+
+def _rec(division: str, rank_position: int, name: str) -> RankingRecord:
+    return RankingRecord(
+        fighter_id=None,
+        promotion_id=1,
+        division=division,
+        rank_position=rank_position,
+        snapshot_date=date(2026, 7, 1),
+        is_champion=(rank_position == 0),
+        fighter_name=name,
+        rank_change=None,
+    )
+
+
+def test_assert_no_duplicate_rank_slots_passes_on_unique_slots():
+    # Champion (0) + ranks are unique per division; two divisions can share a rank.
+    _assert_no_duplicate_rank_slots(
+        [
+            _rec("lightweight", 0, "Champ"),
+            _rec("lightweight", 1, "A"),
+            _rec("lightweight", 2, "B"),
+            _rec("welterweight", 1, "C"),
+        ]
+    )
+
+
+def test_assert_no_duplicate_rank_slots_raises_on_collision():
+    with pytest.raises(ValueError, match="Duplicate ranking slot"):
+        _assert_no_duplicate_rank_slots(
+            [
+                _rec("lightweight", 1, "Alice"),
+                _rec("lightweight", 1, "Bob"),  # same (division, rank_position)
+            ]
+        )

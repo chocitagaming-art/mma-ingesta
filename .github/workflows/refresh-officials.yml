@@ -47,7 +47,12 @@ jobs:
       - name: Run officials scraper
         run: |
           ARGS=""
-          if [ "${{ github.event_name }}" != "schedule" ]; then
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # F7: ventana amplia en el cron (60d, como BACKFILL_WINDOW_DAYS) para
+            # recuperar arbitro/tarjetas que ufcstats publica con retraso (a veces
+            # semanas); el default de 30 las perdia para siempre.
+            ARGS="--lookback-days 60"
+          else
             if [ -n "${{ inputs.lookback_days || '' }}" ]; then ARGS="$ARGS --lookback-days ${{ inputs.lookback_days }}"; fi
             if [ -n "${{ inputs.limit || '' }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
             if [ "${{ inputs.dry_run || false }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi

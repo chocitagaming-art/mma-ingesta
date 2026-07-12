@@ -328,6 +328,29 @@ def _match_fighter_folded(name: str, folded_index: dict[str, object]):
     return folded_index[candidate]
 
 
+def _assert_no_duplicate_rank_slots(records: list[RankingRecord]) -> None:
+    """Fail clearly if two records share a (division, rank_position) slot.
+
+    insert_ranking upserts on (fighter_id, promotion, division, snapshot) — a
+    DIFFERENT key from the slot UNIQUE of migration 007 (promotion, division,
+    rank_position, snapshot). So two entries with the same rank_position but
+    different fighters slip past the ON CONFLICT and hit the slot UNIQUE as a raw
+    IntegrityError mid-loop, aborting the whole snapshot. Catching it here turns
+    that into a readable error naming the division and slot, BEFORE any write.
+    """
+    seen: dict[tuple[str, int], str] = {}
+    for record in records:
+        slot = (record.division, record.rank_position)
+        if slot in seen:
+            raise ValueError(
+                f"Duplicate ranking slot in division {record.division!r} at "
+                f"rank_position {record.rank_position}: {seen[slot]!r} and "
+                f"{record.fighter_name!r} — the parser emitted two fighters for "
+                "the same slot in one snapshot."
+            )
+        seen[slot] = record.fighter_name
+
+
 def _build_records(
     divisions: list[ParsedDivision],
     promotion_id: int,
@@ -372,6 +395,9 @@ def _build_records(
             records.append(make_record(entry.fighter_name, entry.rank_position, False, entry.rank_change))
             counts["ranked"] += 1
         counts["divisions"] += 1
+    # Guard the slot UNIQUE before any delete/insert: a readable error beats a
+    # raw IntegrityError mid-loop that would abort the whole snapshot.
+    _assert_no_duplicate_rank_slots(records)
     return records
 
 

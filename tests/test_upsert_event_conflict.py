@@ -85,3 +85,47 @@ def test_upsert_event_meta_hardened_against_natural_key(fakedb):
     assert event_id == 9
     insert_sql = _normalize(fakedb.executed_statements(conn)[1])
     assert "ON CONFLICT (name, event_date, promotion_id) DO UPDATE" in insert_sql
+
+
+# --------------------------------- F7 hardening: never wipe optional metadata
+
+
+_OPTIONAL_META = ("image_url", "tagline", "broadcast", "ticket_url", "headliner")
+
+
+def test_upsert_event_meta_update_never_wipes_optional_metadata(fakedb):
+    """UPDATE branch: a partial re-scrape (NULL poster/tagline/broadcast/ticket/
+    headliner) must keep the stored value — COALESCE(%s, col). Core fields (name,
+    status, date...) still update unconditionally."""
+
+    def responder(sql, params=None):
+        if "WHERE source = %s" in sql:
+            return [(9,)]          # found by (source, source_id) -> UPDATE branch
+        return []
+
+    conn = fakedb.Connection(responder)
+    upsert_event_meta(conn, _meta_event())
+    update_sql = _normalize(fakedb.executed_statements(conn)[1])
+    assert "UPDATE events SET" in update_sql
+    for field in _OPTIONAL_META:
+        assert f"{field} = COALESCE(%s, {field})" in update_sql
+    # Core fields are NOT coalesced: a status flip / corrected date must land.
+    assert "status = %s" in update_sql
+    assert "name = %s" in update_sql
+    assert "status = COALESCE" not in update_sql
+
+
+def test_upsert_event_meta_conflict_coalesces_optional_metadata(fakedb):
+    """ON CONFLICT branch (ufc.com card merging onto its ufcstats twin): same
+    guard — fill optional metadata when present, never blank it with NULL."""
+
+    def responder(sql, params=None):
+        if "WHERE source = %s" in sql:
+            return []              # not found -> INSERT ... ON CONFLICT path
+        return [(9,)]
+
+    conn = fakedb.Connection(responder)
+    upsert_event_meta(conn, _meta_event())
+    insert_sql = _normalize(fakedb.executed_statements(conn)[1])
+    for field in _OPTIONAL_META:
+        assert f"{field} = COALESCE(EXCLUDED.{field}, events.{field})" in insert_sql

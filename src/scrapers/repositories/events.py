@@ -47,11 +47,17 @@ def upsert_event_meta(connection: PgConnection, event: EventMetaRecord) -> int:
                 """
                 UPDATE events SET
                     name = %s, event_date = %s, start_time = %s, location = %s,
-                    promotion_id = %s, status = %s, image_url = %s, tagline = %s,
-                    broadcast = %s, ticket_url = %s, headliner = %s,
-                    -- Section times (BE6): ufc.com only announces Prelims /
-                    -- Early Prelims close to fight week, so a scrape without
-                    -- them (NULL) must never wipe a previously stored hour.
+                    promotion_id = %s, status = %s,
+                    -- F7 hardening: optional metadata that ufc.com may omit in a
+                    -- partial re-scrape must never be wiped to NULL (a poster,
+                    -- tagline, broadcast, ticket link or headliner already stored
+                    -- stays). The core fields above DO update (status flips,
+                    -- corrected date/location). Same policy as prelims_time (BE6).
+                    image_url = COALESCE(%s, image_url),
+                    tagline = COALESCE(%s, tagline),
+                    broadcast = COALESCE(%s, broadcast),
+                    ticket_url = COALESCE(%s, ticket_url),
+                    headliner = COALESCE(%s, headliner),
                     prelims_time = COALESCE(%s, prelims_time),
                     early_prelims_time = COALESCE(%s, early_prelims_time)
                 WHERE id = %s
@@ -79,10 +85,16 @@ def upsert_event_meta(connection: PgConnection, event: EventMetaRecord) -> int:
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (name, event_date, promotion_id) DO UPDATE SET
                 start_time = EXCLUDED.start_time, location = EXCLUDED.location,
-                status = EXCLUDED.status, image_url = EXCLUDED.image_url,
-                tagline = EXCLUDED.tagline, broadcast = EXCLUDED.broadcast,
-                ticket_url = EXCLUDED.ticket_url, headliner = EXCLUDED.headliner,
+                status = EXCLUDED.status,
                 source = EXCLUDED.source, source_id = EXCLUDED.source_id,
+                -- F7 hardening: same "never wipe optional metadata with NULL" as
+                -- the UPDATE branch. Merging a ufc.com card onto its ufcstats
+                -- twin fills these when present; a later partial scrape keeps them.
+                image_url = COALESCE(EXCLUDED.image_url, events.image_url),
+                tagline = COALESCE(EXCLUDED.tagline, events.tagline),
+                broadcast = COALESCE(EXCLUDED.broadcast, events.broadcast),
+                ticket_url = COALESCE(EXCLUDED.ticket_url, events.ticket_url),
+                headliner = COALESCE(EXCLUDED.headliner, events.headliner),
                 -- Section times (BE6): never overwrite with NULL.
                 prelims_time = COALESCE(EXCLUDED.prelims_time, events.prelims_time),
                 early_prelims_time = COALESCE(EXCLUDED.early_prelims_time, events.early_prelims_time)
