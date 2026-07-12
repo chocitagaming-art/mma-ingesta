@@ -66,3 +66,20 @@ def test_dry_run_writes_nothing(monkeypatch, fakedb):
     assert result["groups_merged"] == 1  # previewed
     assert fakedb.mutating_statements(conn) == []
     assert conn.commits == 0
+
+
+def test_folds_accented_variants_into_one_group(monkeypatch, fakedb):
+    # F7: 'José Aldo' and 'Jose Aldo' are the same person written two ways. With
+    # accent-insensitive grouping they land in one group (no identity conflict).
+    rows = [_row(1, "José Aldo"), _row(2, "Jose Aldo")]
+    _patch(monkeypatch, fakedb, rows)
+    result = mod.merge_duplicates(apply=False)
+    assert result["groups_merged"] == 1
+    assert result["fighters_deleted"] == 1
+
+
+def test_dedup_key_folds_accents_but_keeps_hyphens():
+    assert mod._dedup_key("José Aldo") == mod._dedup_key("Jose Aldo")
+    assert mod._dedup_key("Jiří Procházka") == mod._dedup_key("Jiri Prochazka")
+    # Hyphen distinction preserved (matching.fold would collapse these two).
+    assert mod._dedup_key("Jung-Yeob Lee") != mod._dedup_key("Jung Yeob Lee")

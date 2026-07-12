@@ -8,8 +8,22 @@ from typing import Any
 
 from .config import get_settings
 from .db import connect
-from .matching import casefold_name as _normalize_name
+from .matching import casefold_name, strip_accents
 from .repositories.espn_history import transfer_espn_assets
+
+
+def _dedup_key(name: str) -> str:
+    """Grouping key: accent-insensitive but hyphen-preserving (F7).
+
+    strip_accents first so 'José Aldo' == 'Jose Aldo' and 'Jiří Procházka' ==
+    'Jiri Prochazka' (the fold the plan asked for), then casefold_name (lowercase
+    + collapse whitespace ONLY). We deliberately do NOT use matching.fold(), which
+    routes through normalize_name and splits on '-'/'.': that would fuse
+    'Jung-Yeob Lee' with 'Jung Yeob Lee'. Since a merge DELETES rows, keeping the
+    hyphen distinction (the reason dedup chose casefold_name) matters; the
+    homonym guard (_has_identity_conflict) is the second line of defence.
+    """
+    return casefold_name(strip_accents(name))
 
 
 @dataclass(frozen=True)
@@ -222,7 +236,7 @@ def merge_duplicates(apply: bool = False, force_homonyms: bool = False) -> dict[
 
         grouped: dict[str, list[FighterRow]] = defaultdict(list)
         for row in rows:
-            grouped[_normalize_name(row.name)].append(row)
+            grouped[_dedup_key(row.name)].append(row)
 
         for normalized_name, group in grouped.items():
             if len(group) < 2:
