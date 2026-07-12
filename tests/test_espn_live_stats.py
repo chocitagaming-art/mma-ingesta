@@ -186,6 +186,9 @@ def test_upsert_live_fight_stats_merges_per_side_and_sticky_post(fakedb):
     )
     # is_final monotónica: una vez sellado, no se desella.
     assert "is_final = live_fight_stats.is_final OR EXCLUDED.is_final" in flat
+    # Sello INMUTABLE: una fila ya final no se puede pisar (ni stats ni reloj)
+    # por un escritor solapado rezagado (re-revisión del hallazgo 4).
+    assert "WHERE NOT live_fight_stats.is_final" in flat
     assert params[0] == 11 and params[1] == "in"
     assert '"ctrl": 61' in params[6]
     assert params[7] is False  # 'in' nunca sella

@@ -11,8 +11,10 @@ UPSERT pisa el estado vivo (asalto, reloj, estado fino): es dato vivo y la
 última lectura es la buena. Las stats, en cambio, se MEZCLAN por lado
 (`stats || EXCLUDED.stats`): un fetch parcial de un solo luchador actualiza
 su lado sin borrar al rival (hallazgo 2), y un fetch NULL total conserva lo
-ya mostrado. Además el estado 'post' es PEGAJOSO e is_final MONOTÓNICA para
-que un escritor solapado no retroceda un final ya bueno (hallazgo 4).
+ya mostrado. Una vez SELLADA (is_final), la fila es INMUTABLE: el DO UPDATE
+lleva `WHERE NOT is_final`, así que ningún escritor solapado rezagado puede
+pisar el total final bueno con números de mitad de pelea (hallazgo 4 y su
+re-revisión: el sello protege el DATO, no solo el flag).
 """
 
 from __future__ import annotations
@@ -63,6 +65,7 @@ def upsert_live_fight_stats(
                         || COALESCE(EXCLUDED.stats, '{}'::jsonb),
                 is_final = live_fight_stats.is_final OR EXCLUDED.is_final,
                 updated_at = NOW()
+            WHERE NOT live_fight_stats.is_final
             """,
             (
                 fight_id,
