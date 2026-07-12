@@ -231,6 +231,36 @@ def test_resolve_fighter_prefers_espn_source_then_fuzzy_name(fakedb):
     assert _resolve_fighter(conn, "8888888", "Somebody Else", exact, normalized, counts) is None
 
 
+def test_resolve_fighter_folds_diacritics_below_fuzzy_cutoff(fakedb):
+    # Caso real UFC 329 (fight 12845): ESPN escribe "Adrian Yañez" (ñ) y la BD
+    # tiene "Adrian Yanez" (n). ratio("adrian yañez","adrian yanez") = 0.9166,
+    # JUSTO por debajo del 0.92, así que el fuzzy lo rechazaba y la pelea quedaba
+    # sin resultado (13/14). El índice normalizado debe plegar acentos (fold).
+    conn = fakedb.Connection(_responder)
+    fighters = [
+        FighterMatchRecord(7112, "Adrian Yanez", None, None, None, None, None, None, None)
+    ]
+    exact = _build_exact_name_index(fighters)
+    normalized = _build_normalized_name_index(fighters)
+    counts = Counter()
+    assert (
+        _resolve_fighter(conn, "9999999", "Adrian Yañez", exact, normalized, counts) == 7112
+    )
+    assert counts["fighters_by_name"] == 1
+    # La ñ también se pliega en el índice EXACTO no acentuado del reverso: una
+    # BD acentuada ("Yáñez") debe casar con un ESPN plano ("Yanez").
+    fighters2 = [
+        FighterMatchRecord(9001, "Nicolás Ñañez", None, None, None, None, None, None, None)
+    ]
+    exact2 = _build_exact_name_index(fighters2)
+    normalized2 = _build_normalized_name_index(fighters2)
+    counts2 = Counter()
+    assert (
+        _resolve_fighter(conn, "9999998", "Nicolas Nanez", exact2, normalized2, counts2)
+        == 9001
+    )
+
+
 def test_match_db_event_uses_find_existing_event_id_tokens(fakedb):
     conn = fakedb.Connection(_responder)
     event = parse_scoreboard(SCOREBOARD)[0]

@@ -17,7 +17,12 @@ import requests
 from .config import get_settings
 from .db import connect
 from .logging_config import configure_logging
-from .matching import IDENTITY_THRESHOLD, normalize_name as _normalize_name, ratio
+# El índice "normalizado" del matcher usa la forma que PLIEGA acentos
+# (fold = strip_accents + normalize_name): ESPN escribe "Adrian Yañez" /
+# "Viviane Araújo" y la BD guarda la forma plana. Sin plegar, un solo acento
+# (ñ, á) baja el ratio de un apellido corto por debajo del 0.92 y la pelea
+# quedaba SIN emparejar — el caso real de UFC 329 (fight 12845, 13/14).
+from .matching import IDENTITY_THRESHOLD, fold as _normalize_name, ratio
 from .models import FighterRecord
 from .repositories.fighters import FighterMatchRecord, get_all_fighters, update_fighter_enrichment, upsert_fighter
 
