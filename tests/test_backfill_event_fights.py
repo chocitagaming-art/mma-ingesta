@@ -15,6 +15,9 @@ import pytest
 
 from src.scrapers.backfill_event_fights import (
     _find_ufcstats_event_url,
+    _flip_event_completed,
+    _get_events_needing_fights,
+    _sweep,
     backfill_event_fights,
 )
 from src.scrapers.config import Settings
@@ -291,3 +294,169 @@ def test_backfill_dry_run_skips_fights_with_unknown_fighters(fakedb):
     assert counts["fights_upserted"] == 1
     assert counts["fights_skipped_missing_fighter"] == 1
     assert fakedb.mutating_statements(conn) == []
+
+
+# --------------------------------------------- guard against foreign-source cards
+
+
+def _responder_with_foreign_sources(foreign_by_event, event_rows=None):
+    """Responder where the guard query returns foreign sources for some events."""
+    event_rows = {EVENT_ID: EVENT_ROW} if event_rows is None else event_rows
+
+    def responder(sql, params=None):
+        flat = " ".join(sql.split())
+        if flat.startswith("SELECT name, event_date, status FROM events"):
+            row = event_rows.get(params[0])
+            return [row] if row else []
+        if flat.startswith("SELECT DISTINCT source FROM fights"):
+            return [(s,) for s in foreign_by_event.get(params[0], [])]
+        return []
+
+    return responder
+
+
+def test_guard_rejects_event_with_ufc_com_card_before_fetching(fakedb):
+    # Event 315 already carries a ufc.com card: re-importing from ufcstats would
+    # duplicate every bout (rows of another source never conflict-update). The
+    # guard must fire BEFORE any HTTP fetch so --dry-run surfaces it too.
+    conn = fakedb.Connection(_responder_with_foreign_sources({EVENT_ID: ["ufc.com"]}))
+    client = _FakeClient({})  # any fetch would KeyError -> proves nothing was fetched
+    with pytest.raises(ValueError, match="duplicate"):
+        backfill_event_fights(conn, client, SETTINGS, EVENT_ID)
+    assert client.fetched == []
+    assert fakedb.mutating_statements(conn) == []
+
+
+def test_guard_allows_event_with_only_its_own_source(fakedb):
+    # The event's existing 2 fights are already ufcstats -> no foreign source,
+    # the guard passes and the backfill proceeds normally (full success path).
+    base = make_responder()
+
+    def responder(sql, params=None):
+        if " ".join(sql.split()).startswith("SELECT DISTINCT source FROM fights"):
+            return [("ufcstats",)]
+        return base(sql, params)
+
+    conn = fakedb.Connection(responder)
+    client = _FakeClient(ALL_PAGES)
+    counts = backfill_event_fights(conn, client, SETTINGS, EVENT_ID)
+    assert counts["fights_upserted"] == 2
+
+
+# ----------------------------------------------------------- candidate query
+
+
+def test_get_events_needing_fights_query_shape_and_limit(fakedb):
+    rows = [
+        (315, "UFC Fight Night: Imavov vs. Borralho", EVENT_DATE, "completed"),
+        (400, "UFC 998: Old vs. Card", date(2025, 8, 16), "completed"),
+        (401, "Stuck Past Event", date(2025, 7, 1), "upcoming"),
+    ]
+    conn = fakedb.Connection(lambda sql, params=None: rows)
+    got = _get_events_needing_fights(conn, "ufcstats", limit=2, max_fights=6)
+    assert got == rows[:2]  # limit applied
+    sql, params = conn.cursors[0].executed[0]
+    flat = " ".join(sql.split())
+    # Past events only, excluding any event with a foreign-source fight, whose
+    # card is below the threshold. Ordered newest-first.
+    assert "e.event_date < CURRENT_DATE" in flat
+    assert "f.source IS DISTINCT FROM %s" in flat
+    assert "count(*) FROM fights f WHERE f.event_id = e.id) < %s" in flat
+    assert "ORDER BY e.event_date DESC" in flat
+    assert params == ("ufcstats", 6)
+
+
+# ------------------------------------------------------------ status flip
+
+
+def test_flip_event_completed_is_guarded_by_past_date(fakedb):
+    conn = fakedb.Connection(lambda sql, params=None: [(1,)])  # rowcount 1
+    assert _flip_event_completed(conn, 401) is True
+    sql, params = conn.cursors[0].executed[0]
+    flat = " ".join(sql.split())
+    assert "UPDATE events SET status = 'completed'" in flat
+    assert "status <> 'completed' AND event_date < CURRENT_DATE" in flat
+    assert params == (401,)
+
+
+# ------------------------------------------------------------- sweep driver
+
+
+def test_sweep_continues_after_a_failing_event(fakedb):
+    # Event 900 trips the foreign-source guard (fails cleanly, no fetch); the
+    # sweep must count the error and STILL backfill event 315.
+    event_rows = {900: ("UFC Foreign: A vs. B", date(2025, 1, 1), "completed"), EVENT_ID: EVENT_ROW}
+    base = _responder_with_foreign_sources({900: ["ufc.com"]}, event_rows=event_rows)
+    fight_ids = list((3332, 4001))
+
+    def responder(sql, params=None):
+        flat = " ".join(sql.split())
+        if "FROM fighters WHERE source = %s AND source_id = %s" in flat:
+            return [(FIGHTER_IDS.get(params[1]),)] if FIGHTER_IDS.get(params[1]) else []
+        if "INSERT INTO fights" in flat:
+            return [(fight_ids.pop(0),)]
+        return base(sql, params)
+
+    conn = fakedb.Connection(responder)
+    client = _FakeClient(ALL_PAGES)
+    candidates = [
+        (900, "UFC Foreign: A vs. B", date(2025, 1, 1), "completed"),
+        (EVENT_ID, EVENT_NAME, EVENT_DATE, "completed"),
+    ]
+    totals = _sweep(conn, client, SETTINGS, candidates, dry_run=False)
+
+    assert totals["events_candidate"] == 2
+    assert totals["event_errors"] == 1  # event 900 (foreign card)
+    assert totals["events_done"] == 1  # event 315 still backfilled
+    assert totals["fights_upserted"] == 2
+
+
+def test_sweep_dry_run_skips_upcoming_without_writing(fakedb):
+    # A past event still stuck in 'upcoming': in --dry-run we cannot flip (that
+    # writes), so it is counted and skipped, never fetched.
+    conn = fakedb.Connection(lambda sql, params=None: [])
+    client = _FakeClient({})
+    candidates = [(401, "Stuck Past Event", date(2025, 7, 1), "upcoming")]
+    totals = _sweep(conn, client, SETTINGS, candidates, dry_run=True)
+
+    assert totals["events_upcoming_skipped_dry_run"] == 1
+    assert totals["events_done"] == 0
+    assert client.fetched == []
+    assert fakedb.mutating_statements(conn) == []
+
+
+def test_sweep_flips_upcoming_then_backfills(fakedb):
+    # Non-dry: a past 'upcoming' event is flipped to 'completed' (committed),
+    # then backfilled. The responder models the flip so _get_event then sees
+    # 'completed' (the fake DB is otherwise static).
+    flipped: set[int] = set()
+    fight_ids = list((3332, 4001))
+
+    def responder(sql, params=None):
+        flat = " ".join(sql.split())
+        if flat.startswith("UPDATE events SET status = 'completed'"):
+            flipped.add(params[0])
+            return [(1,)]  # rowcount 1
+        if flat.startswith("SELECT name, event_date, status FROM events"):
+            status = "completed" if params[0] in flipped else "upcoming"
+            return [(EVENT_NAME, EVENT_DATE, status)]
+        if flat.startswith("SELECT DISTINCT source FROM fights"):
+            return []
+        if "FROM fighters WHERE source = %s AND source_id = %s" in flat:
+            return [(FIGHTER_IDS.get(params[1]),)] if FIGHTER_IDS.get(params[1]) else []
+        if "INSERT INTO fights" in flat:
+            return [(fight_ids.pop(0),)]
+        return []
+
+    conn = fakedb.Connection(responder)
+    client = _FakeClient(ALL_PAGES)
+    candidates = [(EVENT_ID, EVENT_NAME, EVENT_DATE, "upcoming")]
+    totals = _sweep(conn, client, SETTINGS, candidates, dry_run=False)
+
+    assert totals["events_status_flipped"] == 1
+    assert totals["events_done"] == 1
+    assert totals["fights_upserted"] == 2
+    flip_stmts = [
+        s for s, _p in _statements(conn) if s.startswith("UPDATE events SET status = 'completed'")
+    ]
+    assert len(flip_stmts) == 1

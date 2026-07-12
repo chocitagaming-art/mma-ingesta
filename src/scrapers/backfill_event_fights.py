@@ -71,6 +71,13 @@ EVENTS_INDEX_URL = "http://ufcstats.com/statistics/events/completed?page={page}"
 # a pathological index (~25 events per page covers decades well before it).
 DEFAULT_MAX_INDEX_PAGES = 100
 
+# An event with FEWER than this many fights counts as an incomplete card worth
+# re-importing (event 315 landed with 2 of ~12). The re-import is idempotent
+# (upsert on (source, source_id)), so the threshold only bounds which events the
+# --all sweep bothers to fetch; a card that is already complete just updates in
+# place if it slips through. Override with --max-fights.
+DEFAULT_MAX_FIGHTS = 6
+
 
 def _get_event(connection, event_id: int) -> tuple[str, date]:
     """(name, event_date) of a completed DB event, or raise ValueError."""
@@ -252,6 +259,11 @@ def backfill_event_fights(
 ) -> Counter:
     counts: Counter = Counter()
     event_name, event_date = _get_event(connection, event_id)
+    # Refuse to re-import onto an event whose card came from another source
+    # (ufc.com/espn): those rows never conflict-update on (source, source_id),
+    # so every bout would be INSERTED again as a duplicate. Checked BEFORE any
+    # fetch so --dry-run surfaces the problem too.
+    _assert_no_foreign_source_fights(connection, event_id, settings.source_name)
     LOGGER.info("Backfilling fights of event %d: %s (%s)", event_id, event_name, event_date)
 
     detail_url = _find_ufcstats_event_url(
@@ -360,18 +372,160 @@ def backfill_event_fights(
     return counts
 
 
+def _get_events_needing_fights(
+    connection, source_name: str, limit: int | None, max_fights: int
+) -> list[tuple[int, str, object, str]]:
+    """Past events with a partial/empty card keyed only under our own source.
+
+    EXCLUDES any event that already has a fight from ANOTHER source (ufc.com /
+    espn): re-importing those from ufcstats would duplicate the card (they never
+    conflict-update on (source, source_id) — the same reason
+    _assert_no_foreign_source_fights guards a single event), and they are
+    backfill_results' job. An event with a fight count below ``max_fights`` —
+    including zero fights — qualifies. Ordered newest-first; a fixed --limit lets
+    the sweep run in bounded batches and is resumable (repaired cards stop
+    qualifying). Returns (id, name, event_date, status)."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT e.id, e.name, e.event_date, e.status
+            FROM events e
+            WHERE e.event_date IS NOT NULL
+              AND e.event_date < CURRENT_DATE
+              AND NOT EXISTS (
+                    SELECT 1 FROM fights f
+                    WHERE f.event_id = e.id AND f.source IS DISTINCT FROM %s
+              )
+              AND (SELECT count(*) FROM fights f WHERE f.event_id = e.id) < %s
+            ORDER BY e.event_date DESC
+            """,
+            (source_name, max_fights),
+        )
+        rows = [(int(r[0]), str(r[1]), r[2], str(r[3])) for r in cursor.fetchall()]
+    return rows[:limit] if limit is not None else rows
+
+
+def _flip_event_completed(connection, event_id: int) -> bool:
+    """Flip a PAST event still stuck in 'upcoming' to 'completed'.
+
+    A backfill needs status='completed' (that is when ufcstats has the results
+    page). The daily refresh already flips dropped upcoming events by date; this
+    is the same guarded UPDATE (only ever fires for a past date) for the rare
+    event the sweep meets before that cron does. Returns whether a row changed.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE events SET status = 'completed' "
+            "WHERE id = %s AND status <> 'completed' AND event_date < CURRENT_DATE",
+            (event_id,),
+        )
+        return cursor.rowcount > 0
+
+
+# counts key on backfill_event_fights' Counter -> aggregated key on the sweep total.
+_SWEEP_ROLLUP = {
+    "event_matched": "events_matched",
+    "fights_parsed": "fights_parsed",
+    "fights_upserted": "fights_upserted",
+    "fights_skipped_missing_fighter": "fights_skipped_missing_fighter",
+    "fighters_backfilled": "fighters_created",
+    "stats_rows": "stats_rows",
+}
+
+
+def _sweep(connection, client, settings, candidates, dry_run: bool) -> Counter:
+    """Run backfill_event_fights over each candidate, isolating per-event failures.
+
+    Each event is its own all-or-nothing transaction (backfill_event_fights
+    commits on success, rolls back and re-raises on error), so one bad event
+    (no ufcstats match, foreign-source guard, parse error) is counted and the
+    sweep continues to the next — the backfill_results pattern.
+    """
+    totals: Counter = Counter()
+    totals["events_candidate"] = len(candidates)
+    for event_id, name, _event_date, status in candidates:
+        try:
+            if status != "completed":
+                if dry_run:
+                    totals["events_upcoming_skipped_dry_run"] += 1
+                    LOGGER.info(
+                        "Dry-run: event %d (%s) is %s; would flip to completed first",
+                        event_id, name, status,
+                    )
+                    continue
+                if _flip_event_completed(connection, event_id):
+                    connection.commit()
+                    totals["events_status_flipped"] += 1
+            counts = backfill_event_fights(
+                connection, client, settings, event_id, dry_run=dry_run
+            )
+            totals["events_done"] += 1
+            for src_key, dst_key in _SWEEP_ROLLUP.items():
+                totals[dst_key] += counts.get(src_key, 0)
+        except Exception as exc:  # noqa: BLE001 - isolate the failure, keep sweeping
+            connection.rollback()
+            totals["event_errors"] += 1
+            LOGGER.warning("Event %d (%s) failed, skipping: %s", event_id, name, exc)
+    return totals
+
+
+def backfill_all_event_fights(
+    dry_run: bool = False,
+    limit: int | None = None,
+    max_fights: int = DEFAULT_MAX_FIGHTS,
+) -> Counter:
+    """Sweep past events with an incomplete ufcstats card, re-importing each."""
+    settings = get_settings()
+    client = UfcStatsClient(settings)
+    with connect(settings.database_url) as connection:
+        candidates = _get_events_needing_fights(
+            connection, settings.source_name, limit, max_fights
+        )
+        LOGGER.info(
+            "Past events with an incomplete card (<%d fights): %d",
+            max_fights, len(candidates),
+        )
+        return _sweep(connection, client, settings, candidates, dry_run)
+
+
 def main() -> None:
     configure_logging()
     parser = argparse.ArgumentParser(
-        description="Re-import all fights of an existing completed event from ufcstats."
+        description="Re-import ufcstats fights onto existing completed event(s)."
     )
-    parser.add_argument(
-        "--event-id", type=int, required=True, help="DB id of the existing completed event."
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
+        "--event-id", type=int, help="DB id of a single existing completed event."
+    )
+    mode.add_argument(
+        "--all", action="store_true",
+        help="Sweep every past event with an incomplete card (<--max-fights fights).",
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Parse + match + report what would be written, no writes."
     )
+    parser.add_argument(
+        "--limit", type=int, default=None, help="(--all) process at most this many events."
+    )
+    parser.add_argument(
+        "--max-fights", type=int, default=DEFAULT_MAX_FIGHTS,
+        help=f"(--all) fewer than this many fights = incomplete card (default {DEFAULT_MAX_FIGHTS}).",
+    )
     args = parser.parse_args()
+
+    if args.all:
+        totals = backfill_all_event_fights(
+            dry_run=args.dry_run, limit=args.limit, max_fights=args.max_fights
+        )
+        keys = [
+            "events_candidate", "events_done", "events_matched", "events_status_flipped",
+            "events_upcoming_skipped_dry_run", "fights_parsed", "fights_upserted",
+            "fights_skipped_missing_fighter", "fighters_created", "stats_rows", "event_errors",
+        ]
+        print(json.dumps({k: totals.get(k, 0) for k in keys}, indent=2))
+        if args.dry_run:
+            print("Dry-run: nothing was written. Re-run without --dry-run to persist.")
+        return
 
     settings = get_settings()
     client = UfcStatsClient(settings)
