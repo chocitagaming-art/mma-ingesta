@@ -46,6 +46,11 @@ class FightRecord:
     odds_blue: float | None
     source: str
     source_id: str
+    # Title-fight flag parsed from the ufcstats belt icon in the card's
+    # weight-class cell. None means "unknown" and never overwrites a stored
+    # value (COALESCE, like UpcomingFightRecord); the default keeps old
+    # constructions valid.
+    is_title_fight: bool | None = None
 
 
 @dataclass(frozen=True)

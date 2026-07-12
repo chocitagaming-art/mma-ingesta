@@ -222,9 +222,9 @@ def upsert_fight(connection: PgConnection, fight: FightRecord) -> int:
             INSERT INTO fights (
                 event_id, fighter_red_id, fighter_blue_id, weight_class, weight_grams,
                 scheduled_rounds, winner_id, method, end_round, end_time, odds_red,
-                odds_blue, source, source_id
+                odds_blue, is_title_fight, source, source_id
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, FALSE), %s, %s)
             ON CONFLICT (source, source_id)
             DO UPDATE SET
                 event_id = EXCLUDED.event_id,
@@ -246,6 +246,12 @@ def upsert_fight(connection: PgConnection, fight: FightRecord) -> int:
                 weight_grams = COALESCE(EXCLUDED.weight_grams, fights.weight_grams),
                 odds_red = COALESCE(EXCLUDED.odds_red, fights.odds_red),
                 odds_blue = COALESCE(EXCLUDED.odds_blue, fights.odds_blue),
+                -- Not EXCLUDED.is_title_fight: that already went through the
+                -- insert-side COALESCE(placeholder, FALSE), so a NULL argument
+                -- would arrive as FALSE and stomp a stored TRUE. The raw
+                -- argument is re-bound so NULL really means "keep the stored
+                -- value" (same policy as upsert_upcoming_fight).
+                is_title_fight = COALESCE(%s, fights.is_title_fight),
                 updated_at = NOW()
             RETURNING id
             """,
@@ -262,8 +268,10 @@ def upsert_fight(connection: PgConnection, fight: FightRecord) -> int:
                 fight.end_time,
                 fight.odds_red,
                 fight.odds_blue,
+                fight.is_title_fight,
                 fight.source,
                 fight.source_id,
+                fight.is_title_fight,
             ),
         )
         return int(cursor.fetchone()[0])
@@ -373,6 +381,48 @@ def upsert_fight_stats_rounds(connection: PgConnection, stats: FightStatsRoundRe
                 stats.knockdowns,
             ),
         )
+
+
+def set_fight_title_flag(
+    connection: PgConnection, source: str, source_id: str, is_title_fight: bool
+) -> bool:
+    """Set is_title_fight on an ALREADY-STORED fight, keyed by (source, source_id).
+
+    Backfill helper (backfill_title_fights): the results scraper historically
+    never captured the title flag, so every ufcstats fight sat at the default
+    FALSE. Only writes when the value actually changes (IS DISTINCT FROM), so a
+    re-run is a no-op and the sweep never churns rows. NEVER inserts — a
+    source_id absent from the table simply matches nothing. Returns True if a
+    row changed.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE fights
+            SET is_title_fight = %s, updated_at = NOW()
+            WHERE source = %s AND source_id = %s
+              AND is_title_fight IS DISTINCT FROM %s
+            """,
+            (is_title_fight, source, source_id, is_title_fight),
+        )
+        return cursor.rowcount > 0
+
+
+def title_flag_would_change(
+    connection: PgConnection, source: str, source_id: str, is_title_fight: bool
+) -> bool:
+    """Dry-run twin of set_fight_title_flag: True if the UPDATE would change a row."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT 1 FROM fights
+            WHERE source = %s AND source_id = %s
+              AND is_title_fight IS DISTINCT FROM %s
+            LIMIT 1
+            """,
+            (source, source_id, is_title_fight),
+        )
+        return cursor.fetchone() is not None
 
 
 def find_fight_id_by_fighters(

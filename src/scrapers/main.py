@@ -226,6 +226,7 @@ def scrape_events(
                     odds_blue=None,
                     source=settings.source_name,
                     source_id=parsed_fight.source_id,
+                    is_title_fight=parsed_fight.is_title_fight,
                 )
                 fight_id = upsert_fight(connection, fight)
                 counts["fights"] += 1

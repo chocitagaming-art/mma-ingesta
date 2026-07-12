@@ -255,9 +255,11 @@ def test_backfill_upserts_fights_keyed_by_ufcstats_source(fakedb):
         # updated in place, the missing ones inserted -> zero duplicates.
         assert "ON CONFLICT (source, source_id)" in flat
         assert "DO UPDATE" in flat
-    # (event_id, ..., winner_id, ..., source, source_id): always the EXISTING
-    # event row, keyed by the ufcstats fight-details path.
-    assert [(p[0], p[6], p[-2], p[-1]) for _s, p in fight_upserts] == [
+    # (event_id, ..., winner_id, ..., is_title_fight, source, source_id, is_title_fight):
+    # always the EXISTING event row, keyed by the ufcstats fight-details path.
+    # is_title_fight is bound at [-3] (insert) and re-bound at [-1] (conflict
+    # COALESCE), so source/source_id are now at [-3]/[-2] counting from that pair.
+    assert [(p[0], p[6], p[-3], p[-2]) for _s, p in fight_upserts] == [
         (EVENT_ID, 201, "ufcstats", "/fight-details/f0001"),
         (EVENT_ID, 204, "ufcstats", "/fight-details/f0002"),
     ]

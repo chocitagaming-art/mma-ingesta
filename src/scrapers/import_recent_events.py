@@ -141,6 +141,7 @@ def import_recent_events(
                     odds_blue=None,
                     source=settings.source_name,
                     source_id=parsed_fight.source_id,
+                    is_title_fight=parsed_fight.is_title_fight,
                 )
                 if not dry_run:
                     fight_id = upsert_fight(connection, fight)

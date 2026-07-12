@@ -342,6 +342,7 @@ def backfill_event_fights(
                 odds_blue=None,
                 source=settings.source_name,
                 source_id=parsed_fight.source_id,
+                is_title_fight=parsed_fight.is_title_fight,
             )
             # UNIQUE (source, source_id) + ON CONFLICT DO UPDATE: the fights the
             # event already has are updated in place, the missing ones inserted.

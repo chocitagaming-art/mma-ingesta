@@ -28,6 +28,10 @@ class FightPageRecord:
     end_time: str | None
     detail_url: str
     source_id: str
+    # True when the card row carries the championship belt icon in its
+    # weight-class cell (ufcstats flags title bouts with a <img src=".../belt.png">
+    # there; the cell TEXT stays the clean division, e.g. "Featherweight").
+    is_title_fight: bool = False
 
 
 @dataclass(frozen=True)
@@ -64,15 +68,16 @@ def parse_event_fights(soup: BeautifulSoup, settings: Settings) -> list[FightPag
         winner_corner = _parse_winner_corner(row)
         method = _extract_dual_value(cells[7], 0) if len(cells) > 7 else None
         method_detail = _extract_dual_value(cells[7], 1) if len(cells) > 7 else None
+        weight_cell = cells[6] if len(cells) > 6 else None
         fights.append(
             FightPageRecord(
                 red_name=red_name,
                 blue_name=blue_name,
                 red_source_id=red_source_id,
                 blue_source_id=blue_source_id,
-                weight_class=clean_text(cells[6].get_text(" ", strip=True) if len(cells) > 6 else None),
+                weight_class=clean_text(weight_cell.get_text(" ", strip=True) if weight_cell else None),
                 scheduled_rounds=_infer_scheduled_rounds(
-                    clean_text(cells[6].get_text(" ", strip=True) if len(cells) > 6 else None)
+                    clean_text(weight_cell.get_text(" ", strip=True) if weight_cell else None)
                 ),
                 winner_corner=winner_corner,
                 method=_join_method(method, method_detail),
@@ -80,9 +85,22 @@ def parse_event_fights(soup: BeautifulSoup, settings: Settings) -> list[FightPag
                 end_time=clean_text(cells[9].get_text(" ", strip=True) if len(cells) > 9 else None),
                 detail_url=detail_url,
                 source_id=source_id_from_url(detail_url),
+                is_title_fight=_row_has_title_belt(weight_cell),
             )
         )
     return fights
+
+
+def _row_has_title_belt(weight_cell) -> bool:
+    """True when a card row's weight-class cell carries the championship belt.
+
+    ufcstats marks a title bout with an ``<img src=".../belt.png">`` in that
+    cell (its text stays the plain division). Non-title bonus icons — fight.png
+    (Fight of the Night), perf.png (Performance) — are deliberately NOT matched.
+    """
+    if weight_cell is None:
+        return False
+    return weight_cell.select_one("img[src*='belt']") is not None
 
 
 def parse_fight_stats(soup: BeautifulSoup) -> list[ParsedFightStats]:
