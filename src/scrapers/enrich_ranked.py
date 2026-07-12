@@ -29,7 +29,9 @@ from .config import Settings, get_settings
 from .db import connect
 from .espn import EspnAthlete, _fetch_athlete
 from .logging_config import configure_logging
-from .matching import DEFAULT_THRESHOLD, fold as _fold, fold_ratio as _similar
+# fold is re-exported as _fold: several scrapers do `from .enrich_ranked import
+# _fold` (kept for import stability). noqa: ruff can't see the cross-module use.
+from .matching import DEFAULT_THRESHOLD, fold as _fold, fold_ratio as _similar  # noqa: F401
 from .repositories.fighters import (
     get_fighter_id_by_source,
     update_fighter_enrichment,

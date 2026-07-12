@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from difflib import get_close_matches
 from typing import Any, Callable
-from urllib.parse import urlencode
 
 import requests
 

@@ -53,7 +53,7 @@ def test_merge_dry_run_writes_nothing(fakedb):
     rows = [_join_row(101, 201, "Jane Doe")]  # no identity conflict
     conn = fakedb.Connection(_merge_responder(rows))
     counts: Counter = Counter()
-    merges = cons.merge_duplicates(conn, counts, apply=False)
+    cons.merge_duplicates(conn, counts, apply=False)
     assert counts["duplicates_merged"] == 1  # previewed
     assert fakedb.mutating_statements(conn) == []
     assert conn.commits == 0 and conn.rollbacks >= 1

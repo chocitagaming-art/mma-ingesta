@@ -12,7 +12,6 @@ peleas con total final guardado (state='post' con stats) no se re-piden; y
 nada de esto escribe en fights/fight_stats.
 """
 
-from collections import Counter
 
 from src.scrapers.espn_live_results import parse_scoreboard, process_events
 from src.scrapers.espn_live_stats import (

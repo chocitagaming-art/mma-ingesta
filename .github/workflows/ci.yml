@@ -35,7 +35,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-service.txt -r requirements-dev.txt
-      - name: Lint (non-blocking)
-        run: ruff check src/ || true
+      - name: Lint — bugs reales (BLOQUEANTE)
+        # F7: la categoria F de ruff (imports sin usar, nombres indefinidos,
+        # variables sin usar, f-strings sin placeholder...) SI bloquea, ahora
+        # tambien sobre tests/. El estilo (E501 lineas largas, etc.) sigue como
+        # reporte no bloqueante: el repo arrastra ~900 E501 de SQL/strings largos
+        # y enforzarlos seria puro ruido sin valor.
+        run: ruff check --select F src/ tests/
+      - name: Estilo (no bloqueante)
+        run: ruff check src/ tests/ || true
       - name: Run tests
         run: python -m pytest tests/ -q

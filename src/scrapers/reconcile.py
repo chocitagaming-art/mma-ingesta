@@ -41,7 +41,7 @@ import argparse
 import json
 import sys
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from difflib import get_close_matches
 from typing import Any
 
