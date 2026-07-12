@@ -14,7 +14,8 @@ name: Enrich fighter facts (ufc.com)
 # ufc.com crawlers can never overlap even if one runs long.
 on:
   schedule:
-    - cron: "30 6 * * 1"
+    - cron: "30 6 * * 1"     # Lunes 06:30 UTC: solo carteleras proximas
+    - cron: "0 3 1 * *"      # F5: dia 1 de cada mes 03:00 UTC -> barrido --all
   workflow_dispatch:
     inputs:
       limit:
@@ -49,7 +50,12 @@ jobs:
       - name: Run fighter facts enrichment
         run: |
           ARGS=""
-          if [ "${{ github.event_name }}" != "schedule" ]; then
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # F5: el cron mensual (dia 1) traduce TODA la tabla pendiente; el
+            # semanal sigue acotado a proximas. Aditivo (COALESCE): nunca
+            # re-traduce lo ya poblado, asi que no re-gasta tokens de Claude.
+            if [ "${{ github.event.schedule }}" = "0 3 1 * *" ]; then ARGS="--all"; fi
+          else
             if [ -n "${{ inputs.limit || '' }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
             if [ "${{ inputs.dry_run || false }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
             if [ "${{ inputs.all || false }}" = "true" ]; then ARGS="$ARGS --all"; fi

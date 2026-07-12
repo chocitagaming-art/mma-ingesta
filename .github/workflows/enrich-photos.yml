@@ -14,7 +14,8 @@ name: Enrich headshots (ufc.com)
 # Manual dispatch remains for custom passes (--all sweeps the whole table).
 on:
   schedule:
-    - cron: "30 5 * * 1"
+    - cron: "30 5 * * 1"     # Lunes 05:30 UTC: solo carteleras proximas
+    - cron: "0 4 1 * *"      # F5: dia 1 de cada mes 04:00 UTC -> barrido --all
   workflow_dispatch:
     inputs:
       limit:
@@ -49,7 +50,11 @@ jobs:
       - name: Run ufc.com headshot enrichment
         run: |
           ARGS=""
-          if [ "${{ github.event_name }}" != "schedule" ]; then
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # F5: el cron mensual (dia 1) barre TODA la tabla; el semanal sigue
+            # acotado a carteleras proximas. Ambos son aditivos (COALESCE).
+            if [ "${{ github.event.schedule }}" = "0 4 1 * *" ]; then ARGS="--all"; fi
+          else
             if [ -n "${{ inputs.limit || '' }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
             if [ "${{ inputs.dry_run || false }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
             if [ "${{ inputs.all || false }}" = "true" ]; then ARGS="$ARGS --all"; fi

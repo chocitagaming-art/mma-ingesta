@@ -1,0 +1,61 @@
+name: Backfill cards
+
+# F5 (Tanda 4): reimporta la cartelera COMPLETA de ufcstats sobre eventos PASADOS
+# cuya cartelera quedo incompleta (el importador historico saltaba eventos ya
+# presentes). Corre el barrido de F3 (backfill_event_fights --all) en lotes
+# acotados con --limit; es reanudable (las carteleras ya reparadas dejan de
+# calificar) e idempotente (upsert ON CONFLICT (source, source_id)). El guard
+# _assert_no_foreign_source_fights rechaza los eventos con cartelera de ufc.com
+# (esos son de backfill_results), asi que nunca duplica.
+# Cron semanal en un LOTE PEQUENO (--limit 5) para que un barrido grande no corra
+# nunca desatendido; el barrido inicial del historico se hace con un dispatch
+# manual (--limit alto). ESCRIBE en la BD de produccion.
+on:
+  schedule:
+    - cron: "0 10 * * 6"   # Sabados 10:00 UTC (antes de la ventana de directo de la noche)
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max eventos por lote (vacio = 5 en el cron; sin limite si lo pones a 0)"
+        required: false
+        default: ""
+      max_fights:
+        description: "Menos de N peleas = cartelera incompleta (default 6)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry-run: match + parse + report, sin escrituras"
+        type: boolean
+        default: false
+
+concurrency:
+  group: backfill-cards
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+      - run: pip install -r requirements-scrapers.txt
+      - name: Run backfill-cards sweep
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # Lote semanal pequeno y acotado: nunca un barrido grande sin vigilancia.
+            ARGS="--all --limit 5"
+          else
+            ARGS="--all"
+            if [ -n "${{ inputs.limit || '' }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
+            if [ -n "${{ inputs.max_fights || '' }}" ]; then ARGS="$ARGS --max-fights ${{ inputs.max_fights }}"; fi
+            if [ "${{ inputs.dry_run || false }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          fi
+          echo "backfill_event_fights $ARGS"
+          python -m src.scrapers.backfill_event_fights $ARGS
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

@@ -1,0 +1,90 @@
+name: QA data coverage
+
+# F5 (Tanda 4): informe semanal READ-ONLY de calidad de datos, sin cuentas nuevas.
+# Corre las invariantes DURAS (data_quality_checks: rank_position duplicado en un
+# snapshot, evento 'upcoming' inminente sin peleas) y, si alguna se rompe, abre (o
+# comenta en) UN unico Issue con la etiqueta 'data-quality' — el mismo patron
+# anti-spam de monitor.yml — y lo cierra al recuperarse. Ademas sube como
+# artefactos photo_coverage y cleanup_data_quality (dry-run) para que el dueno los
+# revise: son INFORMATIVOS (los huecos de foto de debutantes son estructurales,
+# nunca una alerta). verify_headshots NO se corre aqui porque ESCRIBE (anula
+# headshots mal emparejados); es una accion, no un reporte.
+on:
+  schedule:
+    - cron: "0 10 * * 4"   # Jueves 10:00 UTC (hueco tranquilo, lejos del cluster de lunes)
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: qa-data-coverage
+  cancel-in-progress: false
+
+jobs:
+  qa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+      - run: pip install -r requirements-scrapers.txt
+
+      - name: Invariantes de calidad de datos (criticas)
+        id: checks
+        run: |
+          set +e
+          python -m src.scrapers.data_quality_checks > /tmp/dq.md
+          RC=$?
+          echo "critical=$RC" >> "$GITHUB_OUTPUT"
+          cat /tmp/dq.md
+
+      - name: Reportes informativos (artefactos)
+        if: always()
+        run: |
+          python -m src.scrapers.photo_coverage > /tmp/photo_coverage.md || true
+          python -m src.scrapers.cleanup_data_quality > /tmp/cleanup.json || true
+
+      - name: Subir artefactos
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-data-coverage
+          path: |
+            /tmp/dq.md
+            /tmp/photo_coverage.md
+            /tmp/cleanup.json
+          retention-days: 14
+
+      - name: Gestionar Issue de data-quality
+        if: always()
+        run: |
+          ISSUE=$(gh issue list --repo "$REPO" --label data-quality --state open --json number --jq '.[0].number // empty')
+          STAMP=$(date -u +'%Y-%m-%d %H:%M UTC')
+          if [ "${{ steps.checks.outputs.critical }}" = "1" ]; then
+            BODY=$(printf '⛔ **%s** — invariantes de datos rotas:\n\n```\n%s\n```\n\n[Ver el run](%s)' "$STAMP" "$(cat /tmp/dq.md)" "$RUN_URL")
+            if [ -n "$ISSUE" ]; then
+              gh issue comment "$ISSUE" --repo "$REPO" --body "$BODY"
+            else
+              gh label create data-quality --repo "$REPO" --color D93F0B --description "Alertas de calidad de datos" --force
+              gh issue create --repo "$REPO" --title "🟠 Calidad de datos: invariante rota" --label data-quality --body "$BODY"
+            fi
+            echo "Invariantes rotas:"; cat /tmp/dq.md
+            exit 1
+          fi
+          if [ -n "$ISSUE" ]; then
+            gh issue comment "$ISSUE" --repo "$REPO" --body "✅ **$STAMP** — invariantes de datos OK de nuevo. Cierro la alerta. [Run]($RUN_URL)"
+            gh issue close "$ISSUE" --repo "$REPO"
+          fi
+          echo "Datos OK"

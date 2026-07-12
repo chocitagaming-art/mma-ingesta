@@ -58,6 +58,20 @@ jobs:
           # Render duerme ~50s en frío si el keepalive fallara; margen amplio.
           check "Prediccion (Render)" "https://mma-prediction.onrender.com/health" "" 75
           check "Busqueda" "$BASE/api/search?q=test" "" 30
+          # F5: chequeo barato de imagen rota. Extrae el headshot real (CDN
+          # externo) de una ficha y confirma que resuelve. 200 y 403 cuentan como
+          # OK (403 = hotlink-protection de ufc.com; la imagen existe); solo
+          # 404/5xx/000 = imagen realmente rota.
+          img=$(curl -fsSL --max-time 30 "$BASE/fighters/6493" 2>/dev/null \
+                | grep -oE 'https://[^"'"'"' ]+\.(png|jpg|jpeg|webp)' \
+                | grep -iE 'espncdn|ufc\.com|espn' | head -1)
+          if [ -n "$img" ]; then
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 "$img" 2>/dev/null)
+            case "$code" in
+              200|403) ;;
+              *) echo "- **Imagen de luchador rota** (HTTP $code) — $img" >> /tmp/failures.md ;;
+            esac
+          fi
           if [ "${{ inputs.test_failure || false }}" = "true" ]; then
             check "Fallo de PRUEBA (test_failure=true)" "$BASE/api/esta-ruta-no-existe" ""
           fi
