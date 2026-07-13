@@ -81,7 +81,10 @@ CONTRIBUTOR: list[tuple[int, str, str, str | None, str]] = [
      'Charles "Mask" Lewis Jr. cofundó en 1997 la marca de ropa TapouT, clave para '
      "popularizar las MMA. Falleció en un accidente de tráfico en 2009, el primer no "
      "luchador reconocido por el Salón de la Fama de UFC."),
-    (2015, "Jeff Blatnick", "Comentarista y comisionado de UFC", "/hof/jeff-blatnick.webp",
+    # photo_url None: la foto que se usaba no tenia licencia libre verificable
+    # (revertida a silueta 2026-07-13). Solo se conservan Charles "Mask" Lewis y
+    # Art Davie (dominio publico / CC en Wikimedia Commons; ver /creditos).
+    (2015, "Jeff Blatnick", "Comentarista y comisionado de UFC", None,
      "Medallista de oro olímpico en lucha grecorromana (1984), fue comentarista de UFC "
      "desde UFC 4 hasta UFC 32 y comisionado de la organización. Ayudó a impulsar las "
      'reglas unificadas y a popularizar el término "mixed martial arts".'),
@@ -89,22 +92,22 @@ CONTRIBUTOR: list[tuple[int, str, str, str | None, str]] = [
      "Empresario estadounidense y cofundador de UFC. A través de Semaphore Entertainment "
      "Group (SEG) fue dueño de la promotora desde 1993 hasta venderla a Zuffa en 2001, "
      "sosteniéndola en sus años más difíciles."),
-    (2017, "Joe Silva", "Matchmaker de UFC", "/hof/joe-silva.webp",
+    (2017, "Joe Silva", "Matchmaker de UFC", None,
      "Joe Silva fue el matchmaker (emparejador) de UFC entre 1997 y 2016, encargado de "
      "diseñar los combates de las veladas, un papel clave en el desarrollo deportivo de "
      "la empresa."),
     (2018, "Art Davie", "Cocreador y primer matchmaker de UFC", "/hof/art-davie.webp",
      "Cocreador de UFC junto a Rorion Gracie: concibió el torneo original que dio lugar "
      "a UFC 1 en 1993 y fue el primer matchmaker de la organización."),
-    (2018, "Bruce Connal", "Productor de televisión de UFC", "/hof/bruce-connal.webp",
+    (2018, "Bruce Connal", "Productor de televisión de UFC", None,
      "Productor de televisión que dirigió las retransmisiones de UFC desde UFC 17 (1998) "
      "con su empresa Concom, supervisando más de 300 eventos. Fue incluido de forma "
      "póstuma en el Salón de la Fama de UFC."),
-    (2021, "Marc Ratner", "Regulador y directivo de UFC", "/hof/marc-ratner.webp",
+    (2021, "Marc Ratner", "Regulador y directivo de UFC", None,
      "Fue director ejecutivo de la Comisión Atlética de Nevada antes de sumarse a UFC en "
      "2006 como responsable de asuntos regulatorios, figura clave en la legalización de "
      "las MMA en Estados Unidos."),
-    (2025, "Craig Piligian", "Cocreador de The Ultimate Fighter", "/hof/craig-piligian.webp",
+    (2025, "Craig Piligian", "Cocreador de The Ultimate Fighter", None,
      "Productor de televisión y fundador de Pilgrim Media Group. Junto a Dana White "
      "cocreó The Ultimate Fighter (TUF), el reality que impulsó la expansión global de "
      "UFC."),
