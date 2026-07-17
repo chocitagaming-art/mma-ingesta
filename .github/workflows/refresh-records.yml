@@ -1,0 +1,37 @@
+name: Refresh fighter records
+
+# Re-fetches each recently-active fighter's ESPN overall record (total career
+# W-L-D) and writes it back, so the palmares stops freezing after a bout. The
+# stored fighters.wins/losses/draws is never incremented on result-seal, so
+# without this the record stays at its last scrape value. Monotonic + keyed by
+# espn_id (never regresses, no homonym crossover). See refresh_fighter_records.py.
+on:
+  schedule:
+    - cron: "0 8 * * *" # daily 08:00 UTC — after event-night live-results seals
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Refresh fighters with a completed fight in the last N days"
+        required: false
+        default: "14"
+
+concurrency:
+  group: refresh-records
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+      - run: pip install -r requirements-scrapers.txt
+      - name: Refresh fighter records from ESPN (monotonic)
+        run: python -m src.scrapers.refresh_fighter_records --days ${{ github.event.inputs.days || '14' }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

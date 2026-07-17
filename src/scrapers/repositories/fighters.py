@@ -340,3 +340,39 @@ def update_fighter_record(
             (wins, losses, draws, fighter_id),
         )
         return cursor.rowcount > 0
+
+
+def bump_fighter_record(
+    connection: PgConnection,
+    fighter_id: int,
+    *,
+    wins: int,
+    losses: int,
+    draws: int,
+) -> bool:
+    """Refresh a fighter's stored W-L-D to a fresher authoritative record (ESPN
+    'overall' = total career), but ONLY when the incoming record has MORE total
+    bouts than the stored one.
+
+    Unlike update_fighter_record (fill 0-0-0 only), this UPDATES a populated
+    record to reflect fights that were sealed after the last roster scrape (the
+    stored W-L-D is never incremented on result-seal, so it freezes). It is
+    strictly MONOTONIC on the bout count: it never lowers wins+losses+draws, so a
+    transient bad read or a homonym mismatch (fewer total bouts) can never regress
+    a record, and a fighter with a gap in our data (prospect ESPN can't resolve)
+    is left untouched rather than shrunk. Fills 0-0-0 too (any positive total
+    beats zero). Returns True if a row was updated.
+    """
+    if wins < 0 or losses < 0 or draws < 0:
+        return False
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE fighters
+            SET wins = %s, losses = %s, draws = %s, updated_at = NOW()
+            WHERE id = %s
+              AND (%s + %s + %s) > (COALESCE(wins, 0) + COALESCE(losses, 0) + COALESCE(draws, 0))
+            """,
+            (wins, losses, draws, fighter_id, wins, losses, draws),
+        )
+        return cursor.rowcount > 0
