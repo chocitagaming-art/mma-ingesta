@@ -376,3 +376,52 @@ def bump_fighter_record(
             (wins, losses, draws, fighter_id, wins, losses, draws),
         )
         return cursor.rowcount > 0
+
+
+def update_fighter_finish_stats(
+    connection: PgConnection,
+    fighter_id: int,
+    *,
+    wins_by_ko: int | None,
+    wins_by_submission: int | None,
+    first_round_finishes: int | None,
+) -> bool:
+    """Store the ufc.com career "athlete stats" — wins by KO, wins by submission
+    and first-round finishes (migration 021).
+
+    These are CAREER totals (same semantics as the stored W-L-D record), read
+    from the ufc.com athlete hero block. NEW-VALUE-WINS: ufc.com is authoritative
+    and the totals only grow, so the freshest scrape replaces whatever is stored
+    (like update_fighter_standing_photo). Two guards: the caller passes a triple
+    ONLY when a valid stats block parsed, so a None here (block absent / 404)
+    never wipes a stored value (early return, no SQL); and an identical triple
+    skips the row churn (IS DISTINCT FROM). Returns True if a row was updated.
+    """
+    if wins_by_ko is None or wins_by_submission is None or first_round_finishes is None:
+        return False
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE fighters
+            SET wins_by_ko = %s,
+                wins_by_submission = %s,
+                first_round_finishes = %s,
+                updated_at = NOW()
+            WHERE id = %s
+              AND (
+                wins_by_ko IS DISTINCT FROM %s
+                OR wins_by_submission IS DISTINCT FROM %s
+                OR first_round_finishes IS DISTINCT FROM %s
+              )
+            """,
+            (
+                wins_by_ko,
+                wins_by_submission,
+                first_round_finishes,
+                fighter_id,
+                wins_by_ko,
+                wins_by_submission,
+                first_round_finishes,
+            ),
+        )
+        return cursor.rowcount > 0

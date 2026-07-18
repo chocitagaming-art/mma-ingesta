@@ -1,0 +1,70 @@
+name: Enrich athlete finish stats (ufc.com)
+
+# Scrapes each fighter's career finish stats — Wins by KO, Wins by Submission,
+# First Round Finishes — from their ufc.com athlete page and stores them
+# (migration 021). The hero tiles used to be computed only from UFC fights, so a
+# fighter whose finishes are pre-UFC/regional showed 0/0/0 while ufc.com carries
+# the CAREER totals (Anna Melisano: profile 0/0/0 vs ufc.com 2/1/2). New-value-
+# wins: the freshest scrape replaces the stored value (totals only grow), so
+# without this cron the figures would freeze after a bout — the same class of
+# bug as refresh-records. No Claude tokens (no translation); only DATABASE_URL.
+# Default scope (daily cron) = fighters on UPCOMING cards (small, ~1-2 min).
+# Monthly cron / manual all=true sweeps the whole table (~2.8k pages, ~19 min).
+# Daily 08:15 UTC: after refresh-records (08:00) and event-night live-results
+# seals, clear of the ufc.com photo/facts crawlers (05:00-06:30).
+on:
+  schedule:
+    - cron: "15 8 * * *"     # diario 08:15 UTC: solo carteleras proximas
+    - cron: "30 3 1 * *"     # dia 1 de cada mes 03:30 UTC -> barrido --all
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max fighters to process (empty = all in scope)"
+        required: false
+        default: ""
+      offset:
+        description: "Skip first N fighters (chunk --all with --limit)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry-run: resolve + report, no writes"
+        type: boolean
+        default: false
+      all:
+        description: "Whole-table scope, not just upcoming cards"
+        type: boolean
+        default: false
+
+concurrency:
+  group: enrich-athlete-stats
+  cancel-in-progress: false
+
+jobs:
+  enrich:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+      - run: pip install -r requirements-scrapers.txt
+      - name: Run athlete finish-stats enrichment
+        run: |
+          ARGS=""
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # El cron mensual (dia 1) refresca TODA la tabla; el diario sigue
+            # acotado a carteleras proximas (barato). New-value-wins: solo
+            # reescribe lo que cambio (IS DISTINCT FROM).
+            if [ "${{ github.event.schedule }}" = "30 3 1 * *" ]; then ARGS="--all"; fi
+          else
+            if [ -n "${{ inputs.limit || '' }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
+            if [ -n "${{ inputs.offset || '' }}" ]; then ARGS="$ARGS --offset ${{ inputs.offset }}"; fi
+            if [ "${{ inputs.dry_run || false }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+            if [ "${{ inputs.all || false }}" = "true" ]; then ARGS="$ARGS --all"; fi
+          fi
+          python -m src.scrapers.enrich_athlete_stats $ARGS
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
