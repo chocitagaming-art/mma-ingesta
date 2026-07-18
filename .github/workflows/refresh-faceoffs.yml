@@ -1,0 +1,33 @@
+name: Match face-off videos
+
+# Matches each upcoming event to its official UFC "Fighter Face-offs" (careo)
+# video from the channel RSS (NO YouTube API key) and stores the id (migration
+# 022). Careos publish the evening before an event (US), so a daily run at 20:00
+# UTC catches them the day before / day of. Match is conservative (city or
+# "UFC <N>" token + "face-off" title + date window) and first-writer-wins
+# (idempotent). See match_faceoffs.py. Only needs DATABASE_URL.
+on:
+  schedule:
+    - cron: "0 20 * * *" # diario 20:00 UTC (víspera de los eventos, tarde US)
+  workflow_dispatch:
+
+concurrency:
+  group: match-faceoffs
+  cancel-in-progress: false
+
+jobs:
+  match:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+      - run: pip install -r requirements-scrapers.txt
+      - name: Match face-off videos to upcoming events
+        run: python -m src.scrapers.match_faceoffs --apply
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

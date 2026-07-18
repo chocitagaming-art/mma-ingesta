@@ -110,6 +110,28 @@ def upsert_event_meta(connection: PgConnection, event: EventMetaRecord) -> int:
         return int(cursor.fetchone()[0])
 
 
+def set_event_faceoff_video(
+    connection: PgConnection, event_id: int, video_id: str
+) -> bool:
+    """Store the UFC face-off (careo) YouTube video id for an event (migration 022).
+
+    FIRST-WRITER-WINS: only fills while NULL, so a later noisy match can never
+    overwrite a good one and daily re-runs are idempotent (WHERE ... IS NULL).
+    Returns True if a row was written."""
+    if not video_id:
+        return False
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE events
+            SET faceoff_video_id = %s
+            WHERE id = %s AND faceoff_video_id IS NULL
+            """,
+            (video_id, event_id),
+        )
+        return cursor.rowcount > 0
+
+
 def get_event_id(
     connection: PgConnection,
     event: EventRecord,
