@@ -482,6 +482,13 @@ def test_names_match_rejects_homonym():
     assert not enrich_fullbody._names_match("Conor McGregor", "")
 
 
+def test_names_match_transliterates_stroke_letters():
+    # NFKD no descompone la 'ł' polaca (ni ø/đ/ħ): sin transliteracion
+    # 'Blachowicz' no casaba con 'Błachowicz' y el guard descartaba datos reales.
+    assert enrich_fullbody._names_match("Jan Blachowicz", "Jan Błachowicz")
+    assert enrich_fullbody._names_match("Jan Błachowicz", "Jan Blachowicz")
+
+
 def test_backfill_skips_and_counts_name_mismatch_without_writing(fakedb):
     # Guessed slug (ufc_confirmed=False) landing on a namesake's page: the hero
     # name disagrees with the DB name -> skip, count, and never touch the DB.

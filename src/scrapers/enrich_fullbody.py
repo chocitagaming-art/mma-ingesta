@@ -128,10 +128,19 @@ def _get_target_fighters(
         return [(int(row[0]), str(row[1]), bool(row[2])) for row in cursor.fetchall()]
 
 
+# Letras con trazo/barra que NFKD NO descompone: sin transliterar, 'Blachowicz'
+# no casaba con 'Błachowicz' y el guard descartaba facts/fotos reales. Cubre
+# ł/ø/đ/ħ (y mayúsculas); las demás con diacrítico ya las pliega NFKD.
+_STROKE_TRANSLIT = str.maketrans(
+    {"ł": "l", "Ł": "L", "ø": "o", "Ø": "O", "đ": "d", "Đ": "D", "ħ": "h", "Ħ": "H"}
+)
+
+
 def _normalized_name_tokens(name: str) -> list[str]:
-    """Lowercase ASCII word tokens: NFKD with accents stripped, casefolded,
+    """Lowercase ASCII word tokens: transliterate stroke letters (ł/ø/đ/ħ) that
+    NFKD does not decompose, then NFKD with accents stripped, casefolded,
     whitespace/punctuation collapsed ('José  Aldo Jr.' -> ['jose','aldo','jr'])."""
-    decomposed = unicodedata.normalize("NFKD", name)
+    decomposed = unicodedata.normalize("NFKD", name.translate(_STROKE_TRANSLIT))
     ascii_name = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
     return re.findall(r"[a-z0-9]+", ascii_name.casefold())
 
