@@ -77,6 +77,7 @@ def _get_target_fighters(
     days: int,
     all_fighters: bool,
     limit: int | None,
+    offset: int = 0,
 ) -> list[tuple[int, str | None, str | None, int, int, int]]:
     """(id, name, espn_id, wins, losses, draws) for the target fighters.
 
@@ -113,6 +114,7 @@ def _get_target_fighters(
             (int(r[0]), r[1], r[2], int(r[3] or 0), int(r[4] or 0), int(r[5] or 0))
             for r in cursor.fetchall()
         ]
+    rows = rows[offset:]
     return rows[:limit] if limit is not None else rows
 
 
@@ -122,6 +124,7 @@ def refresh_records(
     days: int = 30,
     all_fighters: bool = False,
     limit: int | None = None,
+    offset: int = 0,
     backup_path: str | None = None,
     connection=None,
     fetch_record: RecordFetcher | None = None,
@@ -174,7 +177,7 @@ def refresh_records(
     # Phase A: read the target set (short-lived connection).
     with _conn() as conn:
         targets = _get_target_fighters(
-            conn, days=days, all_fighters=all_fighters, limit=limit
+            conn, days=days, all_fighters=all_fighters, limit=limit, offset=offset
         )
     counts["targets"] = len(targets)
     scope = "ALL fighters with espn_id" if all_fighters else f"fought in last {days} days"
@@ -285,6 +288,7 @@ def main() -> None:
     parser.add_argument("--days", type=int, default=30, help="Refresh fighters with a completed fight in the last N days (default 30).")
     parser.add_argument("--all", action="store_true", dest="all_fighters", help="Refresh EVERY fighter with an espn_id (ignores --days).")
     parser.add_argument("--limit", type=int, default=None, help="Process at most this many fighters.")
+    parser.add_argument("--offset", type=int, default=0, help="Skip the first N target fighters (for chunking a big --all run).")
     parser.add_argument("--backup", metavar="PATH", default=None, help="Write a JSON backup of the OLD values of changed fighters.")
     parser.add_argument("--delay", type=float, default=REQUEST_DELAY_SECONDS, help=f"Seconds between ESPN requests (default {REQUEST_DELAY_SECONDS}).")
     parser.add_argument("--probe", nargs="+", metavar="NAME", help="Resolve ESPN overall record by name (no DB, no write).")
@@ -301,6 +305,7 @@ def main() -> None:
         days=args.days,
         all_fighters=args.all_fighters,
         limit=args.limit,
+        offset=args.offset,
         backup_path=args.backup,
         delay=args.delay,
     )

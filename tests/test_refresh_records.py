@@ -132,6 +132,13 @@ def test_target_query_all_ignores_days(fakedb):
     assert "event_date" not in flat
 
 
+def test_target_offset_and_limit_slice_the_chunk(fakedb):
+    all_rows = [(i, f"F{i}", None, 1, 0, 0) for i in range(10)]
+    conn = fakedb.Connection(lambda sql, params=None: list(all_rows))
+    got = rfr._get_target_fighters(conn, days=14, all_fighters=True, limit=3, offset=4)
+    assert [r[0] for r in got] == [4, 5, 6]  # skip 4, take 3
+
+
 # ------------------------------------------------ name-fallback safety guard
 
 
