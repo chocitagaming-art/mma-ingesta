@@ -132,6 +132,29 @@ def set_event_faceoff_video(
         return cursor.rowcount > 0
 
 
+def set_event_image(
+    connection: PgConnection, event_id: int, image_url: str
+) -> bool:
+    """Store a poster/hero image URL for an event, FIRST-WRITER-WINS.
+
+    Only fills while image_url is empty, so the historical poster backfill
+    (backfill_event_images) never overwrites a poster already scraped by the
+    upcoming-events flow and daily/repeat runs are idempotent (WHERE ... empty).
+    Returns True if a row was written."""
+    if not image_url:
+        return False
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE events
+            SET image_url = %s
+            WHERE id = %s AND (image_url IS NULL OR image_url = '')
+            """,
+            (image_url, event_id),
+        )
+        return cursor.rowcount > 0
+
+
 def get_event_id(
     connection: PgConnection,
     event: EventRecord,
