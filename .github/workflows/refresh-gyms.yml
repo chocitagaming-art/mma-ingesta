@@ -1,0 +1,32 @@
+name: Refresh gyms (OSM)
+
+# Repuebla la tabla `gyms` (migración 023) desde OpenStreetMap/Overpass: una sola
+# consulta del área de España con los tokens de disciplinas de lucha, filtra las
+# cadenas de fitness y hace UPSERT por osm_id + poda los que ya no están en OSM
+# (solo si el volumen es sano). Los datos OSM cambian poco → semanal basta.
+# Idempotente. Solo necesita DATABASE_URL. Ver gyms_osm.py.
+on:
+  schedule:
+    - cron: "30 4 * * 1" # lunes 04:30 UTC (fuera de horas punta de Overpass)
+  workflow_dispatch:
+
+concurrency:
+  group: refresh-gyms
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+      - run: pip install -r requirements-scrapers.txt
+      - name: Refresh gyms from OpenStreetMap
+        run: python -m src.scrapers.gyms_osm --apply
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
