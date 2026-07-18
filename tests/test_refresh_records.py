@@ -111,12 +111,13 @@ def test_refresh_writes_backup_of_old_values(tmp_path, fakedb):
     ]
 
 
-def test_target_query_recent_uses_espn_id_and_days(fakedb):
+def test_target_query_recent_is_completed_only_and_by_days(fakedb):
     conn = fakedb.Connection(lambda sql, params=None: [])
     rfr._get_target_fighters(conn, days=14, all_fighters=False, limit=None)
     sql, params = conn.cursors[0].executed[0]
     flat = " ".join(sql.split())
-    assert "f.espn_id IS NOT NULL" in flat          # only reliable id key
+    # No espn_id filter: fighters WITHOUT an id are included (name fallback).
+    assert "espn_id IS NOT NULL" not in flat
     assert "NOT (fi.winner_id IS NULL AND fi.method IS NULL)" in flat  # completed only
     assert "e.event_date >= (CURRENT_DATE - (%s || ' days')::interval)" in flat
     assert params == (14,)
@@ -127,5 +128,81 @@ def test_target_query_all_ignores_days(fakedb):
     rfr._get_target_fighters(conn, days=14, all_fighters=True, limit=None)
     sql, _params = conn.cursors[0].executed[0]
     flat = " ".join(sql.split())
-    assert "WHERE espn_id IS NOT NULL" in flat
+    assert "espn_id IS NOT NULL" not in flat
     assert "event_date" not in flat
+
+
+# ------------------------------------------------ name-fallback safety guard
+
+
+def test_name_change_is_safe_accepts_small_nondecreasing_bump():
+    # A real "record froze one/two fights ago": each component grows, total +1..4.
+    assert rfr._name_change_is_safe((9, 1, 0), (10, 1, 0), 4) is True   # +1 win
+    assert rfr._name_change_is_safe((9, 1, 0), (11, 2, 0), 4) is True   # +3 total
+
+
+def test_name_change_is_safe_rejects_unsafe_shapes():
+    assert rfr._name_change_is_safe((9, 1, 0), (9, 1, 0), 4) is False   # no change
+    assert rfr._name_change_is_safe((5, 2, 0), (20, 3, 0), 4) is False  # +16 -> homonym
+    assert rfr._name_change_is_safe((8, 4, 0), (10, 3, 0), 4) is False  # a loss vanished
+    assert rfr._name_change_is_safe((9, 1, 0), (14, 1, 0), 4) is False  # +5 > max_delta
+
+
+# ------------------------------------------------ refresh via name fallback
+
+# (id, name, espn_id=None, wins, losses, draws)
+_NAME_TARGETS = [
+    (10, "Wang Cong", None, 9, 1, 0),          # name 10-1-0 -> safe +1 -> UPDATE
+    (11, "Big Jump", None, 5, 2, 0),           # name 20-3-0 -> +16 -> REJECT
+    (12, "Comp Down", None, 8, 4, 0),          # name 10-3-0 -> loss vanished -> REJECT
+    (13, "No Espn Prospect", None, 3, 0, 0),   # name None -> unresolved
+]
+_NAME_ESPN = {
+    "Wang Cong": (10, 1, 0),
+    "Big Jump": (20, 3, 0),
+    "Comp Down": (10, 3, 0),
+    "No Espn Prospect": None,
+}
+
+
+def _name_responder(sql, params=None):
+    flat = " ".join(sql.split())
+    if flat.startswith("SELECT") and "FROM fighters f" in flat:
+        return list(_NAME_TARGETS)
+    if "UPDATE fighters" in flat:
+        return [(1,)]
+    return []
+
+
+def test_refresh_name_fallback_applies_only_safe_bumps(fakedb):
+    conn = fakedb.Connection(_name_responder)
+    counts = rfr.refresh_records(
+        connection=conn,
+        fetch_record=lambda espn_id: None,        # never called (espn_id is None)
+        fetch_by_name=lambda name: _NAME_ESPN[name],
+        days=90, delay=0,
+    )
+    assert counts["resolved_by_name"] == 3        # Wang Cong, Big Jump, Comp Down
+    assert counts["unresolved"] == 1              # No Espn Prospect
+    assert counts["updated"] == 1                 # only the safe +1 (Wang Cong)
+    assert counts["name_rejected"] == 2           # Big Jump + Comp Down
+
+    updates = [
+        params for cur in conn.cursors for sql, params in cur.executed
+        if "UPDATE fighters" in sql
+    ]
+    assert len(updates) == 1
+    assert updates[0] == (10, 1, 0, 10, 10, 1, 0)  # Wang Cong -> 10-1-0
+    assert conn.commits == 1
+
+
+def test_refresh_without_name_fetcher_does_not_fall_back(fakedb):
+    # No fetch_by_name -> a fighter without espn_id is simply unresolved (the old
+    # behaviour is preserved; name fallback is opt-in / production-wired).
+    conn = fakedb.Connection(_name_responder)
+    counts = rfr.refresh_records(
+        connection=conn, fetch_record=lambda espn_id: None, days=90, delay=0
+    )
+    assert counts["updated"] == 0
+    assert counts["unresolved"] == 4
+    assert fakedb.mutating_statements(conn) == []
