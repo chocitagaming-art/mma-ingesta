@@ -29,7 +29,9 @@ from .news import fetch_og_image
 
 LOGGER = logging.getLogger(__name__)
 
-TRANSLATE_MODEL = "claude-sonnet-4-6"
+# Haiku: traducir titular+resumen es tarea simple; ~5x mas barato que Sonnet.
+# (Backfill manual de una sola vez; sin cron, asi que no es un gasto recurrente.)
+TRANSLATE_MODEL = "claude-haiku-4-5"
 
 
 def _extract_json(text: str) -> dict:

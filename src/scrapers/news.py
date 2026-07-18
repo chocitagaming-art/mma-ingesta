@@ -143,7 +143,10 @@ class NewsClassifier:
             f"Summary: {article.summary or ''}"
         )
         response = self.client.messages.create(
-            model="claude-sonnet-4-6",
+            # Haiku: clasificar (extraer nombres + categoria de un enum) es una
+            # tarea simple de alto volumen; ~5x mas barato que Sonnet sin perder
+            # calidad aqui, y con el fallback por palabras clave de red de seguridad.
+            model="claude-haiku-4-5",
             max_tokens=200,
             temperature=0,
             messages=[{"role": "user", "content": prompt}],
