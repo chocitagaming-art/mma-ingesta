@@ -602,8 +602,10 @@ def main() -> None:
              "minutos indicados y salir. Tiene prioridad sobre --loop.",
     )
     parser.add_argument(
-        "--interval-seconds", type=int, default=120,
-        help="Segundos entre pasadas del bucle acotado (con --duration-minutes).",
+        "--interval-seconds", type=int, default=20,
+        help="Segundos entre pasadas del bucle acotado (con --duration-minutes). "
+             "Una pasada es barata (~3 GETs durante un combate en directo), asi "
+             "que 20s da sensacion de directo sin martillear ESPN.",
     )
     args = parser.parse_args()
     if args.duration_minutes is not None:

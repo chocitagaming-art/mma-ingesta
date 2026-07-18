@@ -2,9 +2,11 @@
 #
 # El cron */10 de live-results.yml lo retrasa el scheduler de GitHub (medido
 # 11-jul-2026: cadencia efectiva ~1 h). Este job arranca al inicio de cada
-# ventana y SE QUEDA VIVO ~4 h haciendo una pasada cada 2 min con el mismo
-# codigo idempotente (COALESCE, el valor almacenado gana). live-results.yml
-# sigue activo como respaldo: solaparse es inocuo por construccion.
+# ventana y SE QUEDA VIVO ~4 h haciendo una pasada cada ~20s con el mismo
+# codigo idempotente (COALESCE, el valor almacenado gana). Una pasada es barata
+# (~3 GETs durante un combate en directo), asi que 20s da sensacion de directo
+# sin martillear ESPN. live-results.yml sigue activo como respaldo: solaparse es
+# inocuo por construccion.
 #
 # Guard barato: si la primera pasada ve el scoreboard vacio (no hay evento en
 # la ventana), el job sale en verde en segundos.
@@ -24,8 +26,8 @@ on:
         description: "Duracion de la ventana en minutos"
         default: "235"
       interval_seconds:
-        description: "Segundos entre pasadas"
-        default: "120"
+        description: "Segundos entre pasadas (10-30 en directo; 20 por defecto)"
+        default: "20"
       dates:
         description: "Filtro ESPN YYYYMMDD (opcional; por defecto hoy+ayer US Eastern)"
         default: ""
@@ -62,7 +64,7 @@ jobs:
         # con || (mismo patron que enrich-fullbody.yml).
         run: |
           ARGS="--duration-minutes ${{ inputs.duration_minutes || '235' }}"
-          ARGS="$ARGS --interval-seconds ${{ inputs.interval_seconds || '120' }}"
+          ARGS="$ARGS --interval-seconds ${{ inputs.interval_seconds || '20' }}"
           if [ -n "${{ inputs.dates }}" ]; then
             ARGS="$ARGS --dates ${{ inputs.dates }}"
           fi
