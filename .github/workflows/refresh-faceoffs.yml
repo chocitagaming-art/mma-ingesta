@@ -1,11 +1,16 @@
 name: Match face-off videos
 
 # Matches each upcoming event to its official UFC "Fighter Face-offs" (careo)
-# video from the channel RSS (NO YouTube API key) and stores the id (migration
-# 022). Careos publish the evening before an event (US), so a daily run at 20:00
-# UTC catches them the day before / day of. Match is conservative (city or
-# "UFC <N>" token + "face-off" title + date window) and first-writer-wins
-# (idempotent). See match_faceoffs.py. Only needs DATABASE_URL.
+# video from the channel RSS and stores the id (migration 022). Careos publish
+# the evening before an event (US), so a daily run at 20:00 UTC catches them the
+# day before / day of. Match is conservative (city or "UFC <N>" token +
+# "face-off" title + date window) and first-writer-wins (idempotent).
+#
+# RESCUE PASS: if the optional YOUTUBE_API_KEY secret is set, a second pass pages
+# the channel uploads playlist (playlistItems, 1 quota unit/page) to rescue
+# careos of recently-passed events that already fell out of the ~15-video RSS
+# window. Without the secret the job runs RSS-only, exactly as before.
+# See match_faceoffs.py. Needs DATABASE_URL (+ optional YOUTUBE_API_KEY).
 on:
   schedule:
     - cron: "0 20 * * *" # diario 20:00 UTC (víspera de los eventos, tarde US)
@@ -31,3 +36,5 @@ jobs:
         run: python -m src.scrapers.match_faceoffs --apply
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Optional: enables the API rescue pass. Absent -> RSS-only (no error).
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
