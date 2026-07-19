@@ -10,3 +10,9 @@ select = ["E", "F", "W"]
 # Make `from src... import` resolve regardless of how pytest is invoked
 # (`pytest` vs `python -m pytest`), instead of relying on the cwd being on sys.path.
 pythonpath = ["."]
+markers = [
+    "smoke: red real contra las fuentes scrapeadas; correr con -m smoke (workflow smoke-parsers)",
+]
+# Smoke tests hit the real network: excluded by default so `pytest tests/` stays
+# offline/fast. The smoke workflow overrides with an explicit `-m smoke`.
+addopts = '-m "not smoke"'

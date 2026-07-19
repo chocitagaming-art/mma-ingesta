@@ -1,0 +1,37 @@
+name: "Smoke: parseo contra fuentes reales"
+
+# Tests de humo de PARSEO (tests/smoke): descargan las fuentes reales
+# (ufc.com, ufcstats.com, ESPN, RSS de YouTube) y comprueban que los parsers de
+# producción siguen extrayendo datos — detectan el fallo SILENCIOSO en que un
+# rediseño del HTML/API hace que un cron escriba 0 filas sin error. Sin BD y
+# sin secrets: solo fetch + parse. Cada assert distingue "fallo HTTP/red/
+# bloqueo" (reintentado 3 veces con backoff) de "la página llegó pero el
+# parser extrajo 0" (selector roto). Al fallar avisa notify-on-failure.yml.
+on:
+  schedule:
+    - cron: "20 9 * * 1,3,5" # lunes/miércoles/viernes 09:20 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: smoke-parsers
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    # 35 y no menos: el peor caso patológico (fuentes en tarpit hasta el
+    # read-timeout con los retries encadenados) ronda los ~30 min; con 20 el
+    # runner mataría el job a mitad de backoff y se perdería el diagnóstico.
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-scrapers.txt
+            requirements-dev.txt
+      - run: pip install -r requirements-scrapers.txt -r requirements-dev.txt
+      - name: Run parse smoke tests against the live sources
+        run: python -m pytest tests/smoke -m smoke -v -ra

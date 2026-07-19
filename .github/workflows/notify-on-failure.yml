@@ -29,6 +29,7 @@ on:
       - "Backfill standing photos"
       - "Backfill cards"
       - "Consolidate results (post-event)"
+      - "Smoke: parseo contra fuentes reales"
     types: [completed]
 
 permissions:
