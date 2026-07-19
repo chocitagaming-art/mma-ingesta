@@ -149,10 +149,10 @@ def _get_target_fighters(
 ) -> list[Target]:
     """Luchadores sin espn_id, excluyendo homónimos exactos en BD.
 
-    Scope por defecto (cron): en cartelera próxima o creados hace <45 días
-    (debutantes recién enlazados). --all: toda la tabla, priorizada igual que
-    enrich_facts (ránking actual > cartelera próxima > con foto > resto) para
-    que un pase parcial cubra primero a los más visibles.
+    Scope por defecto (cron): luchadores sin espn_id en cartelera próxima
+    (los debutantes se resuelven al entrar en un cartel). --all: toda la tabla,
+    priorizada igual que enrich_facts (ránking actual > cartelera próxima > con
+    foto > resto) para que un pase parcial cubra primero a los más visibles.
     """
     homonym_free = """
               AND NOT EXISTS (
@@ -188,14 +188,11 @@ def _get_target_fighters(
             FROM fighters f
             WHERE f.name IS NOT NULL AND f.name <> ''
               AND f.espn_id IS NULL
-              AND (
-                f.created_at > NOW() - INTERVAL '45 days'
-                OR EXISTS (
+              AND EXISTS (
                     SELECT 1 FROM fights fi
                     JOIN events e ON e.id = fi.event_id
                     WHERE e.status = 'upcoming'
                       AND (fi.fighter_red_id = f.id OR fi.fighter_blue_id = f.id)
-                )
               )
               {homonym_free}
             ORDER BY f.name
@@ -227,7 +224,7 @@ def backfill(
     counts["targets"] = len(targets)
     LOGGER.info(
         "Fighters without espn_id (scope=%s): %d",
-        "all" if all_scope else "upcoming+recent", len(targets),
+        "all" if all_scope else "upcoming", len(targets),
     )
 
     for idx, (fighter_id, name) in enumerate(targets, 1):

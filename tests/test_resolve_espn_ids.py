@@ -103,6 +103,36 @@ class TestPickUnambiguous:
         assert picked == ("1", "Jim Miller")
 
 
+class TestTargetFightersScope:
+    """El scope por defecto (cron) no debe referenciar columnas inexistentes.
+
+    Regresión real: `fighters.created_at` NO existe -> el cron semanal
+    `espn-history` petaba con psycopg2 UndefinedColumn en el paso 1
+    (resolve_espn_ids) y el import de historial nunca llegaba a correr.
+    """
+
+    def test_default_scope_has_no_created_at_and_scopes_upcoming(self, fakedb):
+        from src.scrapers.resolve_espn_ids import _get_target_fighters
+
+        conn = fakedb.Connection(lambda sql, params: [(1, "Foo")])
+        _get_target_fighters(conn, all_scope=False)
+        (sql, _), = conn.cursors[0].executed
+        flat = " ".join(sql.split())
+        assert "created_at" not in flat  # columna inexistente en `fighters`
+        assert "f.espn_id IS NULL" in flat  # solo los que aún no tienen espn_id
+        assert "e.status = 'upcoming'" in flat  # scope real: cartelera próxima
+
+    def test_all_scope_has_no_created_at(self, fakedb):
+        from src.scrapers.resolve_espn_ids import _get_target_fighters
+
+        conn = fakedb.Connection(lambda sql, params: [(1, "Foo")])
+        _get_target_fighters(conn, all_scope=True)
+        (sql, _), = conn.cursors[0].executed
+        flat = " ".join(sql.split())
+        assert "created_at" not in flat
+        assert "f.espn_id IS NULL" in flat
+
+
 class TestSeedAndWriteGuards:
     def test_seed_from_source_ids_sql_is_guarded(self, fakedb):
         from src.scrapers.resolve_espn_ids import seed_from_source_ids
