@@ -18,6 +18,7 @@ from anthropic import Anthropic
 
 from .config import get_settings
 from .db import connect
+from .http_browser import fetch_url
 from .logging_config import configure_logging
 from .matching import IDENTITY_THRESHOLD, alnum_name as _normalize_name, ratio
 from .repositories.fighters import FighterMatchRecord, get_all_fighters
@@ -38,19 +39,22 @@ CATEGORIES = {
     "transfer",
     "other",
 }
-# Spanish-language sources (match the Spanish UI). ESPN Deportes ships a clean
-# RSS; since 2026-06-30 its CDN answers GitHub-runner IPs with an empty body
-# regardless of User-Agent, so Marca's MMA feed (reachable from runners) keeps
-# the pipeline alive. ufc.com/rss/news is English and image-less, so it's not
-# used for news — ufc.com is used elsewhere only for athlete photos.
+# Spanish-language sources (match the Spanish UI). ESPN Deportes (since
+# ~2026-06-30) and ufcespanol.com both block non-browser TLS fingerprints
+# (empty 202 body / WAF 403), so their fetches only work through the
+# impersonated client in http_browser.py (curl_cffi, Chrome fingerprint);
+# Marca stays reachable with plain requests. UFC Español is a Drupal RSS with
+# Spanish day/month abbreviations in pubDate (see _spanish_rfc822_to_english)
+# and NO images in the feed — its articles fall through to fetch_og_image.
 RSS_FEEDS = (
     ("ESPN Deportes", "https://espndeportes.espn.com/espn/rss/mma/news"),
     ("Marca", "https://e00-marca.uecdn.es/rss/mma.xml"),
+    ("UFC Español", "https://www.ufcespanol.com/rss/news"),
 )
-# ESPN blocks feedparser's default User-Agent ("feedparser/6.x") from datacenter
-# IPs (GitHub runners) with an empty/HTML body, which feedparser parses to
-# bozo=False + 0 entries — a silent green run. Fetch with real-browser headers
-# instead and let feedparser parse the already-downloaded bytes.
+# Real-browser headers for the plain-requests fallback (feedparser's default
+# UA is blocked outright). Under curl_cffi the User-Agent is dropped and the
+# impersonation supplies its own (see http_browser._drop_user_agent); the
+# Accept header passes through in both paths.
 _RSS_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -85,8 +89,10 @@ def scrape_news(max_articles: int = 100) -> Counter:
         exact_name_index = _build_exact_name_index(fighters)
         normalized_name_index = _build_normalized_name_index(fighters)
         existing_urls = get_existing_news_urls(connection)
-        articles = fetch_feed_articles(max_articles=max_articles)
+        articles, fetched_by_source = fetch_feed_articles(max_articles=max_articles)
         counts["fetched"] = len(articles)
+        for source, fetched in fetched_by_source.items():
+            counts[f"fetched_{source}"] = fetched
         for article in articles:
             if article.url in existing_urls:
                 counts["skipped_existing"] += 1
@@ -183,13 +189,21 @@ def _extract_json_object(text: str) -> dict:
     return payload
 
 
-def fetch_feed_articles(max_articles: int) -> list[FeedArticle]:
+def fetch_feed_articles(max_articles: int) -> tuple[list[FeedArticle], dict[str, int]]:
+    """Fetch every configured feed; return (articles, parsed count per source).
+
+    The per-source counts are pre-dedup/pre-truncation so the run summary shows
+    what each feed actually served — a single feed silently dropping to 0 was
+    invisible when only the global total was reported.
+    """
     articles: list[FeedArticle] = []
+    fetched_by_source: dict[str, int] = {source: 0 for source, _ in RSS_FEEDS}
     per_feed_limit = max(25, max_articles // len(RSS_FEEDS) + 5)
     for source, url in RSS_FEEDS:
         try:
-            response = requests.get(url, headers=_RSS_HEADERS, timeout=20)
-            response.raise_for_status()
+            # Impersonated client (curl_cffi/Chrome) where available: ESPN and
+            # ufcespanol block on TLS fingerprint, headers alone don't help.
+            response = fetch_url(url, headers=_RSS_HEADERS, timeout=20)
         except requests.RequestException as exc:
             # One blocked/down feed must not kill the others; the zero-articles
             # guard below still fails the run if EVERY feed comes back empty.
@@ -202,6 +216,13 @@ def fetch_feed_articles(max_articles: int) -> list[FeedArticle]:
             article = _entry_to_article(source, entry)
             if article is not None:
                 articles.append(article)
+                fetched_by_source[source] += 1
+    for source, fetched in fetched_by_source.items():
+        if fetched == 0:
+            # GitHub Actions annotation: shows up in the run UI/summary without
+            # failing the job, so a single dead feed is visible immediately
+            # instead of hiding behind the healthy feeds' green total.
+            print(f"::warning::Fuente {source} devolvió 0 artículos")
     if not articles:
         # A block page / empty body parses "cleanly" to 0 entries; without this
         # guard the workflow ends GREEN with "fetched": 0 and nobody notices.
@@ -216,7 +237,7 @@ def fetch_feed_articles(max_articles: int) -> list[FeedArticle]:
         deduped.append(article)
         if len(deduped) >= max_articles:
             break
-    return deduped
+    return deduped, fetched_by_source
 
 
 def _entry_to_article(source: str, entry) -> FeedArticle | None:
@@ -312,12 +333,16 @@ _OG_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; mma-ingesta/1.0; +https:/
 
 
 def fetch_og_image(url: str, timeout: int = 10) -> str | None:
-    """Fetch an article page and return its og:image / twitter:image, if any."""
+    """Fetch an article page and return its og:image / twitter:image, if any.
+
+    Goes through the impersonated client: UFC Español's feed carries no images,
+    so EVERY image for that source comes from this og:image fetch — and its WAF
+    403s plain requests, same as the feed itself.
+    """
     if not _is_http_url(url):
         return None
     try:
-        response = requests.get(url, headers=_OG_HEADERS, timeout=timeout)
-        response.raise_for_status()
+        response = fetch_url(url, headers=_OG_HEADERS, timeout=timeout)
         html = response.text[:300_000]
     except Exception as exc:  # noqa: BLE001 - network/parse issues are non-fatal
         LOGGER.debug("og:image fetch failed for %s: %s", url, exc)
@@ -331,16 +356,59 @@ def fetch_og_image(url: str, timeout: int = 10) -> str | None:
     return None
 
 
+# Spanish RFC-822 abbreviations (UFC Español pubDate: "Dom, 19 Jul 2026 ...").
+# Days: with AND without accent (feeds are inconsistent about "Mié"/"Sáb").
+# Months: only the four whose abbreviation differs from English (Ene/Abr/Ago/
+# Dic) — the rest (incl. "Mar" = marzo) already match the English form.
+_SPANISH_DAYS = {
+    "lun": "Mon",
+    "mar": "Tue",
+    "mié": "Wed",
+    "mie": "Wed",
+    "jue": "Thu",
+    "vie": "Fri",
+    "sáb": "Sat",
+    "sab": "Sat",
+    "dom": "Sun",
+}
+_SPANISH_MONTHS = {"ene": "Jan", "abr": "Apr", "ago": "Aug", "dic": "Dec"}
+# Position-aware on purpose: "Mar" is Tuesday BEFORE the comma but March
+# between day-number and year ("Mar, 03 Mar 2026") — a blind replace of every
+# "Mar" would corrupt the month. [^\W\d_] = any unicode letter (covers á/é).
+_DAY_PREFIX_RE = re.compile(r"^\s*([^\W\d_]+)\s*,")
+_MONTH_TOKEN_RE = re.compile(r"(\d{1,2}\s+)([^\W\d_]+)(\s+\d{2,4})")
+
+
+def _spanish_rfc822_to_english(value: str) -> str:
+    """Map Spanish day/month abbreviations to English so RFC-822 parsing works."""
+    value = _DAY_PREFIX_RE.sub(
+        lambda m: _SPANISH_DAYS.get(m.group(1).casefold(), m.group(1)) + ",",
+        value,
+        count=1,
+    )
+    return _MONTH_TOKEN_RE.sub(
+        lambda m: m.group(1) + _SPANISH_MONTHS.get(m.group(2).casefold(), m.group(2)) + m.group(3),
+        value,
+        count=1,
+    )
+
+
 def _parse_published_at(value: str | None) -> datetime | None:
     if not value:
         return None
-    try:
-        parsed = parsedate_to_datetime(value)
+    for candidate in (value, _spanish_rfc822_to_english(value)):
+        try:
+            parsed = parsedate_to_datetime(candidate)
+        except Exception:
+            continue
+        if parsed is None:  # older Pythons return None instead of raising
+            continue
         if parsed.tzinfo is None:
             return parsed.replace(tzinfo=timezone.utc)
         return parsed
-    except Exception:
-        return None
+    # Unparseable even after translation: keep the article, drop only the date
+    # (published_at is nullable; sorting falls back to datetime.min).
+    return None
 
 
 def _classify_with_fallback(article: FeedArticle, fighters: list[FighterMatchRecord]) -> ClassificationResult:
@@ -466,6 +534,13 @@ def _build_summary(counts: Counter) -> str:
     return json.dumps(
         {
             "fetched": counts["fetched"],
+            # Per-feed breakdown so ONE dead feed is visible in the run log even
+            # while the healthy feeds keep the global total looking fine.
+            "fetched_by_source": {
+                key.removeprefix("fetched_"): count
+                for key, count in counts.items()
+                if key.startswith("fetched_")
+            },
             "stored": counts["stored"],
             "skipped_existing": counts["skipped_existing"],
             "classified_claude": counts["classified_claude"],
@@ -474,6 +549,7 @@ def _build_summary(counts: Counter) -> str:
         },
         indent=2,
         sort_keys=True,
+        ensure_ascii=False,
     )
 
 

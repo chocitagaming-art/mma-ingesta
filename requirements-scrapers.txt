@@ -9,3 +9,7 @@ beautifulsoup4
 lxml
 feedparser
 anthropic
+# Chrome TLS-fingerprint impersonation (src/scrapers/http_browser.py): ESPN
+# Deportes and ufcespanol.com block plain requests by JA3, not headers.
+# Pinned: the impersonation targets are version-sensitive native code.
+curl_cffi==0.15.0

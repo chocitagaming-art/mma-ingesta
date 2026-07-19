@@ -36,7 +36,7 @@ def _build_feed_image_map(max_articles: int = 400) -> dict[str, str]:
     """Map article URL -> image URL from the current RSS feeds that ship one."""
     feed_map: dict[str, str] = {}
     try:
-        articles = fetch_feed_articles(max_articles=max_articles)
+        articles, _fetched_by_source = fetch_feed_articles(max_articles=max_articles)
     except (RuntimeError, requests.RequestException) as exc:
         # A blocked/empty feed must not abort the backfill: the og:image path
         # below still works per-article without the feed map.

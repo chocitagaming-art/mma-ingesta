@@ -1,13 +1,16 @@
 name: Refresh news
 
-# Pulls the latest MMA news from the ESPN Deportes RSS feed, grabs each article's
+# Pulls the latest MMA news from the configured RSS feeds (see RSS_FEEDS in
+# src/scrapers/news.py: ESPN Deportes, Marca, UFC Español), grabs each article's
 # image (og:image) and classifies it with Claude. Needs ANTHROPIC_API_KEY for the
 # classification step in addition to the DB. Writes to Neon.
 # After a successful scrape it POSTs to the app's /api/revalidate so the home
 # page (ISR 30 min) picks up the fresh headlines within seconds.
 on:
   schedule:
-    - cron: "0 8 * * *" # daily at 08:00 UTC
+    # 3x/day at :05 — a minute no other workflow in this repo uses (the :10
+    # grid collides with live-results and keepalive-prediction every 10 min).
+    - cron: "5 8,14,21 * * *"
   workflow_dispatch: {}
 
 concurrency:
