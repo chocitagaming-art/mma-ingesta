@@ -153,23 +153,31 @@ def resolve_first_person_is_red(officials: ParsedOfficials, fight: TargetFight) 
     """:func:`first_person_is_red` without the positional default.
 
     source_id match first (exact, both are '/fighter-details/<hash>'), then
-    fuzzy names at IDENTITY_THRESHOLD. Returns None when the first person
-    can't be tied to either corner — callers whose DB corners do NOT come
-    from ufcstats page order (backfill_results' ufc.com bouts) must skip on
-    None instead of guessing, or every judge's scores could land swapped.
+    fuzzy names at IDENTITY_THRESHOLD — for the FIRST person, and, when that
+    fails, for the SECOND: tying either person orients the pair (first = the
+    other corner). The second tier is what saves the dropped-middle-name case
+    (bout 12859: page "Jose Delgado" vs DB "Jose Miguel Delgado" never ties,
+    but "Austin Bashi" ties exactly). Returns None when neither person can be
+    tied — callers whose DB corners do NOT come from ufcstats page order
+    (backfill_results' ufc.com bouts) must skip on None instead of guessing,
+    or every judge's scores could land swapped.
     """
     if len(officials.persons) < 2:
         return None
-    first_source, first_name = officials.persons[0]
-    if first_source:
-        if fight.red_source_id and first_source == fight.red_source_id:
-            return True
-        if fight.blue_source_id and first_source == fight.blue_source_id:
-            return False
-    if fight.red_name and fuzzy_match(first_name, fight.red_name, IDENTITY_THRESHOLD):
-        return True
-    if fight.blue_name and fuzzy_match(first_name, fight.blue_name, IDENTITY_THRESHOLD):
-        return False
+    for person_index, first_is_this_corner in ((0, True), (1, False)):
+        source, name = officials.persons[person_index]
+        if source:
+            if fight.red_source_id and source == fight.red_source_id:
+                return first_is_this_corner
+            if fight.blue_source_id and source == fight.blue_source_id:
+                return not first_is_this_corner
+        # A name that fuzzy-ties BOTH corners (homonym matchups: two "Bruno
+        # Silva"s have fought each other) proves nothing — skip this person
+        # instead of letting the red-first check order pick a side.
+        red_tie = bool(fight.red_name) and fuzzy_match(name, fight.red_name, IDENTITY_THRESHOLD)
+        blue_tie = bool(fight.blue_name) and fuzzy_match(name, fight.blue_name, IDENTITY_THRESHOLD)
+        if red_tie != blue_tie:
+            return first_is_this_corner if red_tie else not first_is_this_corner
     return None
 
 

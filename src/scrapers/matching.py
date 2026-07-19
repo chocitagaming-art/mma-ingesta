@@ -51,6 +51,7 @@ __all__ = [
     "ratio",
     "fold_ratio",
     "fuzzy_match",
+    "token_subset_match",
 ]
 
 # Canonical compromise cutoff for general-purpose name comparison.
@@ -113,6 +114,41 @@ def fold(name: str) -> str:
     plain ASCII "Jiri Prochazka".
     """
     return normalize_name(strip_accents(name))
+
+
+# Name particles and suffixes that carry no identity on their own: without
+# this list "da Silva" or "dos Anjos" would count as two shared tokens and a
+# bare compound surname could claim a fighter (fold() splits "." and "-", so
+# initials like "T.J." degrade to single letters too — hence the len >= 2 cut).
+_PARTICLE_TOKENS = frozenset({
+    "al", "da", "das", "de", "del", "der", "di", "do", "dos", "du", "el",
+    "ii", "iii", "jr", "la", "le", "los", "sr", "st", "van", "von",
+})
+
+
+def _significant_tokens(tokens: set[str]) -> set[str]:
+    return {token for token in tokens if len(token) >= 2 and token not in _PARTICLE_TOKENS}
+
+
+def token_subset_match(left: str, right: str) -> bool:
+    """True when one folded name's tokens are contained in the other's.
+
+    Covers the dropped-middle-name case ("Jose Delgado" vs "Jose Miguel
+    Delgado") that the ratio tiers miss: on names this short ``difflib``
+    scores it ~0.77, under every threshold above. Containment is exact per
+    token (accent/case folded via :func:`fold`), so spelling variants remain
+    a fuzzy-tier problem. The shared tokens must include at least two
+    SIGNIFICANT ones (length >= 2, not a name particle like "da"/"dos"/"jr"),
+    so a bare surname — simple ("Delgado"), compound ("da Silva", "dos
+    Anjos"), or a pair of split initials ("T.J.") — never claims a fighter.
+    Callers resolving against a POOL of candidates must ALSO keep their own
+    uniqueness guard: two "Jose … Delgado"s both contain "Jose Delgado".
+    """
+    left_tokens = set(fold(left).split())
+    right_tokens = set(fold(right).split())
+    if len(_significant_tokens(left_tokens & right_tokens)) < 2:
+        return False
+    return left_tokens <= right_tokens or right_tokens <= left_tokens
 
 
 def ratio(left: str, right: str) -> float:

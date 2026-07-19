@@ -53,6 +53,7 @@ from .config import get_settings
 from .db import connect
 from .enrich_ranked import _fold
 from .espn_live_results import ESPN_PROVISIONAL_METHODS
+from .matching import token_subset_match
 from .fight_officials import (
     TargetFight,
     insert_scorecard,
@@ -143,12 +144,39 @@ class _Bout:
     def key(self) -> frozenset[str]:
         return frozenset({_fold(self.red_name), _fold(self.blue_name)})
 
-    def fighter_id_for(self, name: str) -> int | None:
-        """Map a fighter NAME (from ufcstats) onto this bout's red/blue id."""
+    def corner_for(self, name: str) -> str | None:
+        """Map a fighter NAME (from ufcstats) onto this bout's corner label.
+
+        Exact folded equality first; then the token-subset fallback for the
+        dropped-middle-name divergence (bout 12859: page "Jose Delgado" vs DB
+        "Jose Miguel Delgado"), refusing ambiguity — a name contained in BOTH
+        corners maps to neither. Works on NAMES, never ids: a corner whose
+        fighter went unlinked at import (fighter_red_id NULL, a designed state
+        for debutants) still matches, so its bout can consolidate the
+        corner-agnostic fields (result, referee).
+        """
         folded = _fold(name)
         if folded == _fold(self.red_name):
-            return self.red_id
+            return "red"
         if folded == _fold(self.blue_name):
+            return "blue"
+        red_ok = token_subset_match(name, self.red_name)
+        blue_ok = token_subset_match(name, self.blue_name)
+        if red_ok != blue_ok:
+            return "red" if red_ok else "blue"
+        return None
+
+    def fighter_id_for(self, name: str) -> int | None:
+        """:meth:`corner_for` resolved to the corner's fighter id.
+
+        None both for "no corner matched" and "the matched corner's fighter is
+        unlinked" — callers that WRITE per-fighter rows (stats) need a real id
+        either way; bout-level matching uses :meth:`corner_for` instead.
+        """
+        corner = self.corner_for(name)
+        if corner == "red":
+            return self.red_id
+        if corner == "blue":
             return self.blue_id
         return None
 
@@ -273,20 +301,45 @@ def _winner_id_for(bout: _Bout, winner_name: str | None) -> int | None:
     """Map a winning fighter name onto this bout's red/blue id (corner-swap tolerant)."""
     if not winner_name:
         return None
-    winner = _fold(winner_name)
-    if _fold(bout.red_name) == winner:
-        return bout.red_id
-    if _fold(bout.blue_name) == winner:
-        return bout.blue_id
-    return None
+    return bout.fighter_id_for(winner_name)
+
+
+def _corners_match(bout: _Bout, fight: FightPageRecord) -> bool:
+    """Whether this ufcstats fight's two names cover the bout's two corners.
+
+    Corner-swap tolerant (ufcstats lists the winner first, which proves
+    nothing about our red/blue), and each page name must claim a DISTINCT
+    corner — one DB fighter covering both page names is never a match.
+    Compares corner LABELS, not fighter ids: an unlinked corner (id NULL)
+    must not veto the bout — the exact-key path never consulted ids either.
+    """
+    red = bout.corner_for(fight.red_name)
+    blue = bout.corner_for(fight.blue_name)
+    return red is not None and blue is not None and red != blue
+
+
+def _match_fight(bout: _Bout, fights: list[FightPageRecord]) -> FightPageRecord | None:
+    """Pick the ufcstats fight for a bout: exact folded pair, else unique subset.
+
+    The exact frozenset key is the historical fast path. When it misses
+    (ufcstats drops a middle name: bout 12859 "Jose Miguel Delgado" listed as
+    "Jose Delgado"), fall back to token-subset corner matching — accepting
+    only a UNIQUE candidate. Ambiguity stays unmatched rather than guessing:
+    writing another bout's stats would be far worse than writing none.
+    """
+    by_key: dict[frozenset[str], FightPageRecord] = {
+        frozenset({_fold(f.red_name), _fold(f.blue_name)}): f for f in fights
+    }
+    exact = by_key.get(bout.key())
+    if exact is not None:
+        return exact
+    candidates = [f for f in fights if _corners_match(bout, f)]
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _fill_event(connection, client, settings, event_id, bouts, detail_url, counts, dry_run):
     page = client.fetch(detail_url)
     fights = parse_event_fights(page.soup, settings)
-    by_key: dict[frozenset[str], FightPageRecord] = {
-        frozenset({_fold(f.red_name), _fold(f.blue_name)}): f for f in fights
-    }
     for bout in bouts:
         needs_result = bout.needs_result()
         needs_stats = not bout.has_stats or not bout.has_round_stats
@@ -295,7 +348,7 @@ def _fill_event(connection, client, settings, event_id, bouts, detail_url, count
         needs_officials = bout.needs_officials()
         if not needs_result and not needs_stats and not needs_officials:
             continue
-        fight = by_key.get(bout.key())
+        fight = _match_fight(bout, fights)
         if fight is None:
             counts["bouts_unmatched"] += 1
             LOGGER.info("  no ufcstats fight for %s vs %s", bout.red_name, bout.blue_name)

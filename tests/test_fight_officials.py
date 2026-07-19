@@ -205,6 +205,41 @@ def test_resolve_first_person_is_red_returns_none_when_unresolvable():
     assert resolve_first_person_is_red(officials, _fight()) is True
 
 
+def test_resolve_first_person_ties_the_second_person_when_first_fails():
+    # Real case (bout 12859): the page's FIRST person is "Jose Delgado" but the
+    # DB stores "Jose Miguel Delgado" — under fuzzy@0.92 a dropped middle name
+    # on a short name scores ~0.77 and never ties. The SECOND person ("Austin
+    # Bashi") ties exactly, which orients the pair just as well: first = the
+    # OTHER corner. Without this fallback the scorecards were skipped forever.
+    persons = _persons_block(
+        "http://ufcstats.com/fighter-details/aaa111", "Jose Delgado",
+        "http://ufcstats.com/fighter-details/bbb222", "Austin Bashi",
+    )
+    officials = parse_fight_officials(_soup(_details_page(persons, "Decision - Unanimous", JUDGE_ITEMS)))
+    bout = _fight(red_source_id=None, blue_source_id=None,
+                  red_name="Austin Bashi", blue_name="Jose Miguel Delgado")
+    assert resolve_first_person_is_red(officials, bout) is False
+    # Swapped corners: second person ties to blue -> first person IS red.
+    swapped = _fight(red_source_id=None, blue_source_id=None,
+                     red_name="Jose Miguel Delgado", blue_name="Austin Bashi")
+    assert resolve_first_person_is_red(officials, swapped) is True
+
+
+def test_resolve_skips_a_person_that_ties_both_corners():
+    # Homonym matchup (two "Bruno Silva"s HAVE fought each other): a name that
+    # fuzzy-ties BOTH corners proves nothing about orientation, so the strict
+    # resolver must return None (skip scorecards) instead of letting the
+    # red-first check order pick a side.
+    persons = _persons_block(
+        "http://ufcstats.com/fighter-details/ccc333", "Bruno Silva",
+        "http://ufcstats.com/fighter-details/ddd444", "Bruno Silva",
+    )
+    officials = parse_fight_officials(_soup(_details_page(persons, "Decision - Unanimous", JUDGE_ITEMS)))
+    bout = _fight(red_source_id=None, blue_source_id=None,
+                  red_name="Bruno Silva", blue_name="Bruno Silva")
+    assert resolve_first_person_is_red(officials, bout) is None
+
+
 # --------------------------------------------------------------------- write
 
 
