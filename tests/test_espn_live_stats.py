@@ -20,8 +20,10 @@ from src.scrapers.espn_live_stats import (
     parse_stat_values,
 )
 from src.scrapers.repositories.live_stats import (
+    delete_live_fight_stat_samples,
     delete_live_fight_stats,
     get_final_stats_fight_ids,
+    insert_live_fight_stat_sample,
     prune_live_fight_stats,
     upsert_live_fight_stats,
 )
@@ -452,3 +454,142 @@ def test_parse_scoreboard_carries_fine_status():
     assert live.status_name == "STATUS_END_OF_ROUND"
     assert live.status_detail == "End R2"
     assert (live.end_round, live.end_time) == (2, "2:37")
+
+
+# ------------------------------------- timeline del directo (migración 024)
+
+
+def test_insert_live_fight_stat_sample_copies_merged_row(fakedb):
+    # La muestra se copia de la fila viva YA FUSIONADA (misma transacción que
+    # el upsert) con las guardas EN SQL: sin stats o en walkouts (period 0) no
+    # hay fila, y una última muestra idéntica dedupea (el cron de respaldo
+    # live-results solapado con el bucle no duplica).
+    conn = fakedb.Connection(lambda sql, params=None: [("inserted",)])
+    written = insert_live_fight_stat_sample(conn, 11)
+    assert written == 1
+    sql, params = conn.cursors[0].executed[0]
+    flat = " ".join(sql.split())
+    assert "INSERT INTO live_fight_stat_samples" in flat
+    assert "FROM live_fight_stats lfs" in flat
+    assert "lfs.stats IS NOT NULL" in flat
+    # El merge del upsert convierte NULL||NULL en '{}': tampoco es muestra.
+    assert "lfs.stats <> '{}'::jsonb" in flat
+    assert "COALESCE(lfs.period, 0) >= 1" in flat
+    assert "NOT EXISTS" in flat and "LIMIT 1" in flat
+    assert "IS NOT DISTINCT FROM" in flat
+    # Hora REAL del insert, no transaction_timestamp (NOW()): la transacción
+    # por evento abarca los GETs a ESPN y un escritor solapado lento
+    # estamparía timestamps retroactivos que desordenan la serie.
+    assert "clock_timestamp()" in flat
+    assert "NOW()" not in flat
+    assert params == (11, 11)
+
+
+def test_delete_live_fight_stat_samples_by_fight_id(fakedb):
+    conn = fakedb.Connection(lambda sql, params=None: [])
+    delete_live_fight_stat_samples(conn, 11)
+    sql, params = conn.cursors[0].executed[0]
+    assert "DELETE FROM live_fight_stat_samples WHERE fight_id = %s" in " ".join(sql.split())
+    assert params == (11,)
+
+
+def _ordered_statements(conn):
+    """(sql_normalizado, params) en orden global de ejecución (cursor por
+    execute, así que el orden de conn.cursors ES el orden de ejecución)."""
+    return [
+        (" ".join(sql.split()), params)
+        for cur in conn.cursors
+        for sql, params in cur.executed
+    ]
+
+
+def test_process_events_appends_a_sample_after_each_upsert(fakedb):
+    conn = fakedb.Connection(_responder(final_ids_rows=[]))
+    session = _FakeSession({aid: STATS_PAYLOAD for aid in ESPN_TO_DB})
+    events = parse_scoreboard(_scoreboard_with_one_live_fight())
+    process_events(conn, events, promotion_id=1, dry_run=False, stats_session=session)
+    statements = _ordered_statements(conn)
+    samples = [
+        (i, params) for i, (sql, params) in enumerate(statements)
+        if "INSERT INTO live_fight_stat_samples" in sql
+    ]
+    upserts = {
+        params[0]: i for i, (sql, params) in enumerate(statements)
+        if "INSERT INTO live_fight_stats " in sql
+    }
+    # Una muestra por fila viva escrita (in Y post), SIEMPRE tras su upsert:
+    # copia el snapshot recién fusionado de esa misma pasada.
+    assert [params for _, params in samples] == [(11, 11), (12, 12)]
+    for i, params in samples:
+        assert i > upserts[params[0]]
+
+
+def test_sealed_fight_gets_no_more_samples(fakedb):
+    # La 12 ya está sellada (is_final): ni upsert ni muestra nueva — la serie
+    # termina en la muestra 'post' de la pasada del sellado.
+    conn = fakedb.Connection(_responder(final_ids_rows=[(12,)]))
+    session = _FakeSession({aid: STATS_PAYLOAD for aid in ESPN_TO_DB})
+    events = parse_scoreboard(_scoreboard_with_one_live_fight())
+    process_events(conn, events, promotion_id=1, dry_run=False, stats_session=session)
+    samples = [
+        params for sql, params in _ordered_statements(conn)
+        if "INSERT INTO live_fight_stat_samples" in sql
+    ]
+    assert samples == [(11, 11)]
+
+
+def test_cancelled_fight_deletes_its_sample_series_too(fakedb):
+    # Cancelada a mitad de evento: se borra la fila viva Y su serie de
+    # muestras (mismo criterio que delete_live_fight_stats).
+    conn = fakedb.Connection(_responder(final_ids_rows=[]))
+    session = _FakeSession({aid: STATS_PAYLOAD for aid in ESPN_TO_DB})
+    events = parse_scoreboard(_scoreboard_with_cancelled_fight())
+    process_events(conn, events, promotion_id=1, dry_run=False, stats_session=session)
+    deletes = [
+        params for sql, params in _ordered_statements(conn)
+        if "DELETE FROM live_fight_stat_samples WHERE fight_id" in sql
+    ]
+    assert (12,) in deletes
+
+
+def _scoreboard_with_suspended_fight():
+    board = _scoreboard_with_one_live_fight()
+    suspended = board["events"][0]["competitions"][1]
+    suspended["status"]["type"] = {
+        "name": "STATUS_SUSPENDED", "state": "post", "completed": False,
+        "description": "Suspended", "detail": "Suspended", "shortDetail": "Susp",
+    }
+    suspended["details"] = []
+    suspended["competitors"][0]["winner"] = False
+    return board
+
+
+def test_suspended_fight_keeps_its_sample_series(fakedb):
+    # Suspensión = interrupción REANUDABLE: el snapshot se borra (autorrepara)
+    # pero la serie histórica NO — borrarla amputaría la película para siempre.
+    conn = fakedb.Connection(_responder(final_ids_rows=[]))
+    session = _FakeSession({aid: STATS_PAYLOAD for aid in ESPN_TO_DB})
+    events = parse_scoreboard(_scoreboard_with_suspended_fight())
+    counts = process_events(conn, events, promotion_id=1, dry_run=False, stats_session=session)
+    assert counts["live_stats_cancelled"] == 1
+    statements = _ordered_statements(conn)
+    snapshot_deletes = [
+        params for sql, params in statements
+        if "DELETE FROM live_fight_stats WHERE fight_id" in sql
+    ]
+    series_deletes = [
+        params for sql, params in statements
+        if "DELETE FROM live_fight_stat_samples WHERE fight_id" in sql
+    ]
+    assert (12,) in snapshot_deletes
+    assert series_deletes == []
+
+
+def test_dry_run_writes_no_samples(fakedb):
+    conn = fakedb.Connection(_responder(final_ids_rows=[]))
+    session = _FakeSession({aid: STATS_PAYLOAD for aid in ESPN_TO_DB})
+    events = parse_scoreboard(_scoreboard_with_one_live_fight())
+    process_events(conn, events, promotion_id=1, dry_run=True, stats_session=session)
+    assert not any(
+        "live_fight_stat_samples" in sql for sql, _ in _ordered_statements(conn)
+    )

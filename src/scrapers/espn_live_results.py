@@ -75,8 +75,10 @@ from .repositories.events import find_existing_event_id
 from .repositories.fighters import get_all_fighters, get_fighter_id_by_source
 from .repositories.fights import fill_fight_result, find_fight_id_by_fighters
 from .repositories.live_stats import (
+    delete_live_fight_stat_samples,
     delete_live_fight_stats,
     get_final_stats_fight_ids,
+    insert_live_fight_stat_sample,
     prune_live_fight_stats,
     upsert_live_fight_stats,
 )
@@ -119,6 +121,16 @@ def is_cancelled_status(status_name: str | None) -> bool:
         return False
     upper = status_name.upper()
     return any(marker in upper for marker in _CANCELLED_STATUS_MARKERS)
+
+
+def is_suspended_status(status_name: str | None) -> bool:
+    """¿Suspensión (interrupción REANUDABLE en la taxonomía de ESPN)?
+
+    Para el snapshot da igual (borrar era autorreparable), pero la SERIE de
+    muestras (timeline, mig. 024) es histórica e irrecuperable: una pelea
+    suspendida y reanudada no debe perder su primera mitad (revisión 19-jul).
+    """
+    return bool(status_name) and "SUSPEND" in status_name.upper()
 
 
 @dataclass(frozen=True)
@@ -404,6 +416,12 @@ def _process_live_stats(
             counts["live_stats_cancelled"] += 1
             if not dry_run:
                 delete_live_fight_stats(connection, fight_id)
+                # Timeline (024): la serie de una cancelada tampoco se pinta.
+                # EXCEPTO en suspensiones: son reanudables y borrar la serie
+                # amputaría la película para siempre (el snapshot sí se borra,
+                # es autorreparable en la siguiente pasada).
+                if not is_suspended_status(fight.status_name):
+                    delete_live_fight_stat_samples(connection, fight_id)
             continue
         if fight_id in final_ids:
             counts["live_stats_skipped_final"] += 1
@@ -437,6 +455,11 @@ def _process_live_stats(
             fight.end_round, fight.end_time, stats, is_final,
         )
         counts["live_stats_written"] += 1
+        # Timeline del directo (024): tras cada upsert, la fila FUSIONADA se
+        # copia como muestra append-only (dedup + guardas en el propio SQL).
+        counts["live_samples_written"] += insert_live_fight_stat_sample(
+            connection, fight_id
+        )
 
 
 def process_events(
@@ -539,7 +562,7 @@ SUMMARY_KEYS = [
     "fights_updated", "fights_already_filled", "fights_pending",
     "fights_no_winner", "fights_unmatched", "fighters_unresolved", "event_errors",
     "live_stats_written", "live_stats_skipped_final", "live_stats_unresolved",
-    "live_stats_cancelled",
+    "live_stats_cancelled", "live_samples_written",
 ]
 
 
