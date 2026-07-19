@@ -6,6 +6,8 @@ model.joblib. We deliberately build the TestClient WITHOUT the `with` block so t
 lifespan (which opens the pool and eager-loads the model) never fires.
 """
 
+import importlib
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -111,6 +113,40 @@ def test_health_ok_when_model_and_db_ready(client, monkeypatch):
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+@pytest.fixture
+def client_for_env(monkeypatch):
+    """Build a TestClient with PREDICTION_ENV set (or cleared with None) BEFORE the
+    app exists: docs/openapi exposure is decided when the FastAPI app is created,
+    so the module must be reloaded for the env var to take effect."""
+
+    def _build(env):
+        if env is None:
+            monkeypatch.delenv("PREDICTION_ENV", raising=False)
+        else:
+            monkeypatch.setenv("PREDICTION_ENV", env)
+        importlib.reload(service)
+        return TestClient(service.app)
+
+    yield _build
+    # Rebuild the module-level app without the patched env so later tests see the
+    # normal dev app (docs enabled) again.
+    monkeypatch.delenv("PREDICTION_ENV", raising=False)
+    importlib.reload(service)
+
+
+def test_docs_and_openapi_closed_in_production(client_for_env):
+    prod_client = client_for_env("production")
+    assert prod_client.get("/docs").status_code == 404
+    assert prod_client.get("/redoc").status_code == 404
+    assert prod_client.get("/openapi.json").status_code == 404
+
+
+def test_docs_and_openapi_open_outside_production(client_for_env):
+    dev_client = client_for_env(None)
+    assert dev_client.get("/docs").status_code == 200
+    assert dev_client.get("/openapi.json").status_code == 200
 
 
 def test_health_unhealthy_when_db_unreachable(client, monkeypatch):

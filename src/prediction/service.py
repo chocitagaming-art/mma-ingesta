@@ -24,7 +24,9 @@ every time. Set the TTL to 0 to always reload.
 Auth: if an API key is configured (PREDICTION_API_KEY or PREDICTION_SERVICE_API_KEY),
 requests must send a matching X-API-Key header (compared with hmac.compare_digest). When
 PREDICTION_ENV is production/prod the service fails fast at startup unless a key is set;
-dev/local runs stay open when no key is configured.
+dev/local runs stay open when no key is configured. In production the interactive docs
+(/docs, /redoc) and /openapi.json are disabled; outside production they stay available
+as a dev tool.
 """
 
 from __future__ import annotations
@@ -110,8 +112,17 @@ async def _lifespan(_app: FastAPI):
         close_pool()
 
 
+def _docs_kwargs() -> dict[str, Any]:
+    """Interactive docs are a dev tool: in production the service is API-key-only,
+    so /docs, /redoc and /openapi.json are not exposed (same env source of truth
+    as the startup fail-fast: PREDICTION_ENV)."""
+    if _is_production():
+        return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    return {}
+
+
 app = FastAPI(
-    title="MMA Prediction Service", version="1.0.0", lifespan=_lifespan
+    title="MMA Prediction Service", version="1.0.0", lifespan=_lifespan, **_docs_kwargs()
 )
 
 # In-process caches: the model never changes at runtime; dataframes refresh on a TTL.
