@@ -80,7 +80,7 @@ def test_compute_top_features_returns_signed_contributions():
     model = _train_tiny_model(feature_columns)
     transformed_row = np.array([[2.5, 0.1, -0.2, 0.0, 0.3, -0.1]])
 
-    top = _compute_top_features(model, feature_columns, transformed_row)
+    top, contributions = _compute_top_features(model, feature_columns, transformed_row, -transformed_row)
 
     assert 1 <= len(top) <= 5
     for item in top:
@@ -95,7 +95,54 @@ def test_compute_top_features_returns_signed_contributions():
     assert "f0_diff" in by_name
     assert by_name["f0_diff"]["direction"] == "red"
     assert by_name["f0_diff"]["value"] == pytest.approx(2.5)
+    # The full map covers every feature and agrees with the ranked entries.
+    assert set(contributions) == set(feature_columns)
+    for item in top:
+        assert contributions[item["name"]] == pytest.approx(item["contribution"])
+
+
+def test_attribution_mirrors_exactly_under_corner_swap():
+    # predict(B, A) transforms to exactly the negated row (all features are
+    # *_diff), so the symmetrized attribution must be the exact mirror: same
+    # ranking by magnitude, every contribution negated, directions flipped.
+    feature_columns = [f"f{i}_diff" for i in range(6)]
+    model = _train_tiny_model(feature_columns)
+    forward = np.array([[2.5, 0.1, -0.2, 0.0, 0.3, -0.1]])
+    swapped = -forward
+
+    top_ab, contrib_ab = _compute_top_features(model, feature_columns, forward, swapped)
+    top_ba, contrib_ba = _compute_top_features(model, feature_columns, swapped, forward)
+
+    assert [item["name"] for item in top_ab] == [item["name"] for item in top_ba]
+    for ab, ba in zip(top_ab, top_ba):
+        assert ba["contribution"] == pytest.approx(-ab["contribution"])
+        assert ba["value"] == pytest.approx(-ab["value"])
+        if ab["contribution"] != 0:
+            assert {ab["direction"], ba["direction"]} == {"red", "blue"}
+    for name in feature_columns:
+        assert contrib_ba[name] == pytest.approx(-contrib_ab[name])
+
+
+def test_attribution_sums_to_symmetrized_margin():
+    # Bias cancels under symmetrization, so the contributions add up EXACTLY to
+    # the symmetrized raw margin (log-odds) — the property that lets the UI draw
+    # a "rest of factors" bar that closes the balance.
+    import xgboost as xgb_module
+
+    feature_columns = [f"f{i}_diff" for i in range(6)]
+    model = _train_tiny_model(feature_columns)
+    forward = np.array([[2.5, 0.1, -0.2, 0.0, 0.3, -0.1]])
+    swapped = -forward
+
+    _, contributions = _compute_top_features(model, feature_columns, forward, swapped)
+
+    booster = model.get_booster()
+    margin_fwd = float(booster.predict(xgb_module.DMatrix(forward), output_margin=True)[0])
+    margin_swp = float(booster.predict(xgb_module.DMatrix(swapped), output_margin=True)[0])
+    assert sum(contributions.values()) == pytest.approx((margin_fwd - margin_swp) / 2.0, abs=1e-5)
 
 
 def test_compute_top_features_empty_without_booster():
-    assert _compute_top_features(object(), ["f0_diff"], np.array([[1.0]])) == []
+    top, contributions = _compute_top_features(object(), ["f0_diff"], np.array([[1.0]]), np.array([[-1.0]]))
+    assert top == []
+    assert contributions is None

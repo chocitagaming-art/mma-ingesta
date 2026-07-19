@@ -308,27 +308,11 @@ def _build_feature_row(
     return feature_row, context, low_confidence
 
 
-def _compute_top_features(
-    model: Any,
-    feature_columns: list[str],
-    transformed_row: np.ndarray,
-) -> list[dict[str, Any]]:
-    """Signed, per-prediction feature attributions from the XGBoost booster.
-
-    ``booster.predict(..., pred_contribs=True)`` returns, for each feature, its
-    additive contribution to the raw margin (the log-odds that *red* wins) plus a
-    trailing bias term. A positive contribution pushes the prediction toward red,
-    a negative one toward blue. We rank by absolute contribution and report the
-    top five, each with its signed contribution, direction, and the (imputed)
-    value the model actually saw for that feature.
-
-    Informative only: this explains the frozen base model's margin and does not
-    change the returned probability, which comes from the monotonic calibrator.
-    Because the calibrator is monotonic in that margin, the sign/direction stays
-    valid for the calibrated probability too."""
+def _raw_contributions(model: Any, transformed_row: np.ndarray) -> np.ndarray | None:
+    """TreeSHAP contributions of one transformed row (bias column dropped)."""
     get_booster = getattr(model, "get_booster", None)
     if get_booster is None:
-        return []
+        return None
     import xgboost as xgb
 
     booster = get_booster()
@@ -339,10 +323,45 @@ def _compute_top_features(
     # column order (= FEATURE_COLUMNS order), so we map back by index below.
     dmatrix = xgb.DMatrix(transformed_row, feature_names=booster.feature_names)
     # Shape (1, n_features + 1); the trailing column is the bias term, dropped here.
-    contributions = booster.predict(dmatrix, pred_contribs=True)[0]
+    return booster.predict(dmatrix, pred_contribs=True)[0][:-1]
+
+
+def _compute_top_features(
+    model: Any,
+    feature_columns: list[str],
+    transformed_row: np.ndarray,
+    swapped_transformed_row: np.ndarray,
+) -> tuple[list[dict[str, Any]], dict[str, float] | None]:
+    """SYMMETRIZED per-prediction feature attributions from the XGBoost booster.
+
+    ``booster.predict(..., pred_contribs=True)`` is TreeSHAP: each feature's
+    additive contribution to the raw margin (the log-odds that *red* wins). The
+    served probability is the corner-symmetrized average, so a single forward
+    pass would not mirror under a corner swap; averaging the forward
+    contributions with the NEGATED swapped-row contributions does —
+    attribution(A, B) == -attribution(B, A) feature by feature, matching the
+    probability identity. The bias term cancels in that average, so the
+    symmetrized contributions sum EXACTLY to the symmetrized margin: the UI can
+    close the balance with a "rest of factors" bar.
+
+    Returns the ranked top five (signed contribution, direction, and the
+    (imputed) forward value the model actually saw) plus the FULL name ->
+    contribution map (None when the estimator has no booster).
+
+    Informative only: this explains the frozen base model's margin and does not
+    change the returned probability, which comes from the monotonic calibrator.
+    Because the calibrator is monotonic in that margin, the sign/direction stays
+    valid for the calibrated probability too."""
+    forward = _raw_contributions(model, transformed_row)
+    if forward is None:
+        return [], None
+    swapped = _raw_contributions(model, swapped_transformed_row)
+    symmetrized = (forward - swapped) / 2.0
+    contributions_map: dict[str, float] = {}
     ranked: list[dict[str, Any]] = []
     for index, feature_name in enumerate(feature_columns):
-        contribution = float(contributions[index])
+        contribution = float(symmetrized[index])
+        contributions_map[feature_name] = contribution
         ranked.append(
             {
                 "name": feature_name,
@@ -352,7 +371,7 @@ def _compute_top_features(
             }
         )
     ranked.sort(key=lambda item: abs(item["contribution"]), reverse=True)
-    return ranked[:5]
+    return ranked[:5], contributions_map
 
 
 def _swap_corners(feature_row: dict[str, float | int | None]) -> dict[str, float | int | None]:
@@ -428,18 +447,21 @@ def predict(
     # exactly, so predict(A, B) and predict(B, A) sum to 1. Both terms pass
     # through the same estimator, so calibration keeps this identity.
     forward_red_prob, transformed = _red_win_probability(feature_row, imputer, proba_estimator, feature_columns)
-    swapped_red_prob, _ = _red_win_probability(
+    swapped_red_prob, swapped_transformed = _red_win_probability(
         _swap_corners(feature_row), imputer, proba_estimator, feature_columns
     )
     red_probability = (forward_red_prob + (1.0 - swapped_red_prob)) / 2.0
     blue_probability = 1.0 - red_probability
-    top_features = _compute_top_features(model, feature_columns, transformed)
+    top_features, feature_contributions = _compute_top_features(
+        model, feature_columns, transformed, swapped_transformed
+    )
     profiles = _load_fighter_profiles(settings.database_url, [red_fighter_id, blue_fighter_id])
 
     return {
         "redProbability": red_probability,
         "blueProbability": blue_probability,
         "topFeatures": top_features,
+        "featureContributions": feature_contributions,
         "featureValues": feature_row,
         "context": context,
         "lowConfidence": low_confidence,

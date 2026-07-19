@@ -20,6 +20,7 @@ def _fake_predict(low_confidence: bool = False):
             "redProbability": 0.6,
             "blueProbability": 0.4,
             "topFeatures": [],
+            "featureContributions": {},
             "featureValues": {},
             "context": {"lowConfidence": low_confidence},
             "lowConfidence": low_confidence,
