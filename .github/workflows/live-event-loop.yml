@@ -73,3 +73,14 @@ jobs:
           fi
           echo "python -m src.scrapers.espn_live_results $ARGS"
           python -m src.scrapers.espn_live_results $ARGS
+
+      - name: Consolidacion oportunista post-ventana (best-effort)
+        # Primer tiro de backfill_results al cerrar la ventana del loop: si ufcstats
+        # ya publico peleas tempranas del card, las consolida ~horas antes que el
+        # cron consolidate-results. Idempotente y best-effort: si ufcstats aun esta
+        # vacio o algo falla, no tumba el workflow (el cron escalonado lo cubre).
+        if: always()
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m src.scrapers.backfill_results

@@ -1,0 +1,39 @@
+name: Consolidate results (post-event)
+
+# Baja la latencia de la consolidación OFICIAL de un evento (árbitro + tarjetas de
+# jueces + fight_stats + fight_stats_rounds, todo desde ufcstats) de ~24 h a ~3-8 h.
+# Antes esto solo ocurría como último paso del cron diario refresh-upcoming (06:00
+# UTC), que cae ENCIMA del estelar cuando ufcstats aún no ha publicado → la
+# consolidación real llegaba al día siguiente. backfill_results es idempotente
+# (COALESCE + upsert ON CONFLICT, ventana de 60 días), así que estas pasadas
+# escalonadas solo SUMAN lo que ufcstats ya haya publicado (unas peleas antes que
+# otras). El cron diario refresh-upcoming se mantiene como red de seguridad para
+# cards atípicos y para el árbitro/tarjetas que ufcstats publica días después.
+on:
+  schedule:
+    - cron: "0 8 * * 0" # Dom 08:00 UTC (~2-3 h tras el cierre del main card US)
+    - cron: "0 11 * * 0" # reintento: stats que llegaron tarde
+    - cron: "0 15 * * 0" # reintento: peleas lentas de ufcstats
+    - cron: "0 8 * * 6" # Sáb 08:00 UTC (cards de viernes noche US)
+  workflow_dispatch: {}
+
+concurrency:
+  group: consolidate-results # grupo propio: no bloquea a refresh-upcoming
+  cancel-in-progress: false
+
+jobs:
+  consolidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+      - run: pip install -r requirements-scrapers.txt
+      - name: Consolidar oficiales desde ufcstats
+        run: python -m src.scrapers.backfill_results
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

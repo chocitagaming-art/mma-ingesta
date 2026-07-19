@@ -1,0 +1,36 @@
+name: Keepalive commit
+
+# GitHub DESACTIVA los workflows programados de un repo tras 60 días sin
+# commits/pushes. Ejecutar workflows NO reinicia ese contador — solo los commits.
+# Este job escribe un timestamp y hace commit+push cada ~10 días para mantener el
+# repo "activo" y que los ~24 crons de datos (y los keepalive de Render/monitor)
+# no se apaguen solos. Con esto la página puede quedarse MESES sin mantenimiento
+# sin que la ingesta muera. El commit lleva [skip ci]: el push ya cuenta como
+# actividad del repo aunque no dispare workflows, así que no gastamos un run de CI.
+on:
+  schedule:
+    - cron: "0 3 1,11,21 * *" # días 1, 11 y 21 de cada mes (~10 días << 60)
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: keepalive-commit
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Commit de mantenimiento
+        run: |
+          mkdir -p .github
+          date -u +'%Y-%m-%dT%H:%M:%SZ' > .github/last-keepalive.txt
+          git config user.name "keepalive-bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/last-keepalive.txt
+          git commit -m "chore: keepalive — mantener los crons vivos [skip ci]" || { echo "sin cambios, nada que hacer"; exit 0; }
+          git push origin HEAD:main

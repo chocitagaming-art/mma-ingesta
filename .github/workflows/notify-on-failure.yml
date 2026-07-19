@@ -1,0 +1,64 @@
+name: Notify on cron failure
+
+# Los crons de DATOS no avisaban si fallaban: espn-history estuvo roto 5 días en
+# silencio (bug SQL) sin que nadie se enterara. Este workflow se dispara cuando
+# cualquiera de los crons de datos TERMINA; si su conclusión es 'failure', abre
+# (o comenta en) UN único Issue con la etiqueta 'cron-failure' → GitHub le manda
+# el email al dueño. Anti-spam: reutiliza el Issue abierto. No lo cierra solo (el
+# dueño lo cierra al arreglar). Nota: workflow_run solo actúa desde la rama
+# default (main). Los nombres deben coincidir EXACTO con el `name:` de cada
+# workflow vigilado.
+on:
+  workflow_run:
+    workflows:
+      - "Refresh upcoming events"
+      - "Refresh rankings"
+      - "Refresh odds"
+      - "Refresh news"
+      - "Refresh fighter records"
+      - "Refresh fight officials"
+      - "Refresh fight bonuses"
+      - "Refresh weigh-ins"
+      - "Enrich full-body photos"
+      - "Enrich headshots (ufc.com)"
+      - "Enrich fighter facts (ufc.com)"
+      - "Enrich athlete finish stats"
+      - "ESPN fight history"
+      - "Match face-off videos"
+      - "Refresh gyms (OSM)"
+      - "Backfill standing photos"
+      - "Backfill cards"
+      - "Consolidate results (post-event)"
+    types: [completed]
+
+permissions:
+  issues: write
+  actions: read
+
+concurrency:
+  group: notify-on-failure
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    # Solo si el workflow vigilado ACABÓ EN FALLO.
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      WF_NAME: ${{ github.event.workflow_run.name }}
+      WF_URL: ${{ github.event.workflow_run.html_url }}
+    steps:
+      - name: Abrir o comentar Issue de fallo
+        run: |
+          STAMP=$(date -u +'%Y-%m-%d %H:%M UTC')
+          BODY=$(printf '⛔ **%s** — el workflow **%s** ha fallado.\n\n[Ver el run](%s)\n\n_(Alerta automática de crons de datos. Revisa el run, arréglalo y cierra este Issue.)_' "$STAMP" "$WF_NAME" "$WF_URL")
+          ISSUE=$(gh issue list --repo "$REPO" --label cron-failure --state open --json number --jq '.[0].number // empty')
+          if [ -n "$ISSUE" ]; then
+            gh issue comment "$ISSUE" --repo "$REPO" --body "$BODY"
+          else
+            gh label create cron-failure --repo "$REPO" --color D73A4A --description "Un cron de datos ha fallado" --force
+            gh issue create --repo "$REPO" --title "🔴 Cron de datos fallando" --label cron-failure --body "$BODY"
+          fi

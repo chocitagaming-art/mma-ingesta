@@ -9,9 +9,13 @@ name: Capture live ESPN samples (recon)
 # domingo UTC). Si no hay cartelera ese día, el guard sale en segundos.
 # >>> Desactivar este workflow cuando la página "En vivo" esté diseñada. <<<
 on:
-  schedule:
-    - cron: "50 20 * * 6"
-    - cron: "50 0 * * 0"
+  # >>> RECON CUMPLIDO — schedule DESACTIVADO (2026-07-19). La página "En vivo" ya
+  # está diseñada y en producción, así que ya no hace falta capturar muestras cada
+  # fin de semana. Se mantiene workflow_dispatch por si hiciera falta recapturar a
+  # mano. Para re-activar, descomenta el schedule. <<<
+  # schedule:
+  #   - cron: "50 20 * * 6"
+  #   - cron: "50 0 * * 0"
   workflow_dispatch:
     inputs:
       duration_minutes:
