@@ -2,10 +2,14 @@
 
 ESPN Deportes / ufcespanol.com block on TLS fingerprint, so production must use
 curl_cffi's Chrome impersonation when the package is installed — and fall back
-to plain requests (browser headers intact) when it is not, because CI's unit
-env (requirements.txt) does not carry curl_cffi. Both paths and the lazy
-import seam are exercised here with fakes, so the suite passes identically
+to plain requests (browser headers intact) when it is not. Both paths and the
+lazy import seam are exercised here with fakes, so the suite passes identically
 with and without curl_cffi installed.
+
+CI now installs requirements-scrapers.txt (the file the 23 scraper crons run
+on, and the only one carrying curl_cffi), so the real package is importable
+there too — see the smoke test at the bottom, which is what would catch a pin
+that stopped resolving.
 """
 
 import builtins
@@ -173,3 +177,18 @@ def test_check_status_false_returns_error_response(monkeypatch):
     response = http_browser.fetch_url("https://example.com/rss", check_status=False)
 
     assert response.status_code == 403
+
+
+def test_curl_cffi_realmente_importable_si_esta_instalado():
+    """Smoke: the REAL package loads, with no fakes in the way.
+
+    Everything above runs on doubles, so a curl_cffi pin that stopped resolving
+    would leave this suite green while all 23 scraper crons died — ESPN Deportes
+    and ufcespanol block on TLS fingerprint and need the impersonation. CI
+    installs requirements-scrapers.txt, so there this asserts for real; on a
+    machine without it, it skips.
+    """
+    curl = http_browser._load_curl_cffi()
+    if curl is None:
+        pytest.skip("curl_cffi no instalado (entorno sin requirements-scrapers.txt)")
+    assert hasattr(curl, "get"), "curl_cffi cargó pero no expone .get()"

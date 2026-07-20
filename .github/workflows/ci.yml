@@ -26,15 +26,22 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-service.txt
+            requirements-scrapers.txt
             requirements-dev.txt
       - name: Install dependencies
         # requirements.txt covers the scraper + ML stack; requirements-service.txt
         # adds fastapi/joblib needed by the prediction-service tests; -dev adds the
         # test runner + linter. `from src... import` resolves via pythonpath=["."]
         # in pyproject.toml, so the package itself doesn't need to be installed.
+        #
+        # requirements-scrapers.txt is what the 23 scraper crons actually run on,
+        # and it is the ONLY one carrying curl_cffi — the Chrome TLS-fingerprint
+        # impersonation that ESPN Deportes and ufcespanol need. It was missing
+        # here, so a pinned version that stopped resolving (new Python, no wheel)
+        # would have taken every scraper cron down with CI still green.
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt -r requirements-service.txt -r requirements-dev.txt
+          pip install -r requirements.txt -r requirements-service.txt -r requirements-scrapers.txt -r requirements-dev.txt
       - name: Lint — bugs reales (BLOQUEANTE)
         # F7: la categoria F de ruff (imports sin usar, nombres indefinidos,
         # variables sin usar, f-strings sin placeholder...) SI bloquea, ahora
