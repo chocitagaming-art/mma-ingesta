@@ -17,6 +17,22 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      # Postgres de usar y tirar para los tests de integración. NO hace falta el
+      # esquema de producción: test_db_pool solo hace SELECT pg_backend_pid() y
+      # test_upcoming_fmid_dedup crea su propia TEMP TABLE que sombrea `fights`.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mma_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -53,3 +69,23 @@ jobs:
         run: ruff check src/ tests/ || true
       - name: Run tests
         run: python -m pytest tests/ -q
+
+      - name: Tests de integración contra Postgres
+        # A propósito NO se exporta DATABASE_URL al paso anterior: hay 12 ficheros
+        # de test que miran esa variable y algunos esperan datos REALES, así que
+        # ponerla global despertaría tests que fallarían contra una base vacía.
+        # Aquí se apunta solo a los dos que necesitan un Postgres de verdad.
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/mma_test
+        run: |
+          set -euo pipefail
+          output=$(python -m pytest tests/test_db_pool.py tests/test_upcoming_fmid_dedup.py -v -rs)
+          echo "$output"
+          # Estos tests se auto-saltan si falta DATABASE_URL. Un "skipped" aquí
+          # significaría que el servicio de Postgres no llegó, y el paso pasaría
+          # en verde sin haber comprobado NADA — que es justo el agujero que
+          # este paso viene a tapar.
+          if echo "$output" | grep -qE '[0-9]+ skipped'; then
+            echo "::error::Los tests de integración se saltaron pese a haber un Postgres levantado."
+            exit 1
+          fi
