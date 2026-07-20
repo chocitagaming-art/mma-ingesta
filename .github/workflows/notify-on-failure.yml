@@ -45,6 +45,9 @@ on:
       - "Live event loop (ESPN)"
       - "Live results (ESPN)"
       - "QA data coverage"
+      # Si el despliegue del microservicio falla, la web se queda sirviendo el
+      # modelo anterior sin dar ningún error: fallo silencioso de manual.
+      - "Deploy prediction service (Render)"
     types: [completed]
 
 permissions:

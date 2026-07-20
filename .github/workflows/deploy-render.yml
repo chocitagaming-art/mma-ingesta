@@ -1,0 +1,115 @@
+name: Deploy prediction service (Render)
+
+# El Auto-Deploy de Render NO es de fiar: el 20-jul estaba en ON (confirmado por
+# su API: autoDeploy=yes, repo y rama correctos, sin buildFilter ni rootDir) y
+# aun así el push de 11e51a3 no disparó nada — la lista de eventos del servicio
+# no registró siquiera haberse enterado del push. Hubo que desplegar a mano.
+#
+# Este workflow quita a Render de la ecuación: el despliegue lo lanza GitHub por
+# API, espera a que quede vivo y comprueba /health. Ventajas sobre la
+# integración: es auditable (sale en Actions), falla ruidosamente si algo va mal
+# (y notify-on-failure abre un Issue), y solo despliega cuando cambia algo que
+# el servicio realmente ejecuta, en vez de en cada push de scrapers.
+#
+# ⚠️ Si algún día vuelve a funcionar el Auto-Deploy de Render, APÁGALO en su
+# panel: con los dos activos se lanzarían dos despliegues por push.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # El Dockerfile copia src/ entero, pero de todo eso el servicio solo
+      # ejecuta estas rutas (verificado siguiendo los imports de service.py y
+      # api.py). Un cambio en, digamos, src/scrapers/refresh_news.py cambia la
+      # imagen pero no lo que sirve /predict, así que no merece un despliegue.
+      - "src/prediction/**"
+      - "src/scrapers/config.py"
+      - "src/scrapers/db.py"
+      - "requirements-service.txt"
+      - "Dockerfile"
+      - ".github/workflows/deploy-render.yml"
+  workflow_dispatch:
+    inputs:
+      clear_cache:
+        description: "Limpiar la caché de build (más lento; para cuando el build sale raro)"
+        type: boolean
+        default: false
+
+concurrency:
+  # Nunca dos despliegues a la vez sobre el mismo servicio. No se cancela el que
+  # está en marcha: abortar un deploy a medias deja el servicio en un estado peor
+  # que dejarlo terminar.
+  group: deploy-render
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+      SERVICE_ID: srv-d94lfh28qa3s73cuml3g
+      SERVICE_URL: https://mma-prediction.onrender.com
+      CLEAR_CACHE: ${{ inputs.clear_cache && 'clear' || 'do_not_clear' }}
+    steps:
+      - name: Lanzar el despliegue
+        id: trigger
+        run: |
+          set -euo pipefail
+          response=$(curl -sS -X POST \
+            -H "Authorization: Bearer $RENDER_API_KEY" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d "{\"clearCache\":\"$CLEAR_CACHE\"}" \
+            "https://api.render.com/v1/services/$SERVICE_ID/deploys")
+          deploy_id=$(echo "$response" | jq -r '.id // empty')
+          if [ -z "$deploy_id" ]; then
+            echo "::error::Render no devolvió un id de despliegue. Respuesta: $response"
+            exit 1
+          fi
+          echo "deploy_id=$deploy_id" >> "$GITHUB_OUTPUT"
+          echo "Despliegue lanzado: $deploy_id"
+
+      - name: Esperar a que quede vivo
+        run: |
+          set -euo pipefail
+          deploy_id="${{ steps.trigger.outputs.deploy_id }}"
+          # El plan free tarda ~1-2 min en un build normal; 20 min de margen
+          # cubre un build sin caché sin dejar el job colgado si Render se atasca.
+          for attempt in $(seq 1 80); do
+            status=$(curl -sS \
+              -H "Authorization: Bearer $RENDER_API_KEY" \
+              -H "Accept: application/json" \
+              "https://api.render.com/v1/services/$SERVICE_ID/deploys/$deploy_id" \
+              | jq -r '.status // "unknown"')
+            echo "[$attempt] $status"
+            case "$status" in
+              live)
+                echo "Despliegue vivo."
+                exit 0
+                ;;
+              build_failed|update_failed|canceled|pre_deploy_failed)
+                echo "::error::El despliegue terminó en '$status'. Mira los logs en el panel de Render."
+                exit 1
+                ;;
+            esac
+            sleep 15
+          done
+          echo "::error::Se agotó la espera (20 min) y el despliegue sigue sin estar vivo."
+          exit 1
+
+      - name: Comprobar que el servicio responde
+        run: |
+          set -euo pipefail
+          # Reintentos porque justo tras quedar 'live' la primera petición puede
+          # pillar el arranque del contenedor.
+          for attempt in $(seq 1 10); do
+            code=$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 60 "$SERVICE_URL/health" || echo "000")
+            echo "[$attempt] /health -> $code $(cat /tmp/health.json 2>/dev/null)"
+            if [ "$code" = "200" ]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::El servicio quedó desplegado pero /health no responde 200."
+          exit 1
