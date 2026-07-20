@@ -22,14 +22,29 @@ on:
       - "Enrich full-body photos"
       - "Enrich headshots (ufc.com)"
       - "Enrich fighter facts (ufc.com)"
-      - "Enrich athlete finish stats"
-      - "ESPN fight history"
+      # Estos dos nombres estaban INCOMPLETOS y por tanto no casaban con ningún
+      # workflow: llevaban desde su alta sin vigilar de verdad (el fallo de
+      # espn-history del 14-jul pasó en silencio, y la lista de Issues con
+      # etiqueta 'cron-failure' estaba vacía). Los sufijos son obligatorios.
+      - "Enrich athlete finish stats (ufc.com)"
+      - "ESPN fight history (Bellator/regionales)"
+      # Su fallo es raro pero caro: si deja de commitear, GitHub desactiva TODOS
+      # los crons del repo a los 60 días de inactividad.
+      - "Keepalive commit"
       - "Match face-off videos"
       - "Refresh gyms (OSM)"
       - "Backfill standing photos"
       - "Backfill cards"
       - "Consolidate results (post-event)"
       - "Smoke: parseo contra fuentes reales"
+      # Noche de evento: eran el ÚNICO punto ciego de esta alerta. Si el bucle
+      # del directo revienta a mitad de un main card nadie se enteraba, y una
+      # noche perdida no se recupera (el siguiente evento puede ser semanas
+      # después). "Monitor web" NO va aquí: se autogestiona con su propio Issue
+      # de etiqueta 'monitor', que además cierra solo al recuperarse.
+      - "Live event loop (ESPN)"
+      - "Live results (ESPN)"
+      - "QA data coverage"
     types: [completed]
 
 permissions:
