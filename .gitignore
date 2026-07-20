@@ -12,3 +12,9 @@ winners_scraped.json
 
 # Local script output dumps (regenerable, not source)
 verify_headshots_output.json
+
+# Coverage reports (pytest-cov, bajo demanda: no son fuente)
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
