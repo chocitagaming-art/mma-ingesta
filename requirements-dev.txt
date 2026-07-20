@@ -5,3 +5,6 @@ ruff==0.14.0
 # Required by Starlette/FastAPI TestClient (prediction-service tests); declared
 # explicitly so CI doesn't rely on it arriving transitively via anthropic.
 httpx==0.28.1
+# Cobertura bajo demanda (NO en el CI: un umbral arbitrario da falsa seguridad y
+# ralentiza cada push). Uso: pytest tests/ --cov=src --cov-report=term
+pytest-cov
