@@ -11,8 +11,17 @@ name: Deploy prediction service (Render)
 # (y notify-on-failure abre un Issue), y solo despliega cuando cambia algo que
 # el servicio realmente ejecuta, en vez de en cada push de scrapers.
 #
-# ⚠️ Si algún día vuelve a funcionar el Auto-Deploy de Render, APÁGALO en su
-# panel: con los dos activos se lanzarían dos despliegues por push.
+# El Auto-Deploy de Render quedó APAGADO (autoDeploy="no", vía su API, el 20-jul)
+# para que exista UNA sola vía de despliegue y no dos que puedan pisarse. Este
+# workflow no depende de ese ajuste: llama al endpoint de deploys directamente,
+# comprobado con el Auto-Deploy ya desactivado.
+#
+# Si alguna vez hay que volver al despliegue de Render (por ejemplo si este
+# workflow estorba), se reactiva con:
+#   curl -X PATCH -H "Authorization: Bearer $RENDER_API_KEY" \
+#     -H "Content-Type: application/json" -d '{"autoDeploy":"yes"}' \
+#     https://api.render.com/v1/services/srv-d94lfh28qa3s73cuml3g
+# ...y entonces hay que DESACTIVAR este workflow, o cada push desplegaría dos veces.
 
 on:
   push:
