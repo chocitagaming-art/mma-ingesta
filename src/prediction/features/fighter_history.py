@@ -90,6 +90,32 @@ def compute_fighter_history(
     decision_wins = int((prior_wins["win_method"] == "decision").sum())
     total_prior_wins = int(len(prior_wins))
 
+    # --- Domain signals for the METHOD model (leak-free: prior_history only) ---
+    # Columns guarded because plenty of tests build a history frame by hand with
+    # just the fields their own assertions need.
+    prior_losses = prior_history[prior_history["result"] == "loss"]
+    total_prior_losses = int(len(prior_losses))
+    if "bout_method" in prior_history.columns:
+        pct_losses_by_ko = safe_divide(
+            int((prior_losses["bout_method"] == "ko").sum()), total_prior_losses
+        )
+        pct_losses_by_submission = safe_divide(
+            int((prior_losses["bout_method"] == "submission").sum()), total_prior_losses
+        )
+        # Denominator is the fights whose method we could classify: CNC/DQ/NULL
+        # would otherwise count as "did not go the distance", which they are not.
+        method_known = int(prior_history["bout_method"].notna().sum())
+        pct_went_the_distance = safe_divide(
+            int((prior_history["bout_method"] == "decision").sum()), method_known
+        )
+    else:
+        pct_losses_by_ko = pct_losses_by_submission = pct_went_the_distance = None
+    avg_fight_duration_s = None
+    if "duration_s" in prior_history.columns:
+        durations = prior_history["duration_s"]
+        if durations.notna().any():
+            avg_fight_duration_s = float(durations.mean())
+
     latest_prior_fight_date = prior_history["event_date"].max()
     days_since_last_fight = None
     if latest_prior_fight_date is not None and not pd.isna(latest_prior_fight_date):
@@ -125,6 +151,10 @@ def compute_fighter_history(
         takedown_defense=takedown_defense,
         avg_opponent_prior_win_rate=avg_opponent_prior_win_rate,
         latest_prior_fight_date=latest_prior_fight_date,
+        pct_losses_by_ko=pct_losses_by_ko,
+        pct_losses_by_submission=pct_losses_by_submission,
+        avg_fight_duration_s=avg_fight_duration_s,
+        pct_went_the_distance=pct_went_the_distance,
     )
 
 
@@ -155,10 +185,31 @@ def lookup_ranking_position(
     return int(latest_rows.sort_values("rank_position").iloc[0]["rank_position"])
 
 
+def _duration_seconds(end_round: Any, end_time: Any) -> float | None:
+    """Fight length in seconds. Rounds last 5:00 and ``fights.end_time`` is 'M:SS'.
+
+    A decision has end_time '5:00' on its last round, so the arithmetic holds for
+    finishes and distance fights alike."""
+    if end_round is None or pd.isna(end_round):
+        return None
+    if not isinstance(end_time, str) or ":" not in end_time:
+        return None
+    minutes, _, seconds = end_time.partition(":")
+    try:
+        return float((int(end_round) - 1) * 300 + int(minutes) * 60 + int(seconds))
+    except (TypeError, ValueError):
+        return None
+
+
 def build_fighter_history_dataframe(fights_df: pd.DataFrame) -> pd.DataFrame:
     records: list[dict[str, Any]] = []
     for row in fights_df.to_dict("records"):
         win_method = classify_win_method(row["method"])
+        # win_method only survives for the WINNER, and the method model needs how
+        # a fighter LOSES too (chin, submission defence). Hence a separate column
+        # instead of widening win_method, which golden tests pin.
+        bout_method = win_method
+        duration_s = _duration_seconds(row["end_round"], row.get("end_time"))
         red_result = "win" if row["winner_id"] == row["fighter_red_id"] else "loss" if row["winner_id"] == row["fighter_blue_id"] else "other"
         blue_result = "win" if row["winner_id"] == row["fighter_blue_id"] else "loss" if row["winner_id"] == row["fighter_red_id"] else "other"
         records.append(
@@ -168,6 +219,8 @@ def build_fighter_history_dataframe(fights_df: pd.DataFrame) -> pd.DataFrame:
                 "fighter_id": row["fighter_red_id"],
                 "result": red_result,
                 "win_method": win_method if red_result == "win" else None,
+                "bout_method": bout_method,
+                "duration_s": duration_s,
                 "rounds_fought": row["end_round"],
                 "sig_strikes_landed": row["red_sig_strikes_landed"],
                 "sig_strikes_attempted": row["red_sig_strikes_attempted"],
@@ -191,6 +244,8 @@ def build_fighter_history_dataframe(fights_df: pd.DataFrame) -> pd.DataFrame:
                 "fighter_id": row["fighter_blue_id"],
                 "result": blue_result,
                 "win_method": win_method if blue_result == "win" else None,
+                "bout_method": bout_method,
+                "duration_s": duration_s,
                 "rounds_fought": row["end_round"],
                 "sig_strikes_landed": row["blue_sig_strikes_landed"],
                 "sig_strikes_attempted": row["blue_sig_strikes_attempted"],

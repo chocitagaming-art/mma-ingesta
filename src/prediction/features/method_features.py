@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pandas as pd
+
 from .metrics import _coerce_scheduled_rounds, pair_sum
 from .types import FEATURE_COLUMNS, FighterHistorySummary
 
@@ -35,6 +37,14 @@ METHOD_SUM_FEATURES = {
     "control_time_seconds_per_fight_sum": "control_time_seconds_per_fight",
     "sig_strikes_landed_per_fight_sum": "sig_strikes_landed_per_fight",
     "total_prior_fights_sum": "total_prior_fights",
+    # Domain signals: the block above is all OFFENCE (how these two win), which
+    # says little about how the pairing ENDS. These say how they lose and how
+    # long their fights last, which is the more direct signal. Measured
+    # walk-forward, they carry about half of the model's total improvement.
+    "pct_losses_by_ko_sum": "pct_losses_by_ko",
+    "pct_losses_by_submission_sum": "pct_losses_by_submission",
+    "avg_fight_duration_s_sum": "avg_fight_duration_s",
+    "pct_went_the_distance_sum": "pct_went_the_distance",
 }
 
 METHOD_FEATURE_COLUMNS = [
@@ -43,6 +53,8 @@ METHOD_FEATURE_COLUMNS = [
     "scheduled_rounds",
     "weight_kg",
     "is_female_division",
+    # Property of the BOUT, so swap-invariant like every other non-diff column.
+    "is_title_fight",
 ]
 
 # Upper limit of each division in kg (UFC rulebook). Divisions without a fixed
@@ -89,6 +101,7 @@ def build_method_feature_row(
     *,
     scheduled_rounds: Any,
     weight_class: Any,
+    is_title_fight: Any = None,
 ) -> dict[str, float | int | None]:
     """Method-model feature row (keys == METHOD_FEATURE_COLUMNS, in order).
 
@@ -107,4 +120,9 @@ def build_method_feature_row(
     row["scheduled_rounds"] = _coerce_scheduled_rounds(scheduled_rounds)
     row["weight_kg"] = weight_kg
     row["is_female_division"] = is_female_division
+    # NULL stays None so the imputer fills the training median, same policy as
+    # weight_kg — never invent a False for "we don't know".
+    row["is_title_fight"] = (
+        None if is_title_fight is None or pd.isna(is_title_fight) else float(bool(is_title_fight))
+    )
     return row

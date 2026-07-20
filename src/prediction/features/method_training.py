@@ -114,6 +114,7 @@ def build_method_training_dataset(
             blue_history,
             scheduled_rounds=row["scheduled_rounds"],
             weight_class=row["weight_class"],
+            is_title_fight=row.get("is_title_fight"),
         )
         dataset_rows.append(
             {

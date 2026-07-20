@@ -44,6 +44,17 @@ class FighterHistorySummary:
     takedown_defense: float | None
     avg_opponent_prior_win_rate: float | None
     latest_prior_fight_date: date | None
+    # Domain signals for the METHOD model. Same leak-free rule as the block
+    # above: aggregated only over fights strictly before the current bout.
+    # The winner model looks only at how a fighter WINS; how they LOSE (chin,
+    # submission defence) and how long their fights last is what actually says
+    # whether THIS pairing ends early. Defaulted to None so the many test
+    # fixtures that build a summary by hand keep working; the real producer
+    # (compute_fighter_history) always passes them explicitly.
+    pct_losses_by_ko: float | None = None
+    pct_losses_by_submission: float | None = None
+    avg_fight_duration_s: float | None = None
+    pct_went_the_distance: float | None = None
 
 
 @dataclass(frozen=True)

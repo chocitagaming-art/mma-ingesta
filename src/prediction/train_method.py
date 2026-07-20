@@ -43,7 +43,10 @@ from sklearn.metrics import (
     log_loss,
     roc_auc_score,
 )
+from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import ParameterGrid, StratifiedKFold, cross_val_predict
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
 from src.prediction.api import _swap_corners
@@ -60,6 +63,11 @@ SECTION_HEADER = "## Modelo de metodo (train_method.py)"
 N_CALIBRATION_FOLDS = 5
 CANDIDATE_CALIBRATIONS = ("isotonic", "sigmoid")
 CLASS_LABELS = list(range(len(METHOD_CLASSES)))
+# Ensemble: XGBoost + a shrunken multinomial logistic regression, 50/50. Both
+# the C and the weights were picked with walk-forward validation inside
+# train+calibration only; the test split was touched once, at the end.
+METHOD_LINEAR_C = 0.001
+METHOD_ENSEMBLE_WEIGHTS = (0.5, 0.5)
 
 _VARIANT_LABELS = {
     "raw_uncalibrated": "raw, uncalibrated",
@@ -132,19 +140,53 @@ def cross_validate_method_params(
     return best_params
 
 
+def _fit_linear_model(x: np.ndarray, y: pd.Series) -> Pipeline:
+    """Heavily regularized multinomial logistic regression, the ensemble's other half.
+
+    Measured walk-forward (never on test): the signal in these features is faint
+    and essentially LINEAR, so a shrunken linear model is a better probability
+    estimator than the trees, and averaging both roughly halves the log-loss gap
+    to the baseline. The scaler lives INSIDE the pipeline so the rest of the code
+    (imputer outside, plain predict_proba) needs no special case. Like XGBoost it
+    trains on the imputer's output, since it cannot take NaN."""
+    model = Pipeline(
+        [
+            ("scaler", StandardScaler()),
+            ("logreg", LogisticRegression(C=METHOD_LINEAR_C, max_iter=8000)),
+        ]
+    )
+    model.fit(x, y)
+    return model
+
+
 def _probability_variants(
-    estimator, imputer, feature_columns: list[str], frame: pd.DataFrame
+    estimators, imputer, feature_columns: list[str], frame: pd.DataFrame, weights=None
 ) -> tuple[np.ndarray, np.ndarray]:
     """(raw, symmetrized) class-probability matrices for ``frame``.
 
     Production symmetrization: the method classes are invariant under a corner
     swap, so ``p_sym = (p(row) + p(swap_corners(row))) / 2`` per class. Reuses
     ``api._swap_corners`` (negates ``*_diff``, passes the symmetric features
-    through) so this matches serving exactly."""
-    raw = estimator.predict_proba(imputer.transform(frame[feature_columns]))
+    through) so this matches serving exactly.
+
+    Accepts either a single estimator or the served ENSEMBLE (a list plus its
+    weights), so the reported metrics always describe what production returns.
+    Both averages are linear, so they commute and the symmetry stays exact."""
+    if not isinstance(estimators, (list, tuple)):
+        estimators = [estimators]
+    if weights is None:
+        weights = [1.0 / len(estimators)] * len(estimators)
+
+    def blend(matrix_source: np.ndarray) -> np.ndarray:
+        return sum(
+            weight * member.predict_proba(matrix_source)
+            for weight, member in zip(weights, estimators, strict=True)
+        )
+
+    raw = blend(imputer.transform(frame[feature_columns]))
     swapped_records = [_swap_corners(r) for r in frame[feature_columns].to_dict("records")]
     swapped_frame = pd.DataFrame(swapped_records)[feature_columns]
-    swapped = estimator.predict_proba(imputer.transform(swapped_frame))
+    swapped = blend(imputer.transform(swapped_frame))
     return raw, (raw + swapped) / 2.0
 
 
@@ -181,7 +223,7 @@ def method_baselines(train_df: pd.DataFrame, test_df: pd.DataFrame) -> dict[str,
 
 
 def select_calibration(
-    model: XGBClassifier, x_cal: np.ndarray, y_cal: np.ndarray
+    model: XGBClassifier | Pipeline, x_cal: np.ndarray, y_cal: np.ndarray
 ) -> tuple[CalibratedClassifierCV, str, list[tuple[str, float]]]:
     """Pick isotonic vs sigmoid by out-of-fold log-loss, refit on the full holdout."""
     folds = StratifiedKFold(n_splits=N_CALIBRATION_FOLDS, shuffle=True, random_state=42)
@@ -217,8 +259,10 @@ def build_metrics_section(
     lines = [
         SECTION_HEADER,
         "",
-        "Modelo de METODO de victoria (decision / ko / submission), XGBoost "
-        "multi:softprob + calibracion, servido simetrizado por esquinas. Clases "
+        "Modelo de METODO de victoria (decision / ko / submission). ENSEMBLE "
+        f"{METHOD_ENSEMBLE_WEIGHTS[0]:.0%}/{METHOD_ENSEMBLE_WEIGHTS[1]:.0%} de XGBoost "
+        f"multi:softprob y regresion logistica multinomial (C={METHOD_LINEAR_C}), cada "
+        "mitad calibrada por separado y servido simetrizado por esquinas. Clases "
         f"(orden del target y de method_classes): {METHOD_CLASSES}.",
         "",
         f"- Trained at: {trained_at}",
@@ -315,12 +359,25 @@ def main() -> None:
     if list(model.classes_) != CLASS_LABELS:
         raise RuntimeError(f"Unexpected class order from XGBoost: {model.classes_}")
 
+    linear_model = _fit_linear_model(x_train, train_df["target"])
+    if list(linear_model.classes_) != CLASS_LABELS:
+        raise RuntimeError(f"Unexpected class order from the linear half: {linear_model.classes_}")
+
     x_cal = imputer.transform(calibration_df[feature_columns])
     y_cal = calibration_df["target"].to_numpy()
     calibrator, calibration_method, selection = select_calibration(model, x_cal, y_cal)
+    linear_calibrator, linear_calibration_method, _ = select_calibration(linear_model, x_cal, y_cal)
 
-    raw_uncal, sym_uncal = _probability_variants(model, imputer, feature_columns, test_df)
-    raw_cal, sym_cal = _probability_variants(calibrator, imputer, feature_columns, test_df)
+    # Each half is calibrated on its own before averaging: calibrating the blend
+    # instead would let one half's miscalibration leak into the other's weight.
+    ensemble = [calibrator, linear_calibrator]
+    ensemble_uncalibrated = [model, linear_model]
+    raw_uncal, sym_uncal = _probability_variants(
+        ensemble_uncalibrated, imputer, feature_columns, test_df, METHOD_ENSEMBLE_WEIGHTS
+    )
+    raw_cal, sym_cal = _probability_variants(
+        ensemble, imputer, feature_columns, test_df, METHOD_ENSEMBLE_WEIGHTS
+    )
     variants = {
         "raw_uncalibrated": raw_uncal,
         "symmetrized_uncalibrated": sym_uncal,
@@ -339,6 +396,9 @@ def main() -> None:
         zero_division=0,
     )
     baselines = method_baselines(train_df, test_df)
+    # Importances describe the XGBoost half only (the linear half has
+    # coefficients, not importances), so read them as "what the trees leaned on",
+    # not as the served ensemble's full attribution.
     importance_pairs = sorted(
         zip(feature_columns, model.feature_importances_, strict=True),
         key=lambda item: item[1],
@@ -360,7 +420,18 @@ def main() -> None:
     bundle["method_calibration_method"] = calibration_method
     bundle["method_trained_at"] = trained_at
     bundle["method_test_metrics"] = headline_metrics
-    joblib.dump(bundle, MODEL_PATH)
+    # Ensemble half. Serving treats these as optional, so dropping them (or
+    # restoring an older bundle) degrades cleanly to the XGBoost-only method.
+    bundle["method_model_linear"] = linear_model
+    bundle["method_calibrator_linear"] = linear_calibrator
+    bundle["method_linear_calibration_method"] = linear_calibration_method
+    bundle["method_ensemble_weights"] = list(METHOD_ENSEMBLE_WEIGHTS)
+    # This same file holds the WINNER model that is live in production. Writing
+    # in place means a crash mid-dump destroys it; dump to a sibling and rename,
+    # which is atomic on the same filesystem.
+    tmp_path = MODEL_PATH.with_suffix(MODEL_PATH.suffix + ".tmp")
+    joblib.dump(bundle, tmp_path)
+    tmp_path.replace(MODEL_PATH)
 
     section = build_metrics_section(
         train_df=train_df,

@@ -221,6 +221,11 @@ _ALL_HISTORY_ATTRS = [
     "takedowns_absorbed_per_fight",
     "takedown_defense",
     "avg_opponent_prior_win_rate",
+    # Domain signals of the method model.
+    "pct_losses_by_ko",
+    "pct_losses_by_submission",
+    "avg_fight_duration_s",
+    "pct_went_the_distance",
 ]
 
 
@@ -255,6 +260,7 @@ def test_build_method_feature_row_golden_mapping():
         blue,
         scheduled_rounds=5,
         weight_class="Women's Bantamweight",
+        is_title_fight=True,
     )
 
     # Keys + order are exactly METHOD_FEATURE_COLUMNS (base diffs first).
@@ -275,6 +281,7 @@ def test_build_method_feature_row_golden_mapping():
     assert row["scheduled_rounds"] == 5
     assert row["weight_kg"] == 61.2
     assert row["is_female_division"] == 1.0
+    assert row["is_title_fight"] == 1.0
 
 
 def test_build_method_feature_row_missing_history_and_dirty_rounds():

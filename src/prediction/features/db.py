@@ -16,6 +16,11 @@ def load_base_dataframe(database_url: str) -> pd.DataFrame:
             fights.winner_id,
             fights.method,
             fights.end_round,
+            -- end_time ('M:SS' dentro del asalto) e is_title_fight alimentan las
+            -- señales de dominio del modelo de MÉTODO: cuánto duran de media las
+            -- peleas previas de cada esquina y si el combate es de título.
+            fights.end_time,
+            fights.is_title_fight,
             fights.scheduled_rounds,
             fights.weight_class,
             red.birth_date AS red_birth_date,

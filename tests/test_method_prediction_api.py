@@ -14,6 +14,9 @@ import pytest
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.frozen import FrozenEstimator
 from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
 from src.prediction.api import _predict_method, _swap_corners
@@ -159,3 +162,86 @@ def test_predict_method_handles_missing_history_row(method_bundle):
     result = _predict_method(method_bundle, row)
     assert result is not None
     assert sum(result["probabilities"].values()) == pytest.approx(1.0, abs=1e-9)
+
+
+# --- Ensemble half (XGBoost + shrunken logistic regression) --------------------
+
+
+@pytest.fixture(scope="module")
+def ensemble_bundle(method_bundle) -> dict:
+    """The served bundle: same XGBoost plus the calibrated linear half."""
+    rng = np.random.default_rng(7)
+    n_rows = 240
+    x = rng.normal(0.0, 1.0, size=(n_rows, len(METHOD_FEATURE_COLUMNS)))
+    y = rng.integers(0, len(METHOD_CLASSES), size=n_rows)
+    linear = Pipeline(
+        [("scaler", StandardScaler()), ("logreg", LogisticRegression(C=0.001, max_iter=8000))]
+    )
+    linear.fit(x, y)
+    linear_calibrator = CalibratedClassifierCV(FrozenEstimator(linear), method="sigmoid")
+    linear_calibrator.fit(x, y)
+    return {
+        **method_bundle,
+        "method_model_linear": linear,
+        "method_calibrator_linear": linear_calibrator,
+        "method_ensemble_weights": [0.5, 0.5],
+    }
+
+
+def test_ensemble_keeps_exact_corner_symmetry(ensemble_bundle):
+    """Averaging models is linear, so it commutes with the forward/swapped
+    average: adding the second half must not cost a single bit of symmetry."""
+    forward_row = _method_row(red_seed=3.0, blue_seed=1.0)
+    result_ab = _predict_method(ensemble_bundle, forward_row)
+    result_ba = _predict_method(ensemble_bundle, _swap_corners(forward_row))
+
+    assert result_ab is not None and result_ba is not None
+    for method_class in METHOD_CLASSES:
+        assert result_ab["probabilities"][method_class] == pytest.approx(
+            result_ba["probabilities"][method_class], abs=1e-12
+        )
+    assert sum(result_ab["probabilities"].values()) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_ensemble_output_sits_between_its_two_halves(ensemble_bundle, method_bundle):
+    """A 50/50 blend must land between the halves, never outside: that is what
+    proves both estimators are really being consulted."""
+    row = _method_row(red_seed=3.0, blue_seed=1.0)
+    blended = _predict_method(ensemble_bundle, row)
+    xgb_only = _predict_method(method_bundle, row)
+    linear_only = _predict_method(
+        {
+            **method_bundle,
+            "method_calibrator": ensemble_bundle["method_calibrator_linear"],
+            "method_model": ensemble_bundle["method_model_linear"],
+        },
+        row,
+    )
+    assert blended is not None and xgb_only is not None and linear_only is not None
+
+    moved = False
+    for method_class in METHOD_CLASSES:
+        low = min(xgb_only["probabilities"][method_class], linear_only["probabilities"][method_class])
+        high = max(xgb_only["probabilities"][method_class], linear_only["probabilities"][method_class])
+        assert low - 1e-9 <= blended["probabilities"][method_class] <= high + 1e-9
+        if abs(blended["probabilities"][method_class] - xgb_only["probabilities"][method_class]) > 1e-6:
+            moved = True
+    assert moved, "the linear half was ignored: the blend equals the XGBoost alone"
+
+
+def test_bundle_without_linear_half_degrades_to_xgboost(ensemble_bundle, method_bundle):
+    """Rolling back to a pre-ensemble bundle must keep serving, unchanged."""
+    without_linear = {
+        key: value
+        for key, value in ensemble_bundle.items()
+        if key not in {"method_model_linear", "method_calibrator_linear"}
+    }
+    row = _method_row(red_seed=2.5, blue_seed=1.5)
+    degraded = _predict_method(without_linear, row)
+    reference = _predict_method(method_bundle, row)
+
+    assert degraded is not None and reference is not None
+    for method_class in METHOD_CLASSES:
+        assert degraded["probabilities"][method_class] == pytest.approx(
+            reference["probabilities"][method_class], abs=1e-12
+        )

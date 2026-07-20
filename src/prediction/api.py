@@ -191,10 +191,10 @@ def _load_fighter_physical(database_url: str, fighter_ids: list[int]) -> dict[in
 
 def _get_latest_matchup_context(
     fights_df: pd.DataFrame, red_id: int, blue_id: int
-) -> tuple[date, str | None, int]:
+) -> tuple[date, str | None, int, bool | None]:
     """Resolve the real fight context for the matchup being predicted.
 
-    Returns ``(matchup_date, weight_class, scheduled_rounds)``.
+    Returns ``(matchup_date, weight_class, scheduled_rounds, is_title_fight)``.
 
     When the two fighters have an actual bout on record (the fight being
     predicted), the temporal features are anchored to that bout's real
@@ -216,7 +216,12 @@ def _get_latest_matchup_context(
         upcoming = shared[shared["winner_id"].isna()]
         candidates = upcoming if not upcoming.empty else shared
         row = candidates.sort_values(["event_date", "fight_id"], ascending=[False, False]).iloc[0]
-        return row["event_date"], row["weight_class"], _coerce_scheduled_rounds(row["scheduled_rounds"])
+        return (
+            row["event_date"],
+            row["weight_class"],
+            _coerce_scheduled_rounds(row["scheduled_rounds"]),
+            row.get("is_title_fight"),
+        )
 
     latest = fights_df[
         (fights_df["fighter_red_id"].isin([red_id, blue_id]))
@@ -226,11 +231,13 @@ def _get_latest_matchup_context(
         # Degraded path: neither fighter has any recorded fight (e.g. two
         # debutants). Fall back to today's date so physical features can still be
         # computed; the caller flags the prediction as low confidence.
-        return date.today(), None, DEFAULT_SCHEDULED_ROUNDS
+        return date.today(), None, DEFAULT_SCHEDULED_ROUNDS, None
     # Hypothetical matchup with no bout on record: anchor temporal features to
     # today rather than to either fighter's last past fight, keep a weight class
-    # for the ranking lookup, and use the default scheduled round count.
-    return date.today(), latest.iloc[0]["weight_class"], DEFAULT_SCHEDULED_ROUNDS
+    # for the ranking lookup, and use the default scheduled round count. There is
+    # no bout on record, so title status is unknown (None) rather than False —
+    # the imputer fills the training median.
+    return date.today(), latest.iloc[0]["weight_class"], DEFAULT_SCHEDULED_ROUNDS, None
 
 
 def _is_low_confidence(
@@ -259,7 +266,9 @@ def _build_feature_row(
     physical: dict[int, dict[str, Any]],
     history_df: pd.DataFrame | None = None,
 ) -> tuple[dict[str, float | int | None], dict[str, float | int | None], dict[str, Any], bool]:
-    matchup_date, weight_class, scheduled_rounds = _get_latest_matchup_context(fights_df, red_id, blue_id)
+    matchup_date, weight_class, scheduled_rounds, is_title_fight = _get_latest_matchup_context(
+        fights_df, red_id, blue_id
+    )
     from src.prediction.features import build_fighter_history_dataframe
 
     # The long-lived service builds this once per data refresh and threads it in;
@@ -311,6 +320,7 @@ def _build_feature_row(
         blue_history,
         scheduled_rounds=scheduled_rounds,
         weight_class=weight_class,
+        is_title_fight=is_title_fight,
     )
 
     context = {
@@ -443,9 +453,33 @@ def _predict_method(
     classes = list(bundle.get("method_classes") or METHOD_CLASSES)
     estimator = bundle.get("method_calibrator") or method_model
 
+    # Ensemble with a heavily regularized multinomial logistic regression. The
+    # signal in these features is faint and mostly LINEAR, so a shrunken linear
+    # model estimates probabilities better than the trees do; averaging the two
+    # roughly halves the log-loss gap. Averaging is linear, so it commutes with
+    # the forward/swapped average below and corner symmetry stays EXACT.
+    # The linear half is optional: without it this behaves exactly like a
+    # pre-ensemble bundle, which keeps a model rollback trivial.
+    linear_estimator = bundle.get("method_calibrator_linear") or bundle.get("method_model_linear")
+    estimators = [estimator]
+    weights = [1.0]
+    if linear_estimator is not None:
+        # Both halves train on the same integer target so classes_ matches; if it
+        # ever did not, averaging column-wise would blend different classes.
+        main_order = getattr(estimator, "classes_", None)
+        linear_order = getattr(linear_estimator, "classes_", None)
+        if main_order is None or linear_order is None or list(main_order) == list(linear_order):
+            configured = bundle.get("method_ensemble_weights") or [0.5, 0.5]
+            estimators = [estimator, linear_estimator]
+            weights = [float(weight) for weight in configured]
+
     def class_probabilities(row: dict[str, float | int | None]) -> np.ndarray:
         frame = pd.DataFrame([{column: row.get(column) for column in feature_columns}])
-        return estimator.predict_proba(method_imputer.transform(frame[feature_columns]))[0]
+        transformed = method_imputer.transform(frame[feature_columns])
+        return sum(
+            weight * member.predict_proba(transformed)[0]
+            for weight, member in zip(weights, estimators)
+        )
 
     forward = class_probabilities(method_feature_row)
     swapped = class_probabilities(_swap_corners(method_feature_row))

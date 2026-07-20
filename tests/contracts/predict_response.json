@@ -1,0 +1,191 @@
+{
+  "blueProbability": 0.3455349217145798,
+  "context": {
+    "blueHistory": {
+      "avg_opponent_prior_win_rate": 0.703275393427748,
+      "control_time_seconds_per_fight": 45.857142857142854,
+      "days_since_last_fight": 751,
+      "knockdowns_per_fight": 0.23809523809523808,
+      "latest_prior_fight_date": "2024-06-29",
+      "pct_wins_by_decision": 0.0,
+      "pct_wins_by_ko": 0.391304347826087,
+      "pct_wins_by_submission": 0.0,
+      "ranking_position": 15,
+      "sig_strike_accuracy": 0.45559068697901695,
+      "sig_strike_defense": 0.567619659492451,
+      "sig_strikes_absorbed_per_fight": 32.04761904761905,
+      "sig_strikes_landed_per_fight": 37.73809523809524,
+      "submission_attempts_per_fight": 0.11904761904761904,
+      "takedown_accuracy": 0.34615384615384615,
+      "takedown_defense": 0.7777777777777778,
+      "takedowns_absorbed_per_fight": 0.38095238095238093,
+      "takedowns_landed_per_fight": 0.21428571428571427,
+      "total_prior_fights": 42,
+      "total_rounds_fought": 95,
+      "win_streak": 0,
+      "wins_last_5": 1
+    },
+    "lowConfidence": false,
+    "matchupDate": "2026-07-20",
+    "redHistory": {
+      "avg_opponent_prior_win_rate": 0.6201364618509526,
+      "control_time_seconds_per_fight": 120.25531914893617,
+      "days_since_last_fight": 72,
+      "knockdowns_per_fight": 0.1276595744680851,
+      "latest_prior_fight_date": "2026-05-09",
+      "pct_wins_by_decision": 0.0,
+      "pct_wins_by_ko": 0.21428571428571427,
+      "pct_wins_by_submission": 0.0,
+      "ranking_position": null,
+      "sig_strike_accuracy": 0.42142174051641695,
+      "sig_strike_defense": 0.5674923462287782,
+      "sig_strikes_absorbed_per_fight": 33.06382978723404,
+      "sig_strikes_landed_per_fight": 28.127659574468087,
+      "submission_attempts_per_fight": 1.1063829787234043,
+      "takedown_accuracy": 0.45,
+      "takedown_defense": 0.47619047619047616,
+      "takedowns_absorbed_per_fight": 1.1702127659574468,
+      "takedowns_landed_per_fight": 0.9574468085106383,
+      "total_prior_fights": 47,
+      "total_rounds_fought": 104,
+      "win_streak": 1,
+      "wins_last_5": 3
+    },
+    "scheduledRounds": 3,
+    "weightClass": "Lightweight"
+  },
+  "featureContributions": {
+    "age_diff": 0.3078196346759796,
+    "avg_opponent_prior_win_rate_diff": 0.003678167937323451,
+    "control_time_seconds_per_fight_diff": 0.00884738378226757,
+    "days_since_last_fight_diff": 0.11808252334594727,
+    "height_cm_diff": -0.04316558316349983,
+    "knockdowns_per_fight_diff": -0.012101797387003899,
+    "pct_wins_by_ko_diff": -0.008398201316595078,
+    "ranking_position_diff": 0.0,
+    "reach_cm_diff": -0.032471913844347,
+    "sig_strike_accuracy_diff": -0.006935020908713341,
+    "sig_strike_defense_diff": 0.007103236857801676,
+    "sig_strikes_absorbed_per_fight_diff": -0.004778774920850992,
+    "sig_strikes_landed_per_fight_diff": -0.08621402829885483,
+    "takedown_accuracy_diff": 0.002630810020491481,
+    "takedown_defense_diff": -0.047915372997522354,
+    "takedowns_absorbed_per_fight_diff": -0.03739798814058304,
+    "takedowns_landed_per_fight_diff": 0.05807717889547348,
+    "total_prior_fights_diff": 0.05751834064722061,
+    "total_rounds_fought_diff": -0.0010291682556271553,
+    "wins_last_5_diff": 0.11721335351467133
+  },
+  "featureValues": {
+    "age_diff": -4.566800000000001,
+    "avg_opponent_prior_win_rate_diff": -0.08313893157679542,
+    "control_time_seconds_per_fight_diff": 74.3981762917933,
+    "days_since_last_fight_diff": -679.0,
+    "height_cm_diff": -17.80000000000001,
+    "knockdowns_per_fight_diff": -0.11043566362715299,
+    "pct_wins_by_ko_diff": -0.1770186335403727,
+    "ranking_position_diff": null,
+    "reach_cm_diff": -15.240000000000009,
+    "sig_strike_accuracy_diff": -0.03416894646259999,
+    "sig_strike_defense_diff": -0.00012731326367276807,
+    "sig_strikes_absorbed_per_fight_diff": 1.0162107396149906,
+    "sig_strikes_landed_per_fight_diff": -9.610435663627154,
+    "takedown_accuracy_diff": 0.10384615384615387,
+    "takedown_defense_diff": -0.3015873015873016,
+    "takedowns_absorbed_per_fight_diff": 0.7892603850050659,
+    "takedowns_landed_per_fight_diff": 0.743161094224924,
+    "total_prior_fights_diff": 5.0,
+    "total_rounds_fought_diff": 9.0,
+    "wins_last_5_diff": 2.0
+  },
+  "fighters": {
+    "blue": {
+      "aggregate_stats": {
+        "controlTimePerFightSeconds": 45.857142857142854,
+        "knockdownsPerFight": 0.23809523809523808,
+        "sigStrikeAccuracy": 0.45559068697901695,
+        "sigStrikesLandedPerFight": 37.73809523809524,
+        "submissionAttemptsPerFight": 0.11904761904761904,
+        "takedownAccuracy": 0.34615384615384615,
+        "takedownsLandedPerFight": 0.21428571428571427
+      },
+      "draws": 0,
+      "headshot_url": "https://a.espncdn.com/i/headshots/mma/players/full/2354269.png",
+      "height_cm": 190.5,
+      "id": 448,
+      "latest_weight_class": "Heavyweight",
+      "losses": 24,
+      "name": "Andrei Arlovski",
+      "nickname": "The Pitbull",
+      "reach_cm": 195.58,
+      "stance": "Orthodox",
+      "wins": 34
+    },
+    "red": {
+      "aggregate_stats": {
+        "controlTimePerFightSeconds": 120.25531914893617,
+        "knockdownsPerFight": 0.1276595744680851,
+        "sigStrikeAccuracy": 0.42142174051641695,
+        "sigStrikesLandedPerFight": 28.127659574468087,
+        "submissionAttemptsPerFight": 1.1063829787234043,
+        "takedownAccuracy": 0.45,
+        "takedownsLandedPerFight": 0.9574468085106383
+      },
+      "draws": 0,
+      "headshot_url": "https://www.ufc.com/images/styles/event_results_athlete_headshot/s3/2026-05/MILLER_JIM_05-09.png?itok=KLVXYM2c",
+      "height_cm": 172.7,
+      "id": 1489,
+      "latest_weight_class": "Lightweight",
+      "losses": 19,
+      "name": "Jim Miller",
+      "nickname": null,
+      "reach_cm": 180.34,
+      "stance": "Southpaw",
+      "wins": 39
+    }
+  },
+  "lowConfidence": false,
+  "methodPrediction": {
+    "predicted": "decision",
+    "probabilities": {
+      "decision": 0.5461,
+      "ko": 0.2939,
+      "submission": 0.16
+    },
+    "trainedAt": "2026-07-20"
+  },
+  "modelTrainedAt": "2026-06-27",
+  "redProbability": 0.6544650782854202,
+  "topFeatures": [
+    {
+      "contribution": 0.3078196346759796,
+      "direction": "red",
+      "name": "age_diff",
+      "value": -4.566800000000001
+    },
+    {
+      "contribution": 0.11808252334594727,
+      "direction": "red",
+      "name": "days_since_last_fight_diff",
+      "value": -679.0
+    },
+    {
+      "contribution": 0.11721335351467133,
+      "direction": "red",
+      "name": "wins_last_5_diff",
+      "value": 2.0
+    },
+    {
+      "contribution": -0.08621402829885483,
+      "direction": "blue",
+      "name": "sig_strikes_landed_per_fight_diff",
+      "value": -9.610435663627154
+    },
+    {
+      "contribution": 0.05807717889547348,
+      "direction": "red",
+      "name": "takedowns_landed_per_fight_diff",
+      "value": 0.743161094224924
+    }
+  ]
+}
