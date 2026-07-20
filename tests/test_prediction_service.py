@@ -22,6 +22,11 @@ def _fake_predict(low_confidence: bool = False):
             "topFeatures": [],
             "featureContributions": {},
             "featureValues": {},
+            "methodPrediction": {
+                "probabilities": {"decision": 0.5, "ko": 0.3, "submission": 0.2},
+                "predicted": "decision",
+                "trainedAt": "2026-07-19",
+            },
             "context": {"lowConfidence": low_confidence},
             "lowConfidence": low_confidence,
             "fighters": {"red": {"id": red}, "blue": {"id": blue}},
@@ -51,6 +56,16 @@ def test_predict_happy_path_is_200(client):
     assert body["redProbability"] == 0.6
     assert body["lowConfidence"] is False
     assert body["modelTrainedAt"] == "2026-06-25"
+
+
+def test_predict_passes_method_prediction_through(client):
+    # The service forwards api.predict()'s payload untouched, so the method
+    # block must arrive exactly as produced (and stay optional for old bundles).
+    response = client.post("/predict", json={"red": 1, "blue": 2})
+    assert response.status_code == 200
+    method = response.json()["methodPrediction"]
+    assert method["predicted"] == "decision"
+    assert set(method["probabilities"]) == {"decision", "ko", "submission"}
 
 
 def test_predict_same_fighter_is_400(client):

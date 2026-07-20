@@ -28,6 +28,11 @@ from src.prediction.features import (
     load_base_dataframe,
     load_rankings_dataframe,
 )
+from src.prediction.features.method_features import (
+    METHOD_CLASSES,
+    METHOD_FEATURE_COLUMNS,
+    build_method_feature_row,
+)
 from src.scrapers.config import get_settings
 
 
@@ -253,7 +258,7 @@ def _build_feature_row(
     blue_id: int,
     physical: dict[int, dict[str, Any]],
     history_df: pd.DataFrame | None = None,
-) -> tuple[dict[str, float | int | None], dict[str, Any], bool]:
+) -> tuple[dict[str, float | int | None], dict[str, float | int | None], dict[str, Any], bool]:
     matchup_date, weight_class, scheduled_rounds = _get_latest_matchup_context(fights_df, red_id, blue_id)
     from src.prediction.features import build_fighter_history_dataframe
 
@@ -297,6 +302,17 @@ def _build_feature_row(
         blue_age=blue_age,
     )
 
+    # The method-model row shares the winner diffs and adds the swap-invariant
+    # pair features; built here because this is the only place that has the two
+    # histories plus the real matchup context (rounds + weight class) together.
+    method_feature_row = build_method_feature_row(
+        feature_row,
+        red_history,
+        blue_history,
+        scheduled_rounds=scheduled_rounds,
+        weight_class=weight_class,
+    )
+
     context = {
         "matchupDate": matchup_date.isoformat(),
         "weightClass": weight_class,
@@ -305,7 +321,7 @@ def _build_feature_row(
         "blueHistory": asdict(blue_history) if blue_history is not None else None,
         "lowConfidence": low_confidence,
     }
-    return feature_row, context, low_confidence
+    return feature_row, method_feature_row, context, low_confidence
 
 
 def _raw_contributions(model: Any, transformed_row: np.ndarray) -> np.ndarray | None:
@@ -406,6 +422,51 @@ def _red_win_probability(
     return float(probabilities[1]), transformed
 
 
+def _predict_method(
+    bundle: dict[str, Any], method_feature_row: dict[str, float | int | None]
+) -> dict[str, Any] | None:
+    """Corner-symmetrized method probabilities, or None for a pre-method bundle.
+
+    The method classes do not change when the corners are swapped, so the exact
+    symmetrization is the plain per-class average of the forward and swapped
+    predictions (the ``*_diff`` features negate under ``_swap_corners`` and every
+    added method feature is swap-invariant): probabilities(A, B) ==
+    probabilities(B, A). Probabilities come from the calibrated estimator when
+    the bundle carries one, like the winner path. Returning None (instead of
+    raising) keeps /predict fully backward-compatible with bundles that predate
+    the method model — the frontend treats the field as optional."""
+    method_model = bundle.get("method_model")
+    method_imputer = bundle.get("method_imputer")
+    if method_model is None or method_imputer is None:
+        return None
+    feature_columns = list(bundle.get("method_feature_columns") or METHOD_FEATURE_COLUMNS)
+    classes = list(bundle.get("method_classes") or METHOD_CLASSES)
+    estimator = bundle.get("method_calibrator") or method_model
+
+    def class_probabilities(row: dict[str, float | int | None]) -> np.ndarray:
+        frame = pd.DataFrame([{column: row.get(column) for column in feature_columns}])
+        return estimator.predict_proba(method_imputer.transform(frame[feature_columns]))[0]
+
+    forward = class_probabilities(method_feature_row)
+    swapped = class_probabilities(_swap_corners(method_feature_row))
+    symmetrized = (forward + swapped) / 2.0
+    # predict_proba columns follow estimator.classes_ (the integer targets);
+    # map each back to its class name instead of assuming they are sorted.
+    class_order = getattr(estimator, "classes_", None)
+    if class_order is None:
+        class_order = list(range(len(classes)))
+    probabilities = {
+        classes[int(class_index)]: float(symmetrized[position])
+        for position, class_index in enumerate(class_order)
+    }
+    predicted = max(probabilities, key=probabilities.get)
+    return {
+        "probabilities": probabilities,
+        "predicted": predicted,
+        "trainedAt": bundle.get("method_trained_at"),
+    }
+
+
 def predict(
     red_fighter_id: int,
     blue_fighter_id: int,
@@ -423,7 +484,7 @@ def predict(
     if rankings_df is None:
         rankings_df = load_rankings_dataframe(settings.database_url)
     physical = _load_fighter_physical(settings.database_url, [red_fighter_id, blue_fighter_id])
-    feature_row, context, low_confidence = _build_feature_row(
+    feature_row, method_feature_row, context, low_confidence = _build_feature_row(
         fights_df, rankings_df, red_fighter_id, blue_fighter_id, physical, history_df=history_df
     )
     feature_columns = bundle["feature_columns"]
@@ -455,6 +516,7 @@ def predict(
     top_features, feature_contributions = _compute_top_features(
         model, feature_columns, transformed, swapped_transformed
     )
+    method_prediction = _predict_method(bundle, method_feature_row)
     profiles = _load_fighter_profiles(settings.database_url, [red_fighter_id, blue_fighter_id])
 
     return {
@@ -463,6 +525,7 @@ def predict(
         "topFeatures": top_features,
         "featureContributions": feature_contributions,
         "featureValues": feature_row,
+        "methodPrediction": method_prediction,
         "context": context,
         "lowConfidence": low_confidence,
         "fighters": {

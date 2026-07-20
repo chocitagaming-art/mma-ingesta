@@ -171,3 +171,85 @@ weighted avg     0.6357    0.6223    0.6245      1059
 - height_cm_diff: 0.033881
 - takedown_accuracy_diff: 0.029933
 - ranking_position_diff: 0.000000
+
+## Modelo de metodo (train_method.py)
+
+Modelo de METODO de victoria (decision / ko / submission), XGBoost multi:softprob + calibracion, servido simetrizado por esquinas. Clases (orden del target y de method_classes): ['decision', 'ko', 'submission'].
+
+- Trained at: 2026-07-19
+- Training rows: 3427 | Calibration rows: 857 | Test rows: 1072
+- Test date range: 2023-07-29 to 2026-07-18
+- Best params: {'colsample_bytree': 1.0, 'learning_rate': 0.03, 'max_depth': 2, 'n_estimators': 100, 'subsample': 0.8}
+- Calibration method: sigmoid
+
+### HEADLINE (production-equivalent: symmetrized + calibrated)
+- Accuracy: 0.5401
+- Log loss: 0.9687
+- Macro AUC (OvR): 0.6294
+
+### Baselines (constant predictors)
+- majority class (decision) accuracy: 0.5326
+- train-priors log loss: 1.0097
+- uniform log loss: 1.0986
+
+### Variants {raw, symmetrized} x {uncalibrated, calibrated}
+
+| Variant | Accuracy | Log loss | Macro AUC |
+| --- | ---: | ---: | ---: |
+| raw, uncalibrated | 0.5410 | 0.9730 | 0.6264 |
+| symmetrized, uncalibrated | 0.5420 | 0.9722 | 0.6296 |
+| raw, calibrated | 0.5373 | 0.9697 | 0.6264 |
+| symmetrized + calibrated (PRODUCTION-EQUIVALENT) **<-**  | 0.5401 | 0.9687 | 0.6294 |
+
+### Confusion matrix (rows=true, cols=pred; order ['decision', 'ko', 'submission'])
+
+`[[512, 49, 10], [241, 57, 4], [166, 23, 10]]`
+
+### Classification report
+
+```text
+              precision    recall  f1-score   support
+
+    decision     0.5571    0.8967    0.6872       571
+          ko     0.4419    0.1887    0.2645       302
+  submission     0.4167    0.0503    0.0897       199
+
+    accuracy                         0.5401      1072
+   macro avg     0.4719    0.3786    0.3471      1072
+weighted avg     0.4986    0.5401    0.4572      1072
+
+```
+
+### Feature importance (32 features)
+- weight_kg: 0.080172
+- pct_wins_by_decision_sum: 0.051715
+- sig_strikes_landed_per_fight_sum: 0.050179
+- submission_attempts_per_fight_sum: 0.048374
+- pct_wins_by_submission_sum: 0.046582
+- pct_wins_by_ko_sum: 0.045425
+- knockdowns_per_fight_sum: 0.043640
+- pct_wins_by_ko_diff: 0.038411
+- total_prior_fights_sum: 0.035436
+- takedowns_landed_per_fight_sum: 0.035178
+- is_female_division: 0.034344
+- control_time_seconds_per_fight_sum: 0.034257
+- days_since_last_fight_diff: 0.029661
+- control_time_seconds_per_fight_diff: 0.029288
+- reach_cm_diff: 0.027915
+- age_diff: 0.027456
+- takedowns_landed_per_fight_diff: 0.026508
+- takedown_defense_diff: 0.026098
+- sig_strike_accuracy_diff: 0.025690
+- sig_strike_defense_diff: 0.025660
+- takedowns_absorbed_per_fight_diff: 0.025361
+- avg_opponent_prior_win_rate_diff: 0.025109
+- ranking_position_diff: 0.024488
+- takedown_accuracy_diff: 0.024322
+- sig_strikes_absorbed_per_fight_diff: 0.023877
+- height_cm_diff: 0.023675
+- total_prior_fights_diff: 0.023349
+- total_rounds_fought_diff: 0.023136
+- sig_strikes_landed_per_fight_diff: 0.022662
+- knockdowns_per_fight_diff: 0.022031
+- wins_last_5_diff: 0.000000
+- scheduled_rounds: 0.000000

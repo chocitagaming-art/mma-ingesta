@@ -30,6 +30,19 @@ def diff(red_value: Any, blue_value: Any) -> float | None:
     return float(red_value) - float(blue_value)
 
 
+def pair_sum(red_value: Any, blue_value: Any) -> float | None:
+    """Red-plus-blue pair total (the symmetric sibling of ``diff``).
+
+    Same missing-value policy as ``diff``: either side absent -> None, so the
+    caller's imputer decides. Invariant under a corner swap, which is what lets
+    the method model symmetrize by averaging forward/swapped predictions."""
+    if red_value is None or blue_value is None:
+        return None
+    if pd.isna(red_value) or pd.isna(blue_value):
+        return None
+    return float(red_value) + float(blue_value)
+
+
 def _coerce_scheduled_rounds(value: Any) -> int:
     """Normalise a fights.scheduled_rounds cell to a positive int.
 
