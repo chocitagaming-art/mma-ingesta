@@ -14,7 +14,7 @@ Pure helpers only; no network, no DB.
 """
 
 from src.scrapers.backfill_results import _Bout, _match_fight, _winner_id_for
-from src.scrapers.matching import token_subset_match
+from src.scrapers.matching import given_name_diminutive_match, token_subset_match
 from src.scrapers.parsers.fights import FightPageRecord
 
 
@@ -66,6 +66,60 @@ def test_token_subset_match_rejects_disjoint_and_overlap_only():
 def test_token_subset_match_rejects_spelling_variants():
     # Subset is exact on tokens: typos stay for the fuzzy tiers, not this one.
     assert not token_subset_match("Brunno Silva", "Bruno Silva")
+
+
+# ------------------------------------------------- given_name_diminutive_match
+
+
+def test_diminutive_match_zach_zachary():
+    # Caso real: la pelea 12850 del UFC 329 llevaba 14 dias sin arbitro ni
+    # stats porque nuestra ficha dice "Zachary Reese" y ufcstats "Zach Reese".
+    assert given_name_diminutive_match("Zach Reese", "Zachary Reese")
+    assert given_name_diminutive_match("Zachary Reese", "Zach Reese")
+
+
+def test_diminutive_match_requires_identical_surnames():
+    # LA GUARDA QUE JUSTIFICA TODA LA FUNCION. Los diminutivos ocurren en el
+    # nombre de PILA; un prefijo libre casaria apellidos de personas distintas.
+    assert not given_name_diminutive_match("Marcos Silva", "Marcos Silveira")
+    assert not given_name_diminutive_match("Bruno Santos", "Bruno Santana")
+
+
+def test_diminutive_match_rejects_short_prefixes():
+    # Suelo de 4 caracteres: por debajo, un nombre completo y corto seria
+    # prefijo de otro distinto. Perder un match es barato; inventarlo no.
+    assert not given_name_diminutive_match("Jon Jones", "Jonathan Jones")
+    assert not given_name_diminutive_match("Ali Bagov", "Alistair Bagov")
+
+
+def test_diminutive_match_rejects_different_given_names():
+    assert not given_name_diminutive_match("Zachary Reese", "Marcus Reese")
+    # Comparte apellido y nada mas: un apellido solo nunca reclama a nadie.
+    assert not given_name_diminutive_match("Reese", "Zachary Reese")
+
+
+def test_diminutive_match_rejects_different_token_counts():
+    # No es la funcion del nombre intermedio: de eso ya se ocupa
+    # token_subset_match, y mezclar las dos tolerancias multiplica el riesgo.
+    assert not given_name_diminutive_match("Zach Reese", "Zachary Miguel Reese")
+
+
+def test_diminutive_match_folds_accents_and_case():
+    assert given_name_diminutive_match("ZACH reese", "Zachary Reese")
+
+
+def test_corner_for_maps_diminutive_to_its_corner():
+    # El tier nuevo llega hasta corner_for, que es lo que usa el consolidador.
+    bout = _bout("Ryan Gandra", "Zachary Reese")
+    assert bout.corner_for("Zach Reese") == "blue"
+    assert bout.corner_for("Ryan Gandra") == "red"
+
+
+def test_corner_for_refuses_ambiguous_diminutive():
+    # "Zach" es prefijo de las DOS esquinas y no coincide exacto con ninguna:
+    # el nivel de diminutivo no puede elegir, y no elegir es la respuesta.
+    bout = _bout("Zachary Reese", "Zacharias Reese")
+    assert bout.corner_for("Zach Reese") is None
 
 
 def test_token_subset_match_rejects_compound_surnames_and_initials():

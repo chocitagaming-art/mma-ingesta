@@ -1,0 +1,55 @@
+name: Post-event review (coherencia del dato)
+
+# Vigila que el RESULTADO sea coherente, no que los procesos terminen. Los crons
+# ya avisan cuando algo peta; el modo de fallo caro de este proyecto es el otro:
+# nada peta, todo verde, y el dato mal. Tres veces en un mes (noticias de ESPN
+# bloqueadas desde el 30-jun, pesajes escribiendo cero en verde, y la pelea que
+# ESPN retiró en mitad del 1062 y se habría quedado "EN CURSO" para siempre).
+#
+# Corre DESPUES de la última pasada de consolidate-results (dom 15:00 UTC), con
+# margen de sobra para el retraso medido del scheduler (+1 a +3,5 h). Si sale en
+# rojo, notify-on-failure abre Issue: esa cadena se verificó de punta a punta el
+# 25-jul con el canario alert-selftest.
+on:
+  schedule:
+    - cron: "0 20 * * 0" # Dom 20:00 UTC
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Ventana de días a revisar (por defecto 10)"
+        required: false
+        default: "10"
+      event_id:
+        description: "Revisar SOLO este evento (tiene prioridad sobre days)"
+        required: false
+
+concurrency:
+  group: post-event-review
+  cancel-in-progress: false
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+      - run: pip install -r requirements-scrapers.txt
+      - name: Revisar coherencia del evento
+        # SIN continue-on-error a propósito: este paso es la alerta. Si falla,
+        # tiene que teñir el run de rojo para que notify-on-failure lo recoja.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.event_id }}" ]; then
+            ARGS="--event-id ${{ inputs.event_id }}"
+          elif [ -n "${{ inputs.days }}" ]; then
+            ARGS="--days ${{ inputs.days }}"
+          fi
+          echo "python -m scripts.post_event_review $ARGS"
+          python -m scripts.post_event_review $ARGS

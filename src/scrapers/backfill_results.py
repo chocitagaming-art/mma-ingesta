@@ -53,7 +53,7 @@ from .config import get_settings
 from .db import connect
 from .enrich_ranked import _fold
 from .espn_live_results import ESPN_PROVISIONAL_METHODS
-from .matching import token_subset_match
+from .matching import given_name_diminutive_match, token_subset_match
 from .fight_officials import (
     TargetFight,
     insert_scorecard,
@@ -164,6 +164,15 @@ class _Bout:
         blue_ok = token_subset_match(name, self.blue_name)
         if red_ok != blue_ok:
             return "red" if red_ok else "blue"
+        if red_ok and blue_ok:
+            return None  # Ambiguo: no bajamos a un nivel más laxo.
+        # Tercer nivel: diminutivo del nombre de pila (bout 12850, página
+        # "Zach Reese" vs BD "Zachary Reese"). Solo se intenta cuando el
+        # subconjunto no ha dicho nada de NINGUNA esquina.
+        red_dim = given_name_diminutive_match(name, self.red_name)
+        blue_dim = given_name_diminutive_match(name, self.blue_name)
+        if red_dim != blue_dim:
+            return "red" if red_dim else "blue"
         return None
 
     def fighter_id_for(self, name: str) -> int | None:

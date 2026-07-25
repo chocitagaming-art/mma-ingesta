@@ -52,6 +52,7 @@ __all__ = [
     "fold_ratio",
     "fuzzy_match",
     "token_subset_match",
+    "given_name_diminutive_match",
 ]
 
 # Canonical compromise cutoff for general-purpose name comparison.
@@ -149,6 +150,49 @@ def token_subset_match(left: str, right: str) -> bool:
     if len(_significant_tokens(left_tokens & right_tokens)) < 2:
         return False
     return left_tokens <= right_tokens or right_tokens <= left_tokens
+
+
+# Suelo de longitud del diminutivo. Con 4 caracteres "zach"/"zachary" y
+# "alex"/"alexander" pasan, y "jon"/"jonathan" o "ali"/"alistair" no. Es
+# deliberado: por debajo de 4 hay nombres completos y cortos que son prefijo de
+# otros distintos, y en este matcher un falso positivo suelda las stats del
+# rival en la ficha de otro. Perder un match solo cuesta que la pelea espere.
+_MIN_DIMINUTIVE_LEN = 4
+
+
+def given_name_diminutive_match(left: str, right: str) -> bool:
+    """True cuando dos nombres solo se diferencian en el DIMINUTIVO del pila.
+
+    Tercer nivel, después de la igualdad exacta y de
+    :func:`token_subset_match`. Existe por un caso real: la pelea 12850 del
+    UFC 329 pasó **catorce días** sin árbitro ni stats porque nuestra ficha
+    dice "Zachary Reese" y ufcstats la lista como "Zach Reese". Ni la clave
+    exacta ni el subconjunto por tokens lo cazan, porque "zach" y "zachary"
+    son tokens DISTINTOS, y difflib se queda en 0.83, por debajo del umbral.
+
+    LA RESTRICCIÓN IMPORTANTE: solo el PRIMER token admite el prefijo; el
+    resto deben coincidir exactamente, y el número de tokens debe ser el mismo.
+    Un prefijo libre sobre cualquier token casaría "Marcos Silva" con "Marcos
+    Silveira", que son personas distintas — los diminutivos ocurren en el
+    nombre de pila, no en el apellido. Con esa restricción, más el suelo de
+    :data:`_MIN_DIMINUTIVE_LEN`, el nivel es estrecho a propósito.
+
+    Como los demás niveles, NO garantiza unicidad: quien resuelva contra un
+    grupo de candidatos mantiene su propia guarda (``corner_for`` rechaza un
+    nombre que reclame las dos esquinas, y ``_match_fight`` exige candidato
+    único).
+    """
+    left_tokens = fold(left).split()
+    right_tokens = fold(right).split()
+    if len(left_tokens) != len(right_tokens) or len(left_tokens) < 2:
+        return False
+    # Apellidos (y cualquier token intermedio) exactos, sin excepción.
+    if left_tokens[1:] != right_tokens[1:]:
+        return False
+    corto, largo = sorted((left_tokens[0], right_tokens[0]), key=len)
+    if corto == largo:
+        return False  # Idénticos: eso ya lo resuelve el nivel exacto.
+    return len(corto) >= _MIN_DIMINUTIVE_LEN and largo.startswith(corto)
 
 
 def ratio(left: str, right: str) -> float:

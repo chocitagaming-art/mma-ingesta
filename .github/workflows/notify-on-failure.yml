@@ -56,6 +56,10 @@ on:
       # Canario: falla a proposito cuando se lanza a mano, para poder comprobar
       # que esta alerta funciona de verdad sin esperar a que se rompa un cron.
       - "Alert self-test (canario)"
+      # El unico vigilado que no comprueba que un PROCESO termine, sino que el
+      # DATO sea coherente. Es la via por la que se habria cazado la pelea que
+      # ESPN retiro en mitad del 1062 sin que nada fallara.
+      - "Post-event review (coherencia del dato)"
     types: [completed]
 
 permissions:
