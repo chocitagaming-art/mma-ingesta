@@ -124,15 +124,8 @@ def _slug_tokens(href: str) -> set[str]:
     return set(slug.replace("-", " ").split())
 
 
-def find_weigh_in_article(fetch_html: FetchHtml, event_name: str) -> str | None:
-    """Absolute URL of the event's weigh-in results article, or None.
-
-    ufc.com's /search is server-rendered (Solr behind Drupal): the result list
-    contains plain <a href="/news/..."> anchors. A candidate must carry "weigh"
-    in its slug and share >=2 significant tokens (headliner surnames / card
-    number, after dropping ufc/fight/night/... stopwords) with the event name.
-    """
-    query = f"official weigh-in results {event_name}"
+def _search_for_weigh_in_article(fetch_html: FetchHtml, query: str, event_name: str) -> str | None:
+    """First /news/ anchor of this search that passes the token guard."""
     html = fetch_html(SEARCH_URL, {"query": query})
     soup = BeautifulSoup(html, "lxml")
     target = _significant_tokens(event_name)
@@ -145,6 +138,35 @@ def find_weigh_in_article(fetch_html: FetchHtml, event_name: str) -> str | None:
             return href if href.startswith("http") else f"{BASE_URL}{href}"
         LOGGER.debug("Rejected weigh-in candidate %r for %r (overlap=%s)", href, event_name, overlap)
     return None
+
+
+def find_weigh_in_article(fetch_html: FetchHtml, event_name: str) -> str | None:
+    """Absolute URL of the event's weigh-in results article, or None.
+
+    ufc.com's /search is server-rendered (Solr behind Drupal): the result list
+    contains plain <a href="/news/..."> anchors. A candidate must carry "weigh"
+    in its slug and share >=2 significant tokens (headliner surnames / card
+    number, after dropping ufc/fight/night/... stopwords) with the event name.
+
+    TWO queries, because the search is an AND over the article title and the two
+    sites do not always name the same card alike: on 2026-07-25 our events row
+    said "UFC Fight Night: Ankalaev vs. Guskov" while ufc.com titled it "UFC Abu
+    Dhabi: Ankalaev vs Guskov", so the name-qualified query returned "No
+    results" and the cron reported success having written nothing. The
+    unqualified retry lists the most recent weigh-in articles instead, which is
+    exactly the pool a Friday cron needs for Saturday's card.
+
+    The retry widens WHICH articles are considered, never the acceptance rule:
+    the same >=2-shared-token guard decides, so a neighbouring card's weights
+    still cannot be welded onto this event.
+    """
+    qualified = _search_for_weigh_in_article(
+        fetch_html, f"official weigh-in results {event_name}", event_name
+    )
+    if qualified is not None:
+        return qualified
+    LOGGER.info("No weigh-in article for %r by name; retrying unqualified search", event_name)
+    return _search_for_weigh_in_article(fetch_html, "official weigh-in results", event_name)
 
 
 # ------------------------------------------------------------------- parsing

@@ -74,9 +74,43 @@ ARTICLE_HTML = """
 """
 
 
+# ufc.com's search is an AND over the article TITLE, and ufc.com titles this
+# card "UFC Abu Dhabi" while our events row calls it "UFC Fight Night" (real
+# 2026-07-25 divergence). Every query carrying "fight night" therefore returns
+# the empty page below, and only the unqualified query finds the article.
+NO_RESULTS_HTML = """
+<html><body><div class="solr-search__result-item"><p>No results</p></div></body></html>
+"""
+
+GENERIC_SEARCH_HTML = """
+<html><body>
+<div class="solr-search__result-item">
+  <ul>
+    <li><a href="/news/official-weigh-results-ufc-329-mcgregor-vs-holloway-2">
+      Official Weigh-In Results | UFC 329</a></li>
+    <li><a href="/news/official-weigh-results-ufc-abu-dhabi-ankalaev-guskov">
+      Official Weigh-In Results | UFC Abu Dhabi</a></li>
+  </ul>
+</div>
+</body></html>
+"""
+
+
 def _fetch(pages: dict):
     def fetch_html(url: str, params: dict | None = None) -> str:
         return pages[url]
+
+    return fetch_html
+
+
+def _fetch_by_query(pages: dict, calls: list | None = None):
+    """fetch_html keyed on the search query, so tests can drive the fallback."""
+
+    def fetch_html(url: str, params: dict | None = None) -> str:
+        query = (params or {}).get("query", "")
+        if calls is not None:
+            calls.append(query)
+        return pages[query]
 
     return fetch_html
 
@@ -96,6 +130,53 @@ def test_find_weigh_in_article_rejects_foreign_events():
     fetch = _fetch({"https://www.ufc.com/search": SEARCH_HTML})
     # "UFC 328" shares no headliner/number token with any weigh-in slug.
     assert find_weigh_in_article(fetch, "UFC 328: Chimaev vs Strickland") is None
+
+
+def test_find_weigh_in_article_falls_back_when_the_event_name_diverges():
+    """The name-qualified query finds nothing -> retry unqualified.
+
+    Regression for 2026-07-25: our events row said "UFC Fight Night: Ankalaev
+    vs. Guskov" and ufc.com titled the article "UFC Abu Dhabi", so the
+    name-qualified search returned "No results" and the cron wrote zero rows
+    while reporting success.
+    """
+    calls: list[str] = []
+    fetch = _fetch_by_query(
+        {
+            "official weigh-in results UFC Fight Night: Ankalaev vs. Guskov": NO_RESULTS_HTML,
+            "official weigh-in results": GENERIC_SEARCH_HTML,
+        },
+        calls,
+    )
+    url = find_weigh_in_article(fetch, "UFC Fight Night: Ankalaev vs. Guskov")
+    assert url == "https://www.ufc.com/news/official-weigh-results-ufc-abu-dhabi-ankalaev-guskov"
+    # The qualified query still runs first: it is the precise one when it works.
+    assert calls[0] == "official weigh-in results UFC Fight Night: Ankalaev vs. Guskov"
+
+
+def test_find_weigh_in_article_fallback_keeps_the_token_guard():
+    """The wider candidate pool must not weld a foreign card's article on.
+
+    The fallback only widens WHICH articles are considered; the >=2 shared
+    significant tokens rule is what stops UFC 329's weights landing on our card.
+    """
+    fetch = _fetch_by_query(
+        {
+            "official weigh-in results UFC 331: Chimaev vs Strickland": NO_RESULTS_HTML,
+            "official weigh-in results": GENERIC_SEARCH_HTML,
+        }
+    )
+    assert find_weigh_in_article(fetch, "UFC 331: Chimaev vs Strickland") is None
+
+
+def test_find_weigh_in_article_does_not_search_twice_when_the_first_query_hits():
+    calls: list[str] = []
+    fetch = _fetch_by_query(
+        {"official weigh-in results UFC Fight Night: Fiziev vs. Torres": SEARCH_HTML},
+        calls,
+    )
+    assert find_weigh_in_article(fetch, "UFC Fight Night: Fiziev vs. Torres") is not None
+    assert len(calls) == 1
 
 
 # ------------------------------------------------------------------- parsing
