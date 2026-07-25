@@ -141,17 +141,28 @@ def _merge_group(connection, rows: list[FighterRow]) -> dict[str, Any]:
             # S3-G: historial ESPN + espn_id al keeper antes del DELETE (el
             # CASCADE de la migración 016 los destruiría en silencio).
             transfer_espn_assets(cursor, duplicate_id, keeper.id)
+            # Esquinas y ganador EN UNA SOLA sentencia, y no es cosmética: la
+            # restricción `fights_winner_is_participant` se evalúa al terminar
+            # cada UPDATE, así que en tres pasos la fila queda inconsistente a
+            # mitad de camino y Postgres aborta. Ocurre siempre que el duplicado
+            # GANÓ la pelea: al mover su esquina al keeper, winner_id todavía
+            # apunta al borrado y ya no es participante. Reproducido con el par
+            # real Zach/Zachary Reese (pelea 3240), que tumbaba la fusión entera.
+            # Cambiar el orden no salva: hacerlo al revés rompe la otra mitad.
             cursor.execute(
-                "UPDATE fights SET fighter_red_id = %s WHERE fighter_red_id = %s",
-                (keeper.id, duplicate_id),
-            )
-            cursor.execute(
-                "UPDATE fights SET fighter_blue_id = %s WHERE fighter_blue_id = %s",
-                (keeper.id, duplicate_id),
-            )
-            cursor.execute(
-                "UPDATE fights SET winner_id = %s WHERE winner_id = %s",
-                (keeper.id, duplicate_id),
+                """
+                UPDATE fights
+                SET fighter_red_id = CASE WHEN fighter_red_id = %(dup)s
+                                          THEN %(keep)s ELSE fighter_red_id END,
+                    fighter_blue_id = CASE WHEN fighter_blue_id = %(dup)s
+                                           THEN %(keep)s ELSE fighter_blue_id END,
+                    winner_id = CASE WHEN winner_id = %(dup)s
+                                     THEN %(keep)s ELSE winner_id END
+                WHERE fighter_red_id = %(dup)s
+                   OR fighter_blue_id = %(dup)s
+                   OR winner_id = %(dup)s
+                """,
+                {"dup": duplicate_id, "keep": keeper.id},
             )
             cursor.execute(
                 """
