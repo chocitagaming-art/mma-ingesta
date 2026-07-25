@@ -147,12 +147,19 @@ def elapsed_end_time(
     congelamos la cuenta atrás.
 
     NO se puede invertir a ciegas: en las decisiones ESPN sí manda el
-    transcurrido ('5:00'), y por eso 4 de los 12 estaban bien. El discriminador
-    es `previous_clock`, el último reloj visto con la pelea EN CURSO: una cuenta
-    atrás nunca sube dentro del asalto, así que un valor mayor que el anterior
-    delata que ESPN ya cambió al transcurrido (patrón Steveson del 19-jul: 2:26
-    congelado y después 2:31 oficial). Sin historial se asume cuenta atrás, que
-    es lo que ESPN hizo en los 12 combates del 1062.
+    transcurrido ('5:00'), y por eso 4 de los 12 estaban bien.
+
+    EL DISCRIMINADOR ES LA IGUALDAD EXACTA con `previous_clock`, el último reloj
+    visto con la pelea EN CURSO. Cuando ESPN congela la cuenta atrás, el valor
+    de 'post' es EXACTAMENTE el mismo que el último de 'in' (12863: 2:17 → 2:17;
+    12865: 3:46 → 3:46; los doce combates del 1062 igual). Cuando publica el
+    tiempo oficial, difiere. Se probó antes con "menor o igual que el anterior"
+    y estaba mal: horas después del evento ESPN ya sirve el oficial, y un valor
+    pequeño y legítimo (la 12865 acabó en 1:12) se tomaba por cuenta atrás y se
+    invertía a 3:48. La igualdad no tiene ese fallo.
+
+    Sin historial se asume cuenta atrás: es lo que ESPN sirve mientras el
+    combate está vivo, que es cuando se escribe el resultado.
 
     Es una APROXIMACIÓN de 1-2 segundos: el reloj se congela cuando ESPN
     registra el final, no cuando lo canta el árbitro. ufcstats la sustituye por
@@ -171,8 +178,8 @@ def elapsed_end_time(
         return None
 
     previous = _clock_seconds(previous_clock)
-    if previous is not None and seconds > previous:
-        # Rompe la cuenta atrás: ESPN ya sirve el transcurrido.
+    if previous is not None and seconds != previous:
+        # No está congelado: ESPN ya sirve el tiempo oficial transcurrido.
         return _format_clock(seconds)
     return _format_clock(ROUND_SECONDS - seconds)
 
@@ -640,6 +647,76 @@ SUMMARY_KEYS = [
 ]
 
 
+def loop_health_warnings(totals: Counter) -> list[str]:
+    """Qué salió mal en la ventana, en cristiano. Lista vacía = todo bien.
+
+    `loop_failures` NO basta, aunque lo pareciera: solo cuenta lo que revienta
+    FUERA del bucle por evento. Hay tres tragaderos y este mira los tres, más el
+    modo de fallo que ya ocurrió de verdad (el run 29179498181: 109 pasadas, el
+    evento encontrado, cero escrituras y conclusión SUCCESS).
+
+    Cuidado con lo que NO es un problema, que es la mitad del diseño: un relevo
+    que entra con la cartelera ya sellada no escribe nada y hace bien
+    (`live_stats_skipped_final`), igual que uno que la encuentra ya resuelta
+    (`fights_already_filled`). Confundir eso con un fallo estrenaría la alerta
+    en falso, y como `notify-on-failure` reutiliza un único Issue y no lo cierra
+    solo, el primer falso positivo degrada los avisos de todos los workflows
+    vigilados a comentarios en un hilo que nadie lee.
+    """
+    avisos: list[str] = []
+    iteraciones = totals.get("loop_iterations", 0)
+
+    fallos = totals.get("loop_failures", 0)
+    if fallos:
+        avisos.append(
+            f"{fallos} de {iteraciones} pasadas fallaron enteras (red, BD o ESPN caído)."
+        )
+    if totals.get("event_errors"):
+        avisos.append(
+            f"{totals['event_errors']} errores al procesar un evento (event_errors). "
+            "loop_failures es CIEGO a esto: son fallos de escritura o de matching "
+            "que process_events se traga por evento."
+        )
+    if totals.get("events_unmatched"):
+        avisos.append(
+            f"{totals['events_unmatched']} veces no se pudo casar el evento de ESPN "
+            "con ninguna fila de la BD. No lanza excepción: se salta en silencio. "
+            "Suele ser que ufc.com renombró la cartelera durante la semana."
+        )
+    if totals.get("live_stats_unresolved"):
+        avisos.append(
+            f"{totals['live_stats_unresolved']} veces una pelea de ESPN no resolvió "
+            "a una fila nuestra: se queda sin stats en directo ni película."
+        )
+
+    escrituras = totals.get("fights_updated", 0) + totals.get("live_stats_written", 0)
+    ya_estaba = (
+        totals.get("live_stats_skipped_final", 0) + totals.get("fights_already_filled", 0)
+    )
+    if totals.get("live_events") and not escrituras and not ya_estaba:
+        avisos.append(
+            f"La ventana vio eventos en directo ({totals['live_events']} veces) y no "
+            "escribió NADA en toda la noche, ni encontró nada ya sellado. Es el "
+            "modo de fallo del run 29179498181, que salió verde igual."
+        )
+    return avisos
+
+
+def loop_exit_code(totals: Counter) -> int:
+    """Código de salida de la ventana. Hoy solo se pone en rojo lo indiscutible.
+
+    Con 0 fallos en 2339 pasadas de 8 runs históricos NO hay base para elegir un
+    umbral: cualquier porcentaje estaría calibrado contra una distribución toda
+    a cero. Así que de momento se AVISA (::warning::) y solo se sale en rojo si
+    fallaron TODAS las pasadas — ahí no hay interpretación posible: la ventana
+    no produjo nada. Endurecer cuando haya dos o tres veladas de muestra.
+    """
+    iteraciones = totals.get("loop_iterations", 0)
+    if iteraciones and totals.get("loop_failures", 0) >= iteraciones:
+        return 1
+    return 0
+
+
 def run_bounded_loop(
     dates: str | None,
     dry_run: bool,
@@ -677,6 +754,12 @@ def run_bounded_loop(
             break
         time.sleep(max(1, interval_seconds))
     print(json.dumps({"loop_iterations": iterations, "loop_failures": failures}), flush=True)
+    # Por ASIGNACIÓN, nunca con totals.update(): esto es un Counter y update()
+    # SUMA en vez de fijar (es justo lo que hace la línea 666 con los contadores
+    # de cada pasada). Hasta hoy estos dos números solo existían en el log, así
+    # que main() no tenía forma de saber cómo había ido la ventana.
+    totals["loop_iterations"] = iterations
+    totals["loop_failures"] = failures
     return totals
 
 
@@ -706,13 +789,24 @@ def main() -> None:
     )
     args = parser.parse_args()
     if args.duration_minutes is not None:
-        run_bounded_loop(
+        totals = run_bounded_loop(
             dates=args.dates,
             dry_run=args.dry_run,
             duration_minutes=args.duration_minutes,
             interval_seconds=args.interval_seconds,
         )
-        return
+        # Hasta hoy esta rama hacía un `return` desnudo: el bucle del directo
+        # salía en VERDE pasara lo que pasara, y como notify-on-failure filtra
+        # por conclusion == 'failure', esa alerta era estructuralmente incapaz
+        # de avisar de una noche de directo perdida.
+        avisos = loop_health_warnings(totals)
+        for aviso in avisos:
+            # ::warning:: sale resaltado en el resumen del run de Actions.
+            print(f"::warning title=Bucle del directo::{aviso}", flush=True)
+            LOGGER.warning("BUCLE: %s", aviso)
+        if not avisos:
+            LOGGER.info("Bucle: ventana sana, nada que reportar.")
+        raise SystemExit(loop_exit_code(totals))
     while True:
         counts = refresh_live_results(dates=args.dates, dry_run=args.dry_run)
         print(json.dumps({key: counts.get(key, 0) for key in SUMMARY_KEYS}, indent=2))

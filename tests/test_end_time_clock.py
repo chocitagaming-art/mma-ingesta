@@ -22,19 +22,20 @@ from src.scrapers.espn_live_results import elapsed_end_time
 # --------------------------------------------------- finalizaciones (cuenta atras)
 
 
-def test_countdown_is_converted_to_elapsed():
-    # Estelar real: ESPN congelo 2:17 restantes; lo oficial fue 2:41.
-    assert elapsed_end_time("2:17", "KO/TKO", previous_clock="2:36") == "2:43"
+def test_frozen_countdown_is_converted_to_elapsed():
+    # Estelar real: ESPN congelo 2:17 restantes; lo oficial fue 2:41. El reloj
+    # de 'post' es EXACTAMENTE el ultimo de 'in': esa igualdad es la firma de
+    # que esta congelado.
+    assert elapsed_end_time("2:17", "KO/TKO", previous_clock="2:17") == "2:43"
 
 
-def test_countdown_conversion_matches_the_other_real_cases():
+def test_frozen_conversion_matches_the_other_real_cases():
     # Los mismos pares del 1062. La conversion cae a 1-2 s de lo oficial: el
-    # reloj de ESPN se congela en el instante en que EL registra el final, no en
-    # el que lo canta el arbitro. Es una aproximacion honesta, y ufcstats la
-    # sustituye por la oficial al consolidar.
-    assert elapsed_end_time("0:37", "KO/TKO", previous_clock="1:05") == "4:23"
-    assert elapsed_end_time("3:46", "KO/TKO", previous_clock="4:07") == "1:14"
-    assert elapsed_end_time("3:37", "Submission", previous_clock="4:08") == "1:23"
+    # reloj se congela en el instante en que ESPN registra el final, no en el
+    # que lo canta el arbitro. ufcstats la sustituye al consolidar.
+    assert elapsed_end_time("0:37", "KO/TKO", previous_clock="0:37") == "4:23"
+    assert elapsed_end_time("3:46", "KO/TKO", previous_clock="3:46") == "1:14"
+    assert elapsed_end_time("3:37", "Submission", previous_clock="3:37") == "1:23"
 
 
 def test_without_history_assumes_countdown():
@@ -46,11 +47,19 @@ def test_without_history_assumes_countdown():
 # ------------------------------------------- cuando ESPN SI manda el transcurrido
 
 
-def test_value_that_breaks_the_countdown_is_taken_as_elapsed():
+def test_value_that_differs_from_the_frozen_one_is_taken_as_elapsed():
     # Patron Steveson documentado el 19-jul: 2:26 congelado y luego el oficial
-    # 2:31. Una cuenta atras nunca SUBE dentro del asalto, asi que ese salto
-    # delata que el valor ya es el transcurrido. Invertirlo lo corromperia.
+    # 2:31. Si no coincide con el ultimo de 'in', ya no esta congelado.
     assert elapsed_end_time("2:31", "KO/TKO", previous_clock="2:26") == "2:31"
+
+
+def test_small_official_time_is_not_mistaken_for_a_countdown():
+    # REGRESION de un fallo real cazado en la prueba de humo. Horas despues del
+    # evento ESPN ya sirve el oficial, y la 12865 acabo en 1:12 — un valor
+    # pequeno y legitimo. Con la regla vieja ("menor o igual que el anterior")
+    # se tomaba por cuenta atras y se escribia 3:48. Con la igualdad, no.
+    assert elapsed_end_time("1:12", "KO/TKO", previous_clock="3:46") == "1:12"
+    assert elapsed_end_time("2:41", "KO/TKO", previous_clock="2:17") == "2:41"
 
 
 # ------------------------------------------------------------------- decisiones
@@ -78,13 +87,13 @@ def test_unusable_clock_without_a_decision_writes_nothing(clock):
     assert elapsed_end_time(clock, "KO/TKO", previous_clock=None) is None
 
 
-def test_method_unknown_still_converts_the_countdown():
+def test_method_unknown_still_converts_the_frozen_countdown():
     # ESPN a veces tarda en dar el metodo; el reloj sigue siendo cuenta atras.
-    assert elapsed_end_time("1:00", None, previous_clock="1:30") == "4:00"
+    assert elapsed_end_time("1:00", None, previous_clock="1:00") == "4:00"
 
 
 def test_zero_remaining_means_the_round_ran_out():
-    assert elapsed_end_time("0:00", "KO/TKO", previous_clock="0:12") == "5:00"
+    assert elapsed_end_time("0:00", "KO/TKO", previous_clock="0:00") == "5:00"
 
 
 def test_clock_longer_than_a_round_is_rejected():
