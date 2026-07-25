@@ -53,6 +53,9 @@ on:
       # estaba en la lista): son workflows distintos. Si este deja de correr,
       # Render se duerme y la primera predicción del día tarda 42 s.
       - "Keep-alive prediction service"
+      # Canario: falla a proposito cuando se lanza a mano, para poder comprobar
+      # que esta alerta funciona de verdad sin esperar a que se rompa un cron.
+      - "Alert self-test (canario)"
     types: [completed]
 
 permissions:
