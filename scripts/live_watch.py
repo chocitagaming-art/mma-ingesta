@@ -126,13 +126,23 @@ def _report(cur, event_id: int) -> None:
         """,
         (event_id,),
     )
+    card = cur.fetchall()
     print("\n  CARTELERA")
-    for fid, seg, order, red, blue, state, period, clock, final in cur.fetchall():
+    for fid, seg, order, red, blue, state, period, clock, final in card:
         if state is None:
             status = "sin datos"
         else:
             status = f"{state} R{period} {clock}" + (" FINAL" if final else "")
         print(f"    #{order or '?':>2} [{seg or '?':>7}] {fid}  {red} vs {blue}: {status}")
+
+    # Ha empezado a pelearse alguien de verdad? Ojo: state='in' NO basta, porque
+    # ESPN ya lo marca en los paseillos, con todas las stats a 0. Hay que exigir
+    # asalto >= 1. Sin esta distincion el veredicto de abajo acusaba al escritor
+    # de muestras durante los paseillos, cuando lo correcto es que aun no hay
+    # nada que grabar (mismo despiste que tuvieron los dos vigias del 25-jul).
+    fighting = any(
+        (state == "in" and (period or 0) >= 1) or final for *_, state, period, _, final in card
+    )
 
     # 4. Veredicto en cristiano.
     print("\n  VEREDICTO")
@@ -143,9 +153,13 @@ def _report(cur, event_id: int) -> None:
         print(f"    Ultima pasada del bucle: hace {_age(snap_age)}")
         if snap_age > STALE_SNAPSHOT_SECONDS:
             print("    ! EL BUCLE PARECE MUERTO -> gh run list --workflow=live-event-loop.yml")
+        elif not series and not fighting:
+            print("    OK: el bucle esta vivo. Aun no hay muestras porque todavia no se")
+            print("      pelea nadie (paseillos o hueco entre combates). No es un fallo.")
         elif not series:
-            print("    ! El bucle VIVE pero no entra ni una muestra: el fallo esta en el")
-            print("      escritor de muestras, NO en el bucle. Relanzarlo no arregla nada.")
+            print("    ! El bucle VIVE, HAY UN COMBATE EN MARCHA y no entra ni una muestra:")
+            print("      el fallo esta en el escritor de muestras, NO en el bucle.")
+            print("      Relanzarlo no arregla nada.")
         else:
             print("    OK: el bucle esta vivo y la pelicula se esta grabando.")
 

@@ -84,3 +84,18 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python -m src.scrapers.backfill_results
+
+      - name: Refresco de records post-ventana (best-effort)
+        # Los records NO se mueven solos al sellar un combate: los actualiza el
+        # cron diario de las 08:00 UTC. El 25-jul-2026, con 10 combates ya
+        # resueltos, Rzepecki seguia figurando como invicto habiendo perdido esa
+        # misma noche, y asi habria seguido 16 h. Al colgarlo del cierre de la
+        # ventana la espera baja a ~1 h, que es lo que pidio el dueno.
+        # --days 3 es de sobra para la velada recien terminada y mantiene el
+        # trabajo acotado (ayer fueron 24 luchadores). Best-effort igual que el
+        # paso de arriba: esto no puede tumbar la noche de directo.
+        if: always()
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m src.scrapers.refresh_fighter_records --days 3

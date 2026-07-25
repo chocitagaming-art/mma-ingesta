@@ -48,6 +48,11 @@ on:
       # Si el despliegue del microservicio falla, la web se queda sirviendo el
       # modelo anterior sin dar ningún error: fallo silencioso de manual.
       - "Deploy prediction service (Render)"
+      # Faltaba, y ya costó: falló el 22-jul-2026 y estuvo tres días sin que
+      # nadie se enterara. Ojo, no confundirlo con "Keepalive commit" (que sí
+      # estaba en la lista): son workflows distintos. Si este deja de correr,
+      # Render se duerme y la primera predicción del día tarda 42 s.
+      - "Keep-alive prediction service"
     types: [completed]
 
 permissions:

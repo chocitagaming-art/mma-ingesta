@@ -34,6 +34,20 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      - name: Rescatar imagenes que faltaron (best-effort)
+        # El scraper de arriba se salta las URLs que ya existen (news.py:96-99),
+        # asi que una fila que entro sin imagen NO la recupera nunca aunque el
+        # articulo empiece a servir og:image mas tarde — que es justo lo que
+        # paso con la noticia 231 del 24-jul. Este script ya existia con su CLI
+        # y no estaba enganchado a ningun workflow. Va DESPUES del scraper (para
+        # coger tambien lo recien insertado) y ANTES del revalidate (para que la
+        # home publique ya las imagenes rescatadas). --limit acota el gasto de
+        # red: son pocas filas y cada pasada reintenta las que queden.
+        continue-on-error: true
+        run: python -m src.scrapers.backfill_news_images --limit 25
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
       - name: Revalidate home page
         run: |
           curl -fsS -X POST "https://mma-app-ruby.vercel.app/api/revalidate" \
