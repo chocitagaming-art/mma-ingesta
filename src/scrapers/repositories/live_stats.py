@@ -193,6 +193,32 @@ def delete_live_fight_stat_samples(connection: PgConnection, fight_id: int) -> N
         )
 
 
+def last_in_progress_clock(connection: PgConnection, fight_id: int) -> str | None:
+    """Último reloj visto con la pelea EN CURSO, en formato mm:ss.
+
+    Lo usa `elapsed_end_time` para distinguir la cuenta atrás congelada del
+    tiempo transcurrido: una cuenta atrás nunca sube dentro del asalto. Se pide
+    solo al escribir el resultado (una vez por pelea), no en cada pasada.
+    Devuelve None si aún no hay serie — entonces se asume cuenta atrás, que es
+    lo que ESPN sirve mientras el combate está vivo.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT display_clock
+            FROM live_fight_stat_samples
+            WHERE fight_id = %s
+              AND state = 'in'
+              AND display_clock ~ '^[0-9]+:[0-9]{2}$'
+            ORDER BY sampled_at DESC
+            LIMIT 1
+            """,
+            (fight_id,),
+        )
+        row = cursor.fetchone()
+    return row[0] if row else None
+
+
 def get_final_stats_fight_ids(connection: PgConnection, fight_ids: list[int]) -> set[int]:
     """Peleas cuyo total final SELLADO (is_final) ya está guardado: el bucle
     deja de re-pedirlas a ESPN. Una fila 'post' que NO llegó a is_final (el

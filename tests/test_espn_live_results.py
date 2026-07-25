@@ -299,9 +299,14 @@ def test_process_events_fills_results_by_espn_source(fakedb):
         if sql.strip().upper().startswith("UPDATE")
     ]
     assert len(updates) == 3
-    # KO/TKO del main event: ganador 101 (Topuria), R1 2:27, sobre fight 11.
+    # KO/TKO del main event: ganador 101 (Topuria), R1, sobre fight 11.
+    # El scoreboard trae "2:27", que es el reloj de ESPN y va en CUENTA ATRÁS;
+    # lo que se guarda es el TRANSCURRIDO, 5:00 - 2:27 = 2:33. Antes se escribía
+    # el crudo, y por eso 8 de los 12 combates del 1062 salieron con la hora
+    # invertida a producción (el estelar decía 2:17 habiendo sido 2:41).
+    # Ver tests/test_end_time_clock.py.
     sql, params = updates[0]
-    assert params[:5] == (101, "KO/TKO", 1, "2:27", 11)
+    assert params[:5] == (101, "KO/TKO", 1, "2:33", 11)
     assert ("Submission" in updates[1][1]) and (103 in updates[1][1])
     assert ("Decision" in updates[2][1]) and (105 in updates[2][1])
     assert conn.commits == 1

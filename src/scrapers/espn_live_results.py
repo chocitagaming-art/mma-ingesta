@@ -79,6 +79,7 @@ from .repositories.live_stats import (
     delete_live_fight_stats,
     get_final_stats_fight_ids,
     insert_live_fight_stat_sample,
+    last_in_progress_clock,
     prune_live_fight_stats,
     upsert_live_fight_stats,
 )
@@ -113,6 +114,71 @@ ESPN_PROVISIONAL_METHODS = tuple(sorted(set(METHOD_BY_DETAIL.values())))
 # empiece, así que sin este guard una cancelada se sellaría como "Final 0/0".
 # Marcadores por subcadena para tolerar variantes (CANCELED/CANCELLED...).
 _CANCELLED_STATUS_MARKERS = ("CANCEL", "POSTPON", "FORFEIT", "ABANDON", "SUSPEND")
+
+
+# Un asalto de MMA dura 5 minutos, sin excepción en UFC.
+ROUND_SECONDS = 300
+
+
+def _clock_seconds(clock: str | None) -> int | None:
+    """'2:17' -> 137. None para el guion, el vacío y cualquier cosa rara."""
+    if not clock or ":" not in clock:
+        return None
+    minutes, _, seconds = clock.partition(":")
+    if not (minutes.isdigit() and len(seconds) == 2 and seconds.isdigit()):
+        return None
+    total = int(minutes) * 60 + int(seconds)
+    return total if 0 <= total <= ROUND_SECONDS else None
+
+
+def elapsed_end_time(
+    clock: str | None, method: str | None, previous_clock: str | None
+) -> str | None:
+    """Tiempo TRANSCURRIDO del asalto final, a partir del reloj de ESPN.
+
+    `fights.end_time` es el minuto en que se acabó el combate, y de él salen los
+    segundos peleados que alimentan golpes por minuto, duraciones y el radar.
+    Pero el reloj de ESPN es una CUENTA ATRÁS, así que guardarlo crudo escribe
+    el complemento: el 25-jul-2026 el estelar quedó en 2:17 cuando fue 2:41, y
+    8 de los 12 combates del 1062 salieron invertidos a producción.
+
+    Antes se notaba menos porque el bucle iba a 120 s y ESPN tenía tiempo de
+    publicar el oficial; a 20 s sellamos en la primera pasada 'post' y
+    congelamos la cuenta atrás.
+
+    NO se puede invertir a ciegas: en las decisiones ESPN sí manda el
+    transcurrido ('5:00'), y por eso 4 de los 12 estaban bien. El discriminador
+    es `previous_clock`, el último reloj visto con la pelea EN CURSO: una cuenta
+    atrás nunca sube dentro del asalto, así que un valor mayor que el anterior
+    delata que ESPN ya cambió al transcurrido (patrón Steveson del 19-jul: 2:26
+    congelado y después 2:31 oficial). Sin historial se asume cuenta atrás, que
+    es lo que ESPN hizo en los 12 combates del 1062.
+
+    Es una APROXIMACIÓN de 1-2 segundos: el reloj se congela cuando ESPN
+    registra el final, no cuando lo canta el árbitro. ufcstats la sustituye por
+    la oficial al consolidar (`backfill_results` deja ganar al valor nuevo), así
+    que este valor es provisional por diseño — pero un provisional casi exacto
+    en vez de uno invertido, y es el único que queda si la pelea nunca casa.
+    """
+    # Una decisión agota el asalto por definición: el dato se conoce sin mirar
+    # el reloj, y así se reparan de paso los '-' que ESPN manda a veces (las
+    # peleas 12871 y 12872 guardaron un guion literal como hora).
+    if method and method.casefold().startswith("decision"):
+        return _format_clock(ROUND_SECONDS)
+
+    seconds = _clock_seconds(clock)
+    if seconds is None:
+        return None
+
+    previous = _clock_seconds(previous_clock)
+    if previous is not None and seconds > previous:
+        # Rompe la cuenta atrás: ESPN ya sirve el transcurrido.
+        return _format_clock(seconds)
+    return _format_clock(ROUND_SECONDS - seconds)
+
+
+def _format_clock(seconds: int) -> str:
+    return f"{seconds // 60}:{seconds % 60:02d}"
 
 
 def is_cancelled_status(status_name: str | None) -> bool:
@@ -357,12 +423,20 @@ def _process_fight(
         counts["fights_no_winner"] += 1
         LOGGER.info("  no winner flagged for %s vs %s; skipping", fight.red_name, fight.blue_name)
         return
+    # El reloj de ESPN es una cuenta atrás y end_time es el transcurrido: sin
+    # esta conversión el estelar del 1062 se guardó como 2:17 habiendo sido 2:41.
+    end_time = elapsed_end_time(
+        fight.end_time,
+        fight.method,
+        last_in_progress_clock(connection, fight_id),
+    )
     LOGGER.info(
-        "  LIVE %s def. %s — %s R%s %s (fight %s%s)",
+        "  LIVE %s def. %s — %s R%s %s (reloj ESPN %s) (fight %s%s)",
         winner_name,
         fight.blue_name if winner_id == red_id else fight.red_name,
         fight.method or "method TBD",
         fight.end_round,
+        end_time,
         fight.end_time,
         fight_id,
         ", dry-run" if dry_run else "",
@@ -370,7 +444,7 @@ def _process_fight(
     if dry_run:
         counts["fights_updated"] += 1
         return
-    if fill_fight_result(connection, fight_id, winner_id, fight.method, fight.end_round, fight.end_time):
+    if fill_fight_result(connection, fight_id, winner_id, fight.method, fight.end_round, end_time):
         counts["fights_updated"] += 1
     else:
         counts["fights_already_filled"] += 1

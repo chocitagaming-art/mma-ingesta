@@ -590,6 +590,10 @@ def test_dry_run_writes_no_samples(fakedb):
     session = _FakeSession({aid: STATS_PAYLOAD for aid in ESPN_TO_DB})
     events = parse_scoreboard(_scoreboard_with_one_live_fight())
     process_events(conn, events, promotion_id=1, dry_run=True, stats_session=session)
+    # Se afirma sobre las sentencias que ESCRIBEN, no sobre cualquier mención de
+    # la tabla: un dry-run sí LEE la serie (last_in_progress_clock, para saber si
+    # el reloj de ESPN es cuenta atrás), y debe seguir haciéndolo — es lo que
+    # permite ver en el log qué habría escrito. Lo que no puede es insertar.
     assert not any(
-        "live_fight_stat_samples" in sql for sql, _ in _ordered_statements(conn)
+        "live_fight_stat_samples" in sql for sql in fakedb.mutating_statements(conn)
     )
