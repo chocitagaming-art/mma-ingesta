@@ -89,7 +89,11 @@ jobs:
         run: echo "No hay velada en la ventana. Nada que hacer."
 
       - name: Dormir hasta 15 min antes del primer combate
-        if: steps.plan.outputs.hay_evento == 'true'
+        # En ENSAYO no se duerme: un ensayo con lookahead grande se quedaria
+        # cinco horas ocupando un runner para no disparar nada al final. Se
+        # descubrio en la primera prueba real (run 30203744406, cancelado a
+        # mano), que es exactamente para lo que sirve ensayar.
+        if: steps.plan.outputs.hay_evento == 'true' && inputs.dry_run != true
         run: |
           PLAN='${{ steps.plan.outputs.plan }}'
           SEG=$(echo "$PLAN" | python -c 'import json,sys; print(json.load(sys.stdin)["dormir_segundos"])')
