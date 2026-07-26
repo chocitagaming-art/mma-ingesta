@@ -47,6 +47,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+
+import psycopg2
 from collections import Counter
 
 from .backfill_event_fights import EVENTS_INDEX_URL, _distinctive_name_overlap
@@ -335,6 +337,39 @@ def emparejar_en_indice(event_name: str, event_date, index_records) -> str | Non
     return best.detail_url
 
 
+def rollback_seguro(connection) -> bool:
+    """Roll back without letting a dead connection kill the whole run.
+
+    Measured on 2026-07-26: Neon dropped the connection mid-``_fill_event`` and
+    the per-event ``except`` — which exists precisely to carry on with the next
+    event — blew up on ``connection.rollback()`` with "connection already
+    closed". Nothing caught THAT second exception, so the process died and the
+    remaining 431 events were lost. The error handling was more fragile than the
+    error it handled.
+    """
+    try:
+        connection.rollback()
+        return True
+    except psycopg2.Error as exc:
+        LOGGER.warning("Rollback on a dead connection (%s); will reconnect", exc)
+        return False
+
+
+def reconectar_si_hace_falta(connection, abrir):
+    """Return a live connection, opening a new one if the current one is gone.
+
+    A rescue batch is hours of slow scraping against a third party, so losing
+    the connection at some point is expected, not exceptional. If the RECONNECT
+    also fails we do let it propagate: without a database there is nothing to
+    do, and retrying hundreds of events against a downed server only drags it
+    out.
+    """
+    if connection is not None and not connection.closed:
+        return connection
+    LOGGER.warning("Connection is closed; opening a new one")
+    return abrir()
+
+
 def cargar_indice_completo(client, settings, hasta_fecha, max_paginas: int = 100) -> list:
     """Every completed-events page down to ``hasta_fecha``, read once.
 
@@ -608,26 +643,48 @@ def backfill(
             index = parse_events_index(client.fetch(UFCSTATS_EVENTS_URL).soup, settings)
             LOGGER.info("ufcstats completed-events index (page 1): %d events", len(index))
 
-        for event_id, name, event_date in events:
-            if historico:
-                detail_url = emparejar_en_indice(name, event_date, index)
-            else:
-                detail_url = _match_event(name, event_date, index)
-            if detail_url is None:
-                counts["events_unmatched"] += 1
-                LOGGER.info("No ufcstats match for %r (%s)", name, event_date)
-                continue
-            counts["events_matched"] += 1
-            bouts = _get_bouts(connection, event_id)
-            LOGGER.info("%r (%s) -> %s | %d bouts", name, event_date, detail_url, len(bouts))
-            try:
-                _fill_event(connection, client, settings, event_id, bouts, detail_url, counts, dry_run)
-                if not dry_run:
-                    connection.commit()
-            except Exception as exc:  # noqa: BLE001 - keep going to the next event
-                connection.rollback()
-                counts["event_errors"] += 1
-                LOGGER.exception("Failed to fill %r: %s", name, exc)
+        # Connections opened by the reconnect path. `connect()` is a context
+        # manager that closes ITS connection on exit — it can't close one it
+        # never opened, so these are tracked and closed here.
+        reabiertas: list = []
+
+        def _reabrir():
+            nueva = psycopg2.connect(settings.database_url)
+            reabiertas.append(nueva)
+            return nueva
+
+        try:
+            for event_id, name, event_date in events:
+                if historico:
+                    detail_url = emparejar_en_indice(name, event_date, index)
+                else:
+                    detail_url = _match_event(name, event_date, index)
+                if detail_url is None:
+                    counts["events_unmatched"] += 1
+                    LOGGER.info("No ufcstats match for %r (%s)", name, event_date)
+                    continue
+                counts["events_matched"] += 1
+                # A rescue batch is hours of slow scraping against a third
+                # party, so losing the connection along the way is expected.
+                # Every event commits on its own, so reconnecting costs nothing
+                # already written.
+                connection = reconectar_si_hace_falta(connection, _reabrir)
+                bouts = _get_bouts(connection, event_id)
+                LOGGER.info("%r (%s) -> %s | %d bouts", name, event_date, detail_url, len(bouts))
+                try:
+                    _fill_event(connection, client, settings, event_id, bouts, detail_url, counts, dry_run)
+                    if not dry_run:
+                        connection.commit()
+                except Exception as exc:  # noqa: BLE001 - keep going to the next event
+                    rollback_seguro(connection)
+                    counts["event_errors"] += 1
+                    LOGGER.exception("Failed to fill %r: %s", name, exc)
+        finally:
+            for extra in reabiertas:
+                try:
+                    extra.close()
+                except psycopg2.Error:  # pragma: no cover - best effort
+                    pass
     return dict(counts)
 
 
