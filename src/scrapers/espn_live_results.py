@@ -647,6 +647,25 @@ SUMMARY_KEYS = [
 ]
 
 
+def night_produced_nothing(totals: Counter) -> bool:
+    """La ventana vio el directo y no dejó ni rastro. Es el modo de fallo del run
+    29179498181: 109 pasadas, evento encontrado, cero escrituras, SUCCESS.
+
+    Vive aquí, en UNA sola función, porque la usan tanto el aviso como el código
+    de salida. Duplicada, un día se toca una copia y no la otra, y el bucle
+    acaba avisando de algo por lo que no sale en rojo.
+
+    Lo que NO cuenta como problema, que es la mitad del diseño: un relevo sobre
+    cartelera ya sellada (`live_stats_skipped_final`) o ya resuelta
+    (`fights_already_filled`) no escribe nada Y HACE BIEN.
+    """
+    escrituras = totals.get("fights_updated", 0) + totals.get("live_stats_written", 0)
+    ya_estaba = (
+        totals.get("live_stats_skipped_final", 0) + totals.get("fights_already_filled", 0)
+    )
+    return bool(totals.get("live_events")) and not escrituras and not ya_estaba
+
+
 def loop_health_warnings(totals: Counter) -> list[str]:
     """Qué salió mal en la ventana, en cristiano. Lista vacía = todo bien.
 
@@ -689,11 +708,7 @@ def loop_health_warnings(totals: Counter) -> list[str]:
             "a una fila nuestra: se queda sin stats en directo ni película."
         )
 
-    escrituras = totals.get("fights_updated", 0) + totals.get("live_stats_written", 0)
-    ya_estaba = (
-        totals.get("live_stats_skipped_final", 0) + totals.get("fights_already_filled", 0)
-    )
-    if totals.get("live_events") and not escrituras and not ya_estaba:
+    if night_produced_nothing(totals):
         avisos.append(
             f"La ventana vio eventos en directo ({totals['live_events']} veces) y no "
             "escribió NADA en toda la noche, ni encontró nada ya sellado. Es el "
@@ -703,16 +718,29 @@ def loop_health_warnings(totals: Counter) -> list[str]:
 
 
 def loop_exit_code(totals: Counter) -> int:
-    """Código de salida de la ventana. Hoy solo se pone en rojo lo indiscutible.
+    """Código de salida de la ventana. En rojo solo lo que no admite discusión.
 
-    Con 0 fallos en 2339 pasadas de 8 runs históricos NO hay base para elegir un
-    umbral: cualquier porcentaje estaría calibrado contra una distribución toda
-    a cero. Así que de momento se AVISA (::warning::) y solo se sale en rojo si
-    fallaron TODAS las pasadas — ahí no hay interpretación posible: la ventana
-    no produjo nada. Endurecer cuando haya dos o tres veladas de muestra.
+    Dos criterios, y la diferencia entre ellos es POR QUÉ uno se puede endurecer
+    hoy y el otro no:
+
+    1. Fallaron TODAS las pasadas. Binario: la ventana no produjo nada.
+    2. Vio el directo y no dejó rastro (`night_produced_nothing`). También
+       binario — o escribió, o encontró algo ya sellado, o la noche se perdió.
+
+    Lo que sigue SIN poder endurecerse es el criterio porcentual sobre
+    `loop_failures` ("¿a partir de qué % de pasadas malas tumbo el job?"): con 0
+    fallos en 2339 pasadas de 8 runs, cualquier umbral estaría calibrado contra
+    una distribución toda a cero. Ese espera a tener dos o tres veladas de
+    muestra; estos dos no, porque no hay nada que calibrar.
+
+    El resto sigue saliendo por `::warning::`: un rojo en falso quema la alerta
+    para siempre, porque notify-on-failure reutiliza un único Issue y no lo
+    cierra solo.
     """
     iteraciones = totals.get("loop_iterations", 0)
     if iteraciones and totals.get("loop_failures", 0) >= iteraciones:
+        return 1
+    if night_produced_nothing(totals):
         return 1
     return 0
 

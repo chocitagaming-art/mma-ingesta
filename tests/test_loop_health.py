@@ -129,6 +129,40 @@ def test_exit_is_green_if_at_least_one_pass_survived():
     assert loop_exit_code(_totals(loop_iterations=40, loop_failures=39)) == 0
 
 
+def test_exit_is_red_when_the_night_produced_nothing():
+    """El caso que YA ocurrio tiene que tumbar el job, no solo avisar.
+
+    El run 29179498181 hizo 109 pasadas, encontro el evento, escribio CERO y
+    salio SUCCESS. Avisar no basta: el 1-ago y el 8-ago no hay nadie leyendo
+    los `::warning::`, y notify-on-failure solo mira `conclusion == failure`.
+
+    Y este no necesita esperar a las 2-3 veladas de muestra, al reves que el
+    criterio porcentual sobre loop_failures: es BINARIO. O escribio algo, o
+    encontro algo ya sellado, o la noche se perdio entera. No hay umbral que
+    calibrar ni distribucion que estimar, asi que se puede endurecer HOY.
+    """
+    totals = _totals(loop_iterations=109, live_events=109, events_matched=109)
+    assert loop_health_warnings(totals), "premisa: este caso ya avisaba"
+    assert loop_exit_code(totals) == 1
+
+
+def test_the_two_criteria_never_diverge():
+    """La condicion vive en UN solo sitio, no copiada en dos.
+
+    Si `loop_health_warnings` y `loop_exit_code` la escribieran cada uno por su
+    lado, un dia se tocaria una y no la otra, y el bucle avisaria de algo por lo
+    que no sale en rojo (o peor, al reves). Este test fija la equivalencia sobre
+    los casos frontera que mas cuestan.
+    """
+    perdida = _totals(live_events=50, events_matched=50)
+    sellada = _totals(live_events=50, live_stats_skipped_final=600)
+    resuelta = _totals(live_events=50, fights_already_filled=600)
+
+    assert loop_health_warnings(perdida) and loop_exit_code(perdida) == 1
+    assert loop_health_warnings(sellada) == [] and loop_exit_code(sellada) == 0
+    assert loop_health_warnings(resuelta) == [] and loop_exit_code(resuelta) == 0
+
+
 def test_exit_ignores_an_empty_loop():
     # Sin pasadas no hay nada que juzgar (no dividir por cero ni inventar rojo).
     assert loop_exit_code(Counter()) == 0
