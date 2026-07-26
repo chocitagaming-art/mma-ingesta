@@ -1,0 +1,85 @@
+name: Token dispatch selftest
+
+# ¿PUEDE EL GITHUB_TOKEN LANZAR UN workflow_dispatch?
+#
+# Es la premisa ENTERA del centinela del directo (fase 1b): un workflow que
+# duerme hasta T-15min y entonces dispara el bucle y la captura. Si el token
+# automático no puede disparar, el centinela no existe tal como está diseñado y
+# hace falta un PAT del dueño (otro secret, otra rotación, otro riesgo).
+#
+# Y NO había ni un precedente: en los últimos 100 runs del repo, todos los
+# workflow_dispatch los lanzó un humano. Se daba por supuesto, que es justo lo
+# que el 25-jul salió caro con `notify-on-failure` (86 ejecuciones seguidas sin
+# haberse disparado nunca de verdad).
+#
+# CÓMO SE PRUEBA: se autodispara con un input `depth`, así que no depende de
+# ningún otro workflow ni escribe en ninguna parte. En depth=0 intenta lanzarse
+# a sí mismo con depth=1; en depth=1 no dispara nada y corta la recursión.
+# Sin base de datos y sin más red que la propia API de GitHub.
+#
+# LA PRUEBA ES CONCLUYENTE si aparece un segundo run con depth=1 y actor
+# `github-actions`. El HTTP 204 solo dice que la petición fue aceptada.
+#
+# No lleva cron a propósito: solo se ejecuta cuando alguien lo pide.
+# No está en la lista de `notify-on-failure`, así que no puede ensuciar alertas.
+
+on:
+  workflow_dispatch:
+    inputs:
+      depth:
+        description: "0 = intenta relanzarse · 1 = es el relanzado, no dispara nada"
+        default: "0"
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  probar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Quien lanza este run
+        run: |
+          echo "depth  = ${{ inputs.depth }}"
+          echo "actor  = ${{ github.actor }}"
+          echo "evento = ${{ github.event_name }}"
+
+      - name: Intentar dispararme a mi mismo con el GITHUB_TOKEN
+        if: ${{ inputs.depth == '0' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          codigo=$(curl -sS -o /tmp/salida.txt -w '%{http_code}' \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/token-dispatch-selftest.yml/dispatches" \
+            -d '{"ref":"main","inputs":{"depth":"1"}}')
+          echo "HTTP $codigo"
+          cat /tmp/salida.txt || true
+          {
+            echo "### Prueba del GITHUB_TOKEN"
+            echo ""
+            if [ "$codigo" = "204" ]; then
+              echo "**HTTP 204 — la peticion fue ACEPTADA.**"
+              echo ""
+              echo "Falta confirmar que el run hijo existe de verdad:"
+              echo "busca un segundo run de este workflow con \`depth=1\`."
+              echo "Si aparece, el centinela puede usar el token automatico."
+            else
+              echo "**HTTP $codigo — el token NO puede disparar.**"
+              echo ""
+              echo "El centinela necesita un PAT del dueno con permiso \`actions:write\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          # A proposito NO se hace `exit 1` cuando no puede: esto es un
+          # experimento, y un rojo aqui solo ensuciaria el historial de runs.
+          # El veredicto se lee en el resumen y en este log.
+
+      - name: Soy el run hijo
+        if: ${{ inputs.depth != '0' }}
+        run: |
+          echo "PRUEBA CONCLUYENTE: este run lo lanzo el GITHUB_TOKEN, no una persona."
+          echo "actor = ${{ github.actor }}"
+          echo "### Run hijo vivo — el GITHUB_TOKEN SI puede disparar workflows" >> "$GITHUB_STEP_SUMMARY"
