@@ -49,7 +49,7 @@ import json
 import logging
 from collections import Counter
 
-from .backfill_event_fights import _find_ufcstats_event_url
+from .backfill_event_fights import EVENTS_INDEX_URL, _distinctive_name_overlap
 from .config import get_settings
 from .db import connect
 from .enrich_ranked import _fold
@@ -306,6 +306,58 @@ def _match_event(event_name: str, event_date, index_records) -> str | None:
     return best.detail_url
 
 
+def emparejar_en_indice(event_name: str, event_date, index_records) -> str | None:
+    """Same as _match_event but over a PRE-LOADED index, keeping the safety guard.
+
+    The historic rescue can't afford _find_ufcstats_event_url's per-event walk:
+    it restarts at page 1 every time, so a 2015 card re-reads ~20 pages and 745
+    events spend hours re-reading the same listing. Here the index is loaded
+    once and searched in memory.
+
+    What must NOT be lost in the move is the distinctive-token guard: two events
+    can share a date, and hanging one's card on the other corrupts BOTH (the
+    existing fights get re-pointed at the wrong event_id). When in doubt, don't
+    match — an unconsolidated event retries, a corrupted one is fixed by hand.
+    """
+    same_date = [rec for rec in index_records if rec.event.event_date == event_date]
+    if not same_date:
+        return None
+    best = max(
+        same_date,
+        key=lambda rec: _distinctive_name_overlap(event_name, rec.event.name),
+    )
+    if _distinctive_name_overlap(event_name, best.event.name) == 0:
+        LOGGER.warning(
+            "Rejecting same-date ufcstats event %r for target %r: no distinctive token",
+            best.event.name, event_name,
+        )
+        return None
+    return best.detail_url
+
+
+def cargar_indice_completo(client, settings, hasta_fecha, max_paginas: int = 100) -> list:
+    """Every completed-events page down to ``hasta_fecha``, read once.
+
+    The listing is newest-first, so the walk stops as soon as a page is already
+    older than the oldest event we need. ~25 events per page covers decades well
+    before the page cap.
+    """
+    registros: list = []
+    for pagina in range(1, max_paginas + 1):
+        page = client.fetch(EVENTS_INDEX_URL.format(page=pagina))
+        nuevos = parse_events_index(page.soup, settings)
+        if not nuevos:
+            break  # ran past the last page
+        registros.extend(nuevos)
+        fechas = [r.event.event_date for r in nuevos if r.event.event_date]
+        if fechas and min(fechas) < hasta_fecha:
+            break
+    LOGGER.info(
+        "ufcstats index loaded once: %d events down to %s", len(registros), hasta_fecha
+    )
+    return registros
+
+
 def _name_overlap(a: str, b: str) -> int:
     return len(set(a.split()) & set(b.split()))
 
@@ -544,20 +596,21 @@ def backfill(
             return dict(counts)
 
         client = UfcStatsClient(settings)
-        index = []
-        if not historico:
+        if historico:
+            # Page 1 only lists the most recent cards, so the daily path CANNOT
+            # find a 2023 event. The back catalogue needs the whole listing —
+            # but read ONCE, not re-walked per event: _find_ufcstats_event_url
+            # restarts at page 1 every time, so 745 events would re-read the
+            # same pages thousands of times (~20 s/event and rising, measured).
+            mas_antiguo = min(fecha for _, _, fecha in events)
+            index = cargar_indice_completo(client, settings, mas_antiguo)
+        else:
             index = parse_events_index(client.fetch(UFCSTATS_EVENTS_URL).soup, settings)
             LOGGER.info("ufcstats completed-events index (page 1): %d events", len(index))
 
         for event_id, name, event_date in events:
             if historico:
-                # Page 1 of the index only lists the most recent cards, so the
-                # daily path CANNOT find a 2023 event — it would report every
-                # one of them as unmatched. The back catalogue needs the
-                # paginated walk, which stops as soon as a page is older than
-                # the target and rejects a same-date event with no distinctive
-                # name token in common.
-                detail_url = _find_ufcstats_event_url(client, settings, name, event_date)
+                detail_url = emparejar_en_indice(name, event_date, index)
             else:
                 detail_url = _match_event(name, event_date, index)
             if detail_url is None:
