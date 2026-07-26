@@ -49,6 +49,7 @@ import json
 import logging
 from collections import Counter
 
+from .backfill_event_fights import _find_ufcstats_event_url
 from .config import get_settings
 from .db import connect
 from .enrich_ranked import _fold
@@ -190,43 +191,73 @@ class _Bout:
         return None
 
 
-def _get_events_needing_results(connection, limit: int | None) -> list[tuple[int, str, object]]:
-    with connection.cursor() as cursor:
-        cursor.execute(
-            """
-            SELECT e.id, e.name, e.event_date
-            FROM events e
-            WHERE e.source = %s
-              AND e.event_date IS NOT NULL
-              AND e.event_date < CURRENT_DATE
-              -- Only retry cards within the backfill window (BACKFILL_WINDOW_DAYS):
-              -- wide enough to catch late-published referee/scorecards, bounded so
-              -- a permanently unmatchable bout can't re-qualify forever (see the
-              -- constant's docstring for the full rationale).
-              AND e.event_date >= CURRENT_DATE - (%s * INTERVAL '1 day')
-              AND EXISTS (
-                SELECT 1 FROM fights fi
-                WHERE fi.event_id = e.id
-                  AND (
-                    fi.method IS NULL
-                    -- provisional ESPN live result -> upgrade with ufcstats detail
-                    OR fi.method = ANY(%s)
-                    -- a real bout has 2 fighters -> needs both stat rows
-                    OR (SELECT COUNT(*) FROM fight_stats fs WHERE fs.fight_id = fi.id) < 2
-                    -- ... and both fighters' per-round rows (migration 012 / BE4)
-                    OR (SELECT COUNT(DISTINCT fsr.fighter_id)
-                        FROM fight_stats_rounds fsr WHERE fsr.fight_id = fi.id) < 2
-                    -- result filled but the referee never was (migration 011 /
-                    -- BE8): officials for ufc.com bouts ride on the same fight
-                    -- page, so the event keeps qualifying until they land too
-                    OR (fi.referee IS NULL
-                        AND (fi.winner_id IS NOT NULL OR fi.method IS NOT NULL))
-                  )
+def events_needing_results_sql(historico: bool = False) -> tuple[str, list]:
+    """The 'which cards still need a pass' query, built so it can be tested.
+
+    THREE THINGS MEASURED AGAINST THE REAL DB ON 2026-07-26, none documented:
+
+    * Cancelled bouts kept whole events alive. A cancelled bout has no method
+      and no stats BY DEFINITION, so events 1062 (2 cancelled) and 1061 (3)
+      re-qualified on every pass for 60 days to do nothing at all.
+
+    * The provisional-method clause caused permanent churn. 'KO/TKO' is in
+      ESPN_PROVISIONAL_METHODS because that is what the live loop writes — but
+      ufcstats writes the very same string when it doesn't detail the strike,
+      so McGregor-Holloway was rewritten 5 times in 11 hours. The clause is
+      redundant anyway: a bout whose method still needs upgrading is also
+      missing stats or a referee, so it already qualifies through those.
+
+    * `e.source = 'ufc.com'` — not the 60-day window — is what hid the whole
+      back catalogue: 761 of the 787 events have source NULL, and all 735
+      events with refereeless bouts live in that group.
+
+    ``historico`` drops the source and window filters for a MANUAL batch rescue
+    (see the CLI). The daily cron keeps both: the window exists so a bout that
+    can never be matched can't re-qualify forever and grow the cron without
+    bound, and that reasoning still holds.
+    """
+    filtros = ["e.event_date IS NOT NULL", "e.event_date < CURRENT_DATE"]
+    params: list = []
+    if not historico:
+        filtros.insert(0, "e.source = %s")
+        params.append(UFC_SOURCE)
+        filtros.append("e.event_date >= CURRENT_DATE - (%s * INTERVAL '1 day')")
+        params.append(BACKFILL_WINDOW_DAYS)
+
+    sql = f"""
+        SELECT e.id, e.name, e.event_date
+        FROM events e
+        WHERE {' AND '.join(filtros)}
+          AND EXISTS (
+            SELECT 1 FROM fights fi
+            WHERE fi.event_id = e.id
+              -- A cancelled bout has no method and no stats by definition:
+              -- without this it keeps its whole event qualifying forever.
+              AND fi.status IS DISTINCT FROM 'cancelled'
+              AND (
+                fi.method IS NULL
+                -- a real bout has 2 fighters -> needs both stat rows
+                OR (SELECT COUNT(*) FROM fight_stats fs WHERE fs.fight_id = fi.id) < 2
+                -- ... and both fighters' per-round rows (migration 012 / BE4)
+                OR (SELECT COUNT(DISTINCT fsr.fighter_id)
+                    FROM fight_stats_rounds fsr WHERE fsr.fight_id = fi.id) < 2
+                -- result filled but the referee never was (migration 011 /
+                -- BE8): officials ride on the same fight page as the result
+                OR (fi.referee IS NULL
+                    AND (fi.winner_id IS NOT NULL OR fi.method IS NOT NULL))
               )
-            ORDER BY e.event_date DESC
-            """,
-            (UFC_SOURCE, BACKFILL_WINDOW_DAYS, list(ESPN_PROVISIONAL_METHODS)),
-        )
+          )
+        ORDER BY e.event_date DESC
+    """
+    return sql, params
+
+
+def _get_events_needing_results(
+    connection, limit: int | None, historico: bool = False
+) -> list[tuple[int, str, object]]:
+    sql, params = events_needing_results_sql(historico=historico)
+    with connection.cursor() as cursor:
+        cursor.execute(sql, params)
         rows = [(int(r[0]), str(r[1]), r[2]) for r in cursor.fetchall()]
     return rows[:limit] if limit is not None else rows
 
@@ -500,22 +531,35 @@ def _fill_officials(connection, bout, fight_page_soup, counts, dry_run) -> None:
             counts["scorecards_inserted"] += 1
 
 
-def backfill(dry_run: bool = False, limit: int | None = None) -> dict:
+def backfill(
+    dry_run: bool = False, limit: int | None = None, historico: bool = False
+) -> dict:
     settings = get_settings()
     counts: Counter = Counter()
     with connect(settings.database_url) as connection:
-        events = _get_events_needing_results(connection, limit)
+        events = _get_events_needing_results(connection, limit, historico=historico)
         counts["events_candidate"] = len(events)
-        LOGGER.info("Past ufc.com events missing results: %d", len(events))
+        LOGGER.info("Past events missing results: %d", len(events))
         if not events:
             return dict(counts)
 
         client = UfcStatsClient(settings)
-        index = parse_events_index(client.fetch(UFCSTATS_EVENTS_URL).soup, settings)
-        LOGGER.info("ufcstats completed-events index (page 1): %d events", len(index))
+        index = []
+        if not historico:
+            index = parse_events_index(client.fetch(UFCSTATS_EVENTS_URL).soup, settings)
+            LOGGER.info("ufcstats completed-events index (page 1): %d events", len(index))
 
         for event_id, name, event_date in events:
-            detail_url = _match_event(name, event_date, index)
+            if historico:
+                # Page 1 of the index only lists the most recent cards, so the
+                # daily path CANNOT find a 2023 event — it would report every
+                # one of them as unmatched. The back catalogue needs the
+                # paginated walk, which stops as soon as a page is older than
+                # the target and rejects a same-date event with no distinctive
+                # name token in common.
+                detail_url = _find_ufcstats_event_url(client, settings, name, event_date)
+            else:
+                detail_url = _match_event(name, event_date, index)
             if detail_url is None:
                 counts["events_unmatched"] += 1
                 LOGGER.info("No ufcstats match for %r (%s)", name, event_date)
@@ -539,8 +583,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Backfill results onto past ufc.com event bouts from ufcstats.")
     parser.add_argument("--dry-run", action="store_true", help="Find + match + report, no writes.")
     parser.add_argument("--limit", type=int, default=None, help="Process at most this many events.")
+    parser.add_argument(
+        "--historico",
+        action="store_true",
+        help=(
+            "Rescue the back catalogue: drops the source and 60-day filters and "
+            "walks the paginated ufcstats index. MANUAL, IN BATCHES — 735 events "
+            "and ~8.2k bouts at ~1.25 s per request. Always pair with --limit."
+        ),
+    )
     args = parser.parse_args()
-    counts = backfill(dry_run=args.dry_run, limit=args.limit)
+    counts = backfill(dry_run=args.dry_run, limit=args.limit, historico=args.historico)
     keys = [
         "events_candidate", "events_matched", "events_unmatched",
         "bouts_filled", "bouts_unmatched", "stats_rows", "stats_unmatched", "stats_empty",
