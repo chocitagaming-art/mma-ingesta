@@ -60,8 +60,8 @@ jobs:
       # La direccion y el id del servicio viven en variables del repo, no en
       # este fichero: es publico, y publicarlos permite golpear el servicio
       # saltandose la web y deja medio armada una llamada a la API de Render.
-      SERVICE_ID: ${{ vars.RENDER_SERVICE_ID }}
-      SERVICE_URL: ${{ vars.PREDICTION_SERVICE_URL }}
+      SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+      SERVICE_URL: ${{ secrets.PREDICTION_SERVICE_URL }}
       CLEAR_CACHE: ${{ inputs.clear_cache && 'clear' || 'do_not_clear' }}
     steps:
       - name: Lanzar el despliegue

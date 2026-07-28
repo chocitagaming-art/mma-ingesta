@@ -56,7 +56,7 @@ jobs:
           check "Ficha de luchador" "$BASE/fighters/6493" "MMA STATUS"
           check "Eventos" "$BASE/eventos" "MMA STATUS"
           # Render duerme ~50s en frío si el keepalive fallara; margen amplio.
-          check "Prediccion (Render)" "${{ vars.PREDICTION_SERVICE_URL }}/health" "" 75
+          check "Prediccion (Render)" "${{ secrets.PREDICTION_SERVICE_URL }}/health" "" 75
           check "Busqueda" "$BASE/api/search?q=test" "" 30
           # F5: chequeo barato de imagen rota. Extrae el headshot real (CDN
           # externo) de una ficha y confirma que resuelve. 200 y 403 cuentan como
