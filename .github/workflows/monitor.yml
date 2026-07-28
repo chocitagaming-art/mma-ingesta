@@ -34,7 +34,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      BASE: https://mma-app-ruby.vercel.app
+      BASE: https://mmastatus.app
     steps:
       - name: Comprobar endpoints
         run: |

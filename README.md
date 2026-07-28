@@ -4,7 +4,7 @@
 
 # mma-ingesta
 
-The data and machine learning half of [MMA STATUS](https://mma-app-ruby.vercel.app). It scrapes UFC and ESPN, keeps a PostgreSQL database current, trains the fight prediction model, and serves predictions over a small FastAPI service.
+The data and machine learning half of [MMA STATUS](https://mmastatus.app). It scrapes UFC and ESPN, keeps a PostgreSQL database current, trains the fight prediction model, and serves predictions over a small FastAPI service.
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776ab?style=flat-square&logo=python)
 ![XGBoost](https://img.shields.io/badge/XGBoost-model-ff6600?style=flat-square)

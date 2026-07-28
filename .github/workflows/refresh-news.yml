@@ -50,7 +50,7 @@ jobs:
 
       - name: Revalidate home page
         run: |
-          curl -fsS -X POST "https://mma-app-ruby.vercel.app/api/revalidate" \
+          curl -fsS -X POST "https://mmastatus.app/api/revalidate" \
             -H "Authorization: Bearer $REVALIDATE_SECRET" \
             -o /dev/null -w "revalidate: HTTP %{http_code}\n"
         env:
