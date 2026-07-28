@@ -20,7 +20,7 @@ name: Deploy prediction service (Render)
 # workflow estorba), se reactiva con:
 #   curl -X PATCH -H "Authorization: Bearer $RENDER_API_KEY" \
 #     -H "Content-Type: application/json" -d '{"autoDeploy":"yes"}' \
-#     https://api.render.com/v1/services/srv-d94lfh28qa3s73cuml3g
+#     https://api.render.com/v1/services/$SERVICE_ID
 # ...y entonces hay que DESACTIVAR este workflow, o cada push desplegaría dos veces.
 
 on:
@@ -57,8 +57,11 @@ jobs:
     timeout-minutes: 25
     env:
       RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-      SERVICE_ID: srv-d94lfh28qa3s73cuml3g
-      SERVICE_URL: https://mma-prediction.onrender.com
+      # La direccion y el id del servicio viven en variables del repo, no en
+      # este fichero: es publico, y publicarlos permite golpear el servicio
+      # saltandose la web y deja medio armada una llamada a la API de Render.
+      SERVICE_ID: ${{ vars.RENDER_SERVICE_ID }}
+      SERVICE_URL: ${{ vars.PREDICTION_SERVICE_URL }}
       CLEAR_CACHE: ${{ inputs.clear_cache && 'clear' || 'do_not_clear' }}
     steps:
       - name: Lanzar el despliegue

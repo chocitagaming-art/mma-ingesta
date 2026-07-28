@@ -2,10 +2,23 @@
 venv/
 __pycache__/
 *.pyc
-.env
 *.egg-info/
 dist/
 build/
+
+# Credenciales. El patron es .env* (no solo .env) A PROPOSITO: este repo es
+# PUBLICO y maneja el DATABASE_URL de produccion, la ANTHROPIC_API_KEY y la
+# RENDER_API_KEY. Con la regla anterior, un `.env.local` o un `.env.bak` se
+# habrian subido sin que nadie lo notara. La excepcion de .env.example es
+# deliberada: ese fichero solo lleva NOMBRES de variables, nunca valores.
+.env*
+!.env.example
+
+# Datasets de entrenamiento. NO se versionan: son datos derivados del scraping
+# de UFC y ESPN, y redistribuirlos no nos corresponde. Se regeneran con
+# `python -m src.prediction.features` y `python -m src.prediction.features.method_output`.
+training_dataset.csv
+method_training_dataset.csv
 
 # Scrape cache (reproducible artifact from recover_winners_eventpage.py)
 winners_scraped.json
@@ -18,3 +31,14 @@ verify_headshots_output.json
 .coverage.*
 htmlcov/
 coverage.xml
+
+# Ficha detallada del modelo. La genera train.py/evaluate.py al reentrenar y
+# contiene la lista de features, sus importancias y los hiperparametros: la
+# receta completa. Se queda en local; la version publica y resumida es
+# src/prediction/MODEL_CARD.md, escrita a mano.
+src/prediction/model_metrics.md
+
+# Volcados sueltos de ejecuciones locales (basura regenerable, y ademas
+# filtran la ruta del disco de quien los genero).
+feature_run_output.txt
+*_run_output.txt

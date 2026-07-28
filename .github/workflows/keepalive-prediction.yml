@@ -30,4 +30,4 @@ jobs:
           # también connection-refused mientras la instancia arranca. Si el
           # servicio estaba dormido, este mismo ping lo despierta.
           curl -fsS --max-time 70 --retry 1 --retry-delay 5 --retry-all-errors \
-            https://mma-prediction.onrender.com/health
+            "${{ vars.PREDICTION_SERVICE_URL }}/health"

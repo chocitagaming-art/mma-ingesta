@@ -4,166 +4,106 @@
 
 # mma-ingesta
 
-The data and machine learning half of [MMA STATUS](https://mmastatus.app). It scrapes UFC and ESPN, keeps a PostgreSQL database current, trains the fight prediction model, and serves predictions over a small FastAPI service.
+The data and machine learning half of **[MMA STATUS](https://mmastatus.app)**.
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776ab?style=flat-square&logo=python)
-![XGBoost](https://img.shields.io/badge/XGBoost-model-ff6600?style=flat-square)
-![FastAPI](https://img.shields.io/badge/FastAPI-service-009688?style=flat-square&logo=fastapi)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Neon-4169e1?style=flat-square&logo=postgresql)
+![FastAPI](https://img.shields.io/badge/FastAPI-service-009688?style=flat-square&logo=fastapi)
 [![CI](https://github.com/chocitagaming-art/mma-ingesta/actions/workflows/ci.yml/badge.svg)](https://github.com/chocitagaming-art/mma-ingesta/actions/workflows/ci.yml)
-![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
-
-[![Stars](https://img.shields.io/github/stars/chocitagaming-art/mma-ingesta?style=flat-square&color=ef4444)](https://github.com/chocitagaming-art/mma-ingesta/stargazers)
-![Forks](https://img.shields.io/github/forks/chocitagaming-art/mma-ingesta?style=flat-square&color=ef4444)
-![Last commit](https://img.shields.io/github/last-commit/chocitagaming-art/mma-ingesta?style=flat-square&color=ef4444)
 
 English · [Español](./README.es.md)
 
 </div>
 
-## What it is
+## What this is
 
-This repo does three jobs:
+This repository keeps the database behind MMA STATUS alive: it collects
+fighters, bouts, statistics, events and rankings, normalises them, and trains
+the model that predicts matchups.
 
-1. **Scrape and clean.** Pull fighters, fights, stats, events, and rankings from UFC and ESPN. Pull odds from The Odds API and fight videos from YouTube. Write it all to one PostgreSQL database on Neon.
-2. **Train a model.** Turn the raw fight history into features and train an XGBoost classifier that predicts who wins a matchup.
-3. **Serve predictions.** Run a FastAPI service that takes two fighter ids and returns a calibrated probability, the signals behind it, and the features that moved the call.
+The web app ([mma-app](https://github.com/chocitagaming-art/mma-app)) only
+**reads**. Every write goes through here.
 
-The web app ([mma-app](https://github.com/chocitagaming-art/mma-app)) reads the same database and calls the prediction service. It never writes. All writes happen here.
+## What it does
 
-## The model
+- **Collects and cleans MMA data** from public sources and keeps it consistent:
+  one profile per fighter, no duplicate bouts, results that complete themselves
+  once the official source publishes the detail.
+- **Trains a model** that estimates each corner's win probability from fight
+  history. Public card in
+  [`MODEL_CARD.md`](./src/prediction/MODEL_CARD.md).
+- **Serves predictions** to the website through a microservice.
+- **Runs itself**: scheduled jobs refresh rankings, upcoming cards, odds and
+  news unattended, and raise an alert when something breaks.
 
-- Trained on fighter stats only: records, physical attributes, striking, grappling, form, and quality of opposition, mapped into 20 features. Odds are never an input to the model. Every feature is a red minus blue difference, so corner order does not leak.
-- Accuracy is about 63% (0.6289), with a Brier score of 0.2266. The reported metric is the out-of-sample calibrated one, not the optimistic training number, and the model is symmetrized so both corners are scored the same way.
-- It is built on a dataset of roughly 2,838 fighters and 8,750 fights.
-- It is benchmarked against a majority class baseline, so "is it actually learning anything" has an answer.
-- Thin histories (debutants) are flagged as low confidence instead of being given a fake favorite.
-- The feature mapping has one source of truth (`build_feature_row`), shared by training and serving, so the two cannot drift apart. Golden and parity tests pin it.
+## During a live event
 
-The current model card lives in [`src/prediction/model_metrics.md`](./src/prediction/model_metrics.md).
+The part this project is proudest of: while a card is running, a process samples
+the fight every few seconds and builds **the film of the bout** — how the fight
+evolves minute by minute, not just the final result.
 
-## The prediction service
+That data **cannot be recovered afterwards**: if it isn't captured live, it is
+gone for good. Hence the dedicated watchdog, the chained relay job and the
+parallel backup capture.
 
-A FastAPI app in `src/prediction/service.py`. It loads the model and a fighter history dataframe once, then answers:
+## How it fits together
 
-- `POST /predict` with two fighter ids, returning probabilities, per corner signals, and signed feature attribution.
-- `GET /health` for a real readiness check (model loaded plus a database ping).
-
-It runs with API key auth and a shared connection pool, and the web app calls it to serve predictions.
-
-Example request:
-
-```bash
-curl -X POST http://localhost:8000/predict \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: $PREDICTION_SERVICE_API_KEY" \
-  -d '{"red": 1234, "blue": 5678}'
+```
+Public MMA sources
+        │
+        ▼
+   mma-ingesta  ──writes──▶  PostgreSQL (Neon)  ◀──reads──  mma-app (web)
+        │                                                       │
+        └──▶  prediction microservice  ◀────────calls───────────┘
 ```
 
-Response (trimmed):
+Python 3.12, PostgreSQL on Neon, FastAPI and a gradient boosting classifier.
+Scheduled jobs run on GitHub Actions.
 
-```json
-{
-  "redProbability": 0.63,
-  "blueProbability": 0.37,
-  "lowConfidence": false,
-  "topFeatures": [
-    { "name": "striking_accuracy_diff", "direction": "red" }
-  ],
-  "modelTrainedAt": "2026-06-01"
-}
+## Quality
+
+- **704 tests** running on every push.
+- Golden and parity tests that pin the model's inputs, so a refactor or a
+  retrain cannot change them silently.
+- Corner symmetry and data leakage checks.
+- Anything that can modify data starts in **dry-run mode** and requires
+  `--apply` to actually write.
+- Daily database backup, **restored and verified table by table on every run**,
+  with a written recovery plan.
+
+## Layout
+
+```
+src/
+  scrapers/      # data collection and cleaning
+  prediction/    # model and prediction microservice
+tests/           # pytest suite
 ```
 
-## Data sources
+## Running locally
 
-| Data | Source |
-|------|--------|
-| Fighters, fights, stats, events, rankings | UFC and ESPN scrapers |
-| Odds | The Odds API (upcoming events only) |
-| Videos | YouTube Data API (official UFC channels) |
-| Predictions | XGBoost model trained here |
-
-## Tech stack
-
-Python 3.12, PostgreSQL on Neon, XGBoost, scikit-learn, pandas, FastAPI, BeautifulSoup, `psycopg`. Scheduled refresh runs on GitHub Actions.
-
-## Run it locally
+You need Python 3.12 and a PostgreSQL database with the project schema.
 
 ```bash
 python -m venv .venv
 .venv/Scripts/activate            # Windows; on macOS/Linux: source .venv/bin/activate
-pip install -r requirements.txt -r requirements-scrapers.txt -r requirements-service.txt
-```
-
-Copy the variable names from [`.env.example`](./.env.example) into a `.env`:
-
-- `DATABASE_URL` (required)
-- `ANTHROPIC_API_KEY`, `YOUTUBE_API_KEY`, `ODDS_API_KEY`
-- `PREDICTION_ENV`, `PREDICTION_DB_POOL_MAX`, `PREDICTION_DATA_TTL_SECONDS`, `PREDICTION_SERVICE_API_KEY`
-
-### Scrapers
-
-The scrapers are Python modules under `src/scrapers`, run with `python -m`. Anything that can change data defaults to a dry run and needs `--apply` to actually write, so you can always see what a script would do first.
-
-### Train the model
-
-The pipeline runs in four steps:
-
-```bash
-python -m src.prediction.features    # build the training dataset from the database
-python -m src.prediction.train       # train the XGBoost model
-python -m src.prediction.calibrate   # fit the out-of-sample calibrator
-python -m src.prediction.evaluate    # report calibrated, production-like metrics
-```
-
-Back up `src/prediction/model.joblib` before retraining.
-
-### Serve predictions
-
-```bash
-python -m uvicorn src.prediction.service:app --port 8000
-# GET http://localhost:8000/health  ->  {"status":"ok"}
-```
-
-## Scheduled refresh
-
-GitHub Actions keeps the data current on a schedule, in `.github/workflows`:
-
-- `refresh-rankings.yml`
-- `refresh-upcoming.yml`
-- `refresh-odds.yml`
-- `refresh-news.yml`
-
-`ci.yml` runs the tests and lint on every push.
-
-## Tests
-
-```bash
+pip install -r requirements.txt -r requirements-scrapers.txt
 python -m pytest tests/ -q
 ```
 
-The suite includes golden and parity tests that lock the model features, plus corner symmetry and leak checks, so a refactor or a retrain cannot silently change the inputs.
+Environment variable names are listed in [`.env.example`](./.env.example).
 
-## Project layout
+## Data and license
 
-```
-src/
-  scrapers/      # UFC + ESPN scrapers, odds, news, videos, data cleanup, CLI
-  prediction/    # ML pipeline
-    features/    # feature engineering (data loading, history, build_feature_row)
-    train.py     # train the model
-    calibrate.py # out-of-sample calibration
-    evaluate.py  # production-like metrics
-    service.py   # FastAPI prediction service
-    api.py       # prediction logic and feature attribution
-    model.joblib # the trained model
-tests/           # pytest suite
-```
+The data this software collects is **not owned by this project**: it comes from
+third-party sources, each with its own terms of use. This repository does not
+redistribute it.
 
-## The other repo
+The code is **source-visible, not open source**: you may read and study it, but
+not deploy it or use it commercially without permission. See
+[LICENSE](./LICENSE).
 
-[**mma-app**](https://github.com/chocitagaming-art/mma-app) is the Next.js site that turns this data into a live product. The screenshots and the full feature list are over there.
+## The other repository
 
-## License
-
-MIT. See [LICENSE](./LICENSE). This is a personal project, but issues and pull requests are welcome.
+[**mma-app**](https://github.com/chocitagaming-art/mma-app) is the website that
+turns this data into a live product.
