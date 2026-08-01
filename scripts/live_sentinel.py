@@ -77,14 +77,25 @@ MINUTOS_B = 235
 # Pasado esto desde el estelar, la velada esta muerta y no hay nada que grabar.
 HORAS_DE_GRACIA_TRAS_EL_ESTELAR = 4
 
+# Los dos contadores del final son el guard de "esto ya se ha peleado": el reloj
+# solo no basta (ver hay_algo_que_grabar). Se filtra `status IS DISTINCT FROM
+# 'cancelled'` porque el valor 'active' NO EXISTE — los combates vivos tienen
+# status NULL, y un `= 'active'` devolveria cero siempre.
 EVENTOS_SQL = """
-    SELECT id, name, early_prelims_time, prelims_time, start_time
-    FROM events
-    WHERE status = 'upcoming'
-      AND COALESCE(start_time, prelims_time, early_prelims_time) IS NOT NULL
-      AND COALESCE(start_time, prelims_time, early_prelims_time)
+    SELECT e.id, e.name, e.early_prelims_time, e.prelims_time, e.start_time,
+           count(f.id) FILTER (WHERE f.status IS DISTINCT FROM 'cancelled')
+               AS combates_activos,
+           count(f.id) FILTER (WHERE f.status IS DISTINCT FROM 'cancelled'
+                                 AND f.winner_id IS NOT NULL)
+               AS combates_con_ganador
+    FROM events e
+    LEFT JOIN fights f ON f.event_id = e.id
+    WHERE e.status = 'upcoming'
+      AND COALESCE(e.start_time, e.prelims_time, e.early_prelims_time) IS NOT NULL
+      AND COALESCE(e.start_time, e.prelims_time, e.early_prelims_time)
           > now() - interval '%s hours'
-    ORDER BY COALESCE(early_prelims_time, prelims_time, start_time)
+    GROUP BY e.id, e.name, e.early_prelims_time, e.prelims_time, e.start_time
+    ORDER BY COALESCE(e.early_prelims_time, e.prelims_time, e.start_time)
     LIMIT 5
 """
 
@@ -117,6 +128,30 @@ def ancla_de_evento(
     if start_time is not None:
         return start_time - timedelta(hours=4)
     return None
+
+
+def hay_algo_que_grabar(combates_activos: int, combates_con_ganador: int) -> bool:
+    """¿Queda velada por delante, o esto ya se ha peleado entero?
+
+    EL FALLO QUE TAPA, cazado en caliente el 1-ago-2026 a las 20:36Z: el 1063
+    habia terminado a las ~19:40Z y el centinela lo daba por vivo, con
+    `dormir_segundos = 0`. Habria disparado los cuatro workflows sobre una
+    velada acabada.
+
+    Por que la hora no basta: la gracia se mide sobre `start_time + 4 h`, y el
+    estelar del 1063 empezaba a las 17:00Z, asi que hasta las 21:00Z el reloj
+    decia que seguia viva. Alargar la gracia no arregla nada — la acorta para
+    las veladas largas, que es justo cuando el relevo hace falta. El unico dato
+    que sabe de verdad si la velada acabo es el resultado de los combates.
+
+    Ante la duda, GRABAR: una cartelera sin combates cargados todavia no es una
+    velada terminada, y una pasada de mas del bucle sale en verde en segundos
+    (su primera pasada ve el scoreboard vacio y termina), mientras que una
+    velada perdida no se recupera nunca.
+    """
+    if combates_activos == 0:
+        return True
+    return combates_con_ganador < combates_activos
 
 
 def plan_de_arranque(
@@ -162,7 +197,9 @@ def _proximo_evento(dsn: str, lookahead_horas: int) -> tuple[dict, Plan] | None:
         conn.close()
 
     ahora = datetime.now(UTC)
-    for id_, nombre, early, prelims, inicio in filas:
+    for id_, nombre, early, prelims, inicio, activos, con_ganador in filas:
+        if not hay_algo_que_grabar(activos, con_ganador):
+            continue  # esta ya se ha peleado entera; el reloj no lo sabe
         ancla = ancla_de_evento(early, prelims, inicio)
         plan = plan_de_arranque(ancla, inicio, ahora, lookahead_horas)
         if plan is not None:

@@ -1,0 +1,117 @@
+name: Watchdog del directo
+
+# LA TERCERA RED, y la unica que se entera de un fallo MIENTRAS pasa.
+#
+# El 1-ago-2026 la velada del 1063 se perdio entera y los 35 workflows del repo
+# salieron en verde toda la tarde. No fallo nada: es que no se lanzo nada. Y
+# `notify-on-failure.yml` se dispara con `workflow_run: completed`, asi que solo
+# puede reaccionar a workflows que HAN CORRIDO. Un workflow que no arranca no
+# falla, no termina y no emite ningun evento — era un punto ciego estructural,
+# no un descuido.
+#
+# Por eso este no vigila procesos, vigila el DATO: "¿hay velada empezada y no
+# entran muestras?". Esa pregunta se contesta igual si el bucle nunca se lanzo,
+# si murio por timeout a mitad del estelar o si un dispatch de mas lo cancelo,
+# que son los tres modos de fallo que han pasado de verdad.
+#
+# Y si la respuesta es que si, no se limita a avisar: RELANZA el bucle. Un aviso
+# a las 15:00 de un sabado no sirve de nada si el dueno esta comiendo.
+#
+# POR QUE AL MINUTO 20: para no coincidir con el centinela (en punto). Si los
+# dos miraran a la vez, el guard anti-duplicado del watchdog podria no ver aun
+# el run que el centinela acaba de encolar.
+
+on:
+  schedule:
+    - cron: "20 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Diagnostica y enseña el plan, pero NO relanza nada"
+        type: boolean
+        default: false
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: live-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scrapers.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-scrapers.txt
+
+      - name: Esta entrando dato del directo?
+        id: wd
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PYTHONUTF8: "1"
+        run: |
+          DIAG=$(python -m scripts.live_watchdog --json)
+          echo "$DIAG"
+          echo "estado=$(echo "$DIAG" | jq -r '.estado')" >> "$GITHUB_OUTPUT"
+          echo "$DIAG" | jq -r '.veladas[] | "- **\(.nombre)** (id \(.event_id)): `\(.estado)` — \(.muestras_recientes) muestras en 45 min, \(.combates_con_ganador)/\(.combates_activos) resueltos"' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Ya hay un bucle corriendo?
+        # MISMO guard que live-sentinel.yml, y por el mismo motivo: GitHub solo
+        # mantiene UN run pendiente por grupo de concurrency, asi que un
+        # dispatch de mas no se encola — CANCELA el relevo que esperaba. Es
+        # exactamente el fallo del 11-jul-2026, y aqui el riesgo es mayor
+        # porque el watchdog corre cada hora DURANTE la velada.
+        id: guard
+        if: steps.wd.outputs.estado == 'CAIDO'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VIVOS=$(gh run list -R "${{ github.repository }}" \
+            -w live-event-loop.yml --limit 20 \
+            --json status --jq '[.[] | select(.status == "in_progress" or .status == "queued")] | length')
+          echo "runs del bucle vivos: $VIVOS"
+          echo "vivos=$VIVOS" >> "$GITHUB_OUTPUT"
+
+      - name: Rescatar el directo
+        # 120 min: lo que queda de una velada tipica cuando se detecta el hueco.
+        # No se calcula fino a proposito — si el bucle se queda corto, el
+        # watchdog vuelve a mirar dentro de una hora y lo relanza otra vez.
+        if: steps.wd.outputs.estado == 'CAIDO' && steps.guard.outputs.vivos == '0' && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run live-event-loop.yml -R "${{ github.repository }}" \
+            -f duration_minutes=120 -f interval_seconds=20 -f dates=""
+          gh workflow run capture-live-samples.yml -R "${{ github.repository }}" \
+            -f duration_minutes=120 -f interval_seconds=120 -f dates=""
+          echo "::warning title=Watchdog::Velada en marcha SIN dato entrando. Bucle relanzado."
+          {
+            echo "### Rescate lanzado"
+            echo "- El directo estaba caido: bucle + captura relanzados 120 min."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: No se relanza (ya habia un bucle vivo)
+        if: steps.wd.outputs.estado == 'CAIDO' && steps.guard.outputs.vivos != '0'
+        run: |
+          echo "::warning title=Watchdog::Sin muestras, pero ya hay ${{ steps.guard.outputs.vivos }} run(s) del bucle vivos. NO se dispara nada."
+
+      - name: Falla en rojo si la velada se esta perdiendo
+        # ULTIMO PASO A PROPOSITO: el rescate ya se ha lanzado antes de fallar.
+        # Falla en rojo para que `notify-on-failure` mande el email — el dueno
+        # tiene que enterarse de que su directo se cayo AUNQUE se haya
+        # rescatado solo, o el fallo se vuelve invisible otra vez.
+        if: steps.wd.outputs.estado == 'CAIDO'
+        run: |
+          echo "Velada en marcha sin muestras en los ultimos 45 min."
+          exit 1

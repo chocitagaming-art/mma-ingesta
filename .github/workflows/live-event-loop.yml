@@ -13,13 +13,33 @@
 name: Live event loop (ESPN)
 
 on:
-  schedule:
-    # Inicio de las ventanas de sabado noche US (mismas que live-results.yml):
-    # 20:45 UTC cubre prelims tempranos europeos; 00:45 UTC el main card US.
-    # Con concurrency, si el primer job sigue vivo el segundo queda en cola y
-    # encadena al terminar: cobertura continua de la noche.
-    - cron: "45 20 * * 6"
-    - cron: "45 0 * * 0"
+  # SIN CRONS, A PROPOSITO — cambiado el 1-ago-2026. Este bucle solo se lanza
+  # por `workflow_dispatch`, y solo desde live-sentinel.yml o live-watchdog.yml.
+  #
+  # POR QUE SE HAN QUITADO LOS DOS CRONS QUE HABIA ("45 20 * * 6" y
+  # "45 0 * * 0"), que ademas era tentador AMPLIAR a cinco para cubrir las horas
+  # reales de los 8 eventos futuros:
+  #
+  # 1. UN CRON CIEGO AQUI CANCELA EL RELEVO. GitHub mantiene UN unico run
+  #    pendiente por grupo de concurrency. El centinela lanza A (en curso) + B
+  #    (en cola); un tercer disparo NO se encola: expulsa a B. Es literalmente
+  #    el fallo del 11-jul-2026, y con cinco crons de sabado pasaria casi cada
+  #    semana, justo en mitad del estelar. Los dos unicos que disparan ahora
+  #    comprueban antes que no haya ningun run vivo (guard 'vivos == 0'); un
+  #    cron no puede comprobar nada.
+  #
+  # 2. NO APORTABAN COBERTURA. Medido contra la BD el 1-ago: de los 8 eventos
+  #    futuros, los dos crons llegaban tarde a SIETE (405 min tarde al 1063,
+  #    885 al 1065 — despues del final de la velada). Y esta medido que el
+  #    scheduler sirve los crons con 1h45-2h55 de retraso, asi que ni siquiera
+  #    llegaban cuando tocaba.
+  #
+  # 3. YA HAY TRES REDES MEJORES, y las tres miran antes de disparar:
+  #      live-sentinel.yml  (cada hora) duerme hasta T-15min y lanza A + B
+  #      live-watchdog.yml  (cada hora) si hay velada y NO entran muestras, rescata
+  #      live-results.yml   (*/10 en sus ventanas) respaldo de resultados, job corto
+  #    live-results.yml SI conserva sus crons: son jobs de 10 min que no encolan
+  #    relevos, asi que no pueden cancelar nada.
   workflow_dispatch:
     inputs:
       duration_minutes:

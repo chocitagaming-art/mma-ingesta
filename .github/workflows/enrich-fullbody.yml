@@ -14,7 +14,16 @@ name: Enrich full-body photos
 # REQUIRES migration db/migrations/008_fighter_bio_extras.sql applied first.
 on:
   schedule:
-    - cron: "0 5 * * 1"
+    # DIARIO desde el 1-ago-2026 (antes: solo los lunes). Es el UNICO cron que
+    # rellena full_body_url — medido el origen de la columna en la BD: ufc.com
+    # 1914, NULL 938, ESPN 0. Con el pase semanal, un luchador dado de alta el
+    # miercoles llegaba al sabado sin foto: paso con NUEVE de los 30 que
+    # pelearon el 1-ago, todos debutantes o poco conocidos. Los combates se
+    # anuncian y se caen entre semana, asi que el hueco de una cartelera cambia
+    # a diario y una foto que ufc.com publica el jueves no puede esperar cinco
+    # dias. Repetirlo no puede romper nada: cada UPDATE es aditivo (COALESCE,
+    # solo rellena NULLs) y las fichas sin pagina en ufc.com se saltan igual.
+    - cron: "0 5 * * *"
   workflow_dispatch:
     inputs:
       limit:

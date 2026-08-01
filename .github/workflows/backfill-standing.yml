@@ -6,15 +6,22 @@ name: Backfill standing photos
 # live) newest first. The newest scraped value wins (UFC refreshes the photo
 # after every fight) but NULL/empty never overwrites a stored value, so
 # re-dispatching is always safe.
-# Weekly cron (Mondays 07:00 UTC, after the 06:00 daily refresh) sweeps only
-# the most recent events (--limit 8): the daily refresh-upcoming run only
-# covers upcoming cards, so completed events were left without standing photos
-# — the owner spotted the missing photos as a bug. Manual dispatch remains
-# available for full or custom sweeps.
+# Weekly cron (Mondays 07:00 UTC, after the 06:00 daily refresh) plus a daily
+# pass at 06:40 UTC. HISTORY, so nobody re-introduces the bug: the weekly cron
+# used to run with --limit 8 "to sweep only the most recent events", but the DB
+# holds exactly 8 upcoming ufc.com events, and _get_target_events orders by
+# event_date DESC — so the eight future cards ate the whole quota and the sweep
+# never reached a single completed event, for months, in green. Raised to 40
+# (the full ufc.com catalogue is 26) on 2026-08-01.
 # REQUIRES migration db/migrations/009_fighter_standing_photo.sql applied first.
 on:
   schedule:
-    - cron: "0 7 * * 1"
+    - cron: "0 7 * * 1"   # barrido semanal amplio
+    # AÑADIDO EL 1-AGO-2026: pase diario tras el refresh de las 06:00Z. Las
+    # fotos de una cartelera aparecen en ufc.com entre semana, segun se van
+    # anunciando los combates; esperar al lunes siguiente significa llegar
+    # despues de la velada.
+    - cron: "40 6 * * *"
   workflow_dispatch:
     inputs:
       limit:
@@ -46,7 +53,21 @@ jobs:
         run: |
           ARGS=""
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            ARGS="--limit 8"
+            # EL TOPE DE 8 NO TOCABA NI UN EVENTO CELEBRADO. Verificado contra
+            # la BD el 1-ago-2026: _get_target_events ordena por event_date DESC
+            # y hay EXACTAMENTE 8 eventos 'upcoming' de los 26 con
+            # source='ufc.com'. Los ocho futuros se comian el cupo entero, cada
+            # semana, asi que el barrido semanal jamas llegaba al 9º — pese a
+            # que la cabecera de este fichero afirma lo contrario ("upcoming AND
+            # completed"). Con 40 caben los 26 de hoy y sobra margen; el
+            # dispatch manual del 11-jul hizo 24 eventos en 2 min, muy por
+            # debajo del timeout de 30. Todo es aditivo: NULL nunca pisa un
+            # valor guardado, asi que repetir es seguro.
+            if [ "${{ github.event.schedule }}" = "40 6 * * *" ]; then
+              ARGS="--limit 12"   # pase diario: los 8 futuros + los 4 recientes
+            else
+              ARGS="--limit 40"   # barrido semanal: todo el catalogo de ufc.com
+            fi
           else
             if [ -n "${{ inputs.limit || '' }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
             if [ "${{ inputs.dry_run || false }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
