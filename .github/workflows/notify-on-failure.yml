@@ -70,6 +70,9 @@ on:
       # El que se entera de que la velada se esta perdiendo AHORA. Falla en rojo
       # A PROPOSITO cuando rescata, para que el fallo no vuelva a ser invisible.
       - "Watchdog del directo"
+      # El que lee el panel de estado y falla en rojo cuando algo esta roto. Sin
+      # vigilarlo, el unico que avisa seria el unico del que nadie se entera.
+      - "Guardian del estado"
       # El bucle: un 'timed_out' suyo a mitad del estelar es justo lo que hay
       # que cazar, y hasta hoy no estaba en la lista.
       - "Live event loop (ESPN)"

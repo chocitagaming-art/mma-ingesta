@@ -1,0 +1,85 @@
+name: Guardian del estado
+
+# EL QUE AVISA. Lee el panel de estado de la web (/api/estado) y falla en rojo
+# si algo esta mal, para que GitHub mande el correo.
+#
+# POR QUE LLAMA A LA WEB EN VEZ DE CONSULTAR LA BASE. Seria facil escribir aqui
+# las mismas consultas en Python, y seria un error: tendriamos DOS implementa-
+# ciones del mismo veredicto, que se desincronizarian a la primera. El panel
+# diria "todo bien" mientras el guardian piensa lo contrario, y en algo cuyo
+# unico trabajo es merecer confianza, eso es peor que no tenerlo. Una sola
+# fuente: la web calcula, este workflow solo lee y decide si molestar.
+#
+# CADA HORA Y NO CADA 10 MIN: no es una alerta de directo — de eso ya se ocupa
+# live-watchdog.yml, que vigila el dato durante la velada y ademas rescata. Este
+# es la red de fondo: se entera de lo que se pudre despacio.
+
+on:
+  schedule:
+    # Al minuto 40, lejos del centinela (en punto) y del vigilante (:20).
+    - cron: "40 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: estado-guardian
+  cancel-in-progress: false
+
+jobs:
+  guardian:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Preguntar al panel
+        env:
+          # La clave va por CABECERA y no en la URL: un `?k=` acaba escrito en
+          # los logs de acceso de Vercel y en el historial de cualquier proxy.
+          ESTADO_KEY: ${{ secrets.ESTADO_KEY }}
+        run: |
+          set -uo pipefail
+
+          if [ -z "${ESTADO_KEY:-}" ]; then
+            echo "::error title=Guardian::Falta el secreto ESTADO_KEY en el repo."
+            exit 1
+          fi
+
+          CODIGO=$(curl -sS -o /tmp/estado.json -w '%{http_code}' --max-time 30 \
+            -H "x-estado-key: $ESTADO_KEY" \
+            https://mmastatus.app/api/estado || echo "000")
+
+          # 404 aqui significa clave mala: el panel devuelve 404 a proposito a
+          # quien no la tiene, para no confirmar que la ruta existe.
+          if [ "$CODIGO" = "404" ]; then
+            echo "::error title=Guardian::El panel no acepta la clave (404). ¿Coincide ESTADO_KEY en Vercel y en los secretos del repo?"
+            exit 1
+          fi
+          if [ "$CODIGO" != "200" ]; then
+            echo "::error title=Guardian::El panel no responde (HTTP $CODIGO). Puede que la web este caida — mira /api/health."
+            exit 1
+          fi
+
+          NIVEL=$(jq -r '.nivel' /tmp/estado.json)
+          echo "Nivel: $NIVEL"
+
+          # El parte entero al resumen del run, para no tener que abrir la web
+          # desde el movil solo para saber que ha fallado.
+          {
+            echo "## Estado: \`$NIVEL\`"
+            echo ""
+            jq -r '.bloques[] | "### \(.titulo)\n" + (.comprobaciones[] | "- \(if .nivel == "ok" then "✅" elif .nivel == "aviso" then "🟠" else "🔴" end) **\(.titulo)** — `\(.valor)`" + (if .detalle then "\n  \(.detalle)" else "" end))' /tmp/estado.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Solo se molesta al dueno cuando hay algo ROTO. Los avisos naranjas
+          # (cosas a medias que se arreglan solas) se ven en el panel y en este
+          # resumen, pero no generan correo: una alerta que salta cada semana por
+          # algo que no hay que hacer deja de leerse, y entonces tampoco se lee
+          # la que importa.
+          if [ "$NIVEL" = "mal" ]; then
+            echo "::error title=Guardian::Hay algo roto. Detalle en el resumen del run y en el panel."
+            jq -r '.bloques[].comprobaciones[] | select(.nivel == "mal") | "  🔴 \(.titulo): \(.valor) — \(.detalle // "")"' /tmp/estado.json
+            exit 1
+          fi
+
+          echo "Nada que reportar."
