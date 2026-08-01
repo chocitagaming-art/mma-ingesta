@@ -19,6 +19,16 @@ on:
     - cron: "*/10 0-8 * * 0"
     - cron: "*/10 20-23 * * 6"
     - cron: "*/10 0-8 * * 6"
+    # AÑADIDO EL 1-AGO-2026, el dia que esta franja se cobro una velada entera.
+    # El sabado de 09:00 a 19:59 UTC no lo cubria NADA, y ahi caen las
+    # carteleras europeas y de Oriente Medio. El 1063 se peleo de 14:00 a
+    # 19:40Z: el ultimo run por schedule fue a las 10:20:35Z y el siguiente ya
+    # fue un dispatch a mano a las 19:41Z, con la velada terminada.
+    # Comprobado contra la BD: de los 8 eventos futuros, cuatro empiezan dentro
+    # de esta franja (1065 a las 06:00Z ni siquiera llega, lo coge el cron de
+    # 0-8). El guard barato del modulo hace que un run sin velada cueste
+    # segundos, asi que ampliar la ventana no se paga en minutos de Actions.
+    - cron: "*/10 9-19 * * 6"
   workflow_dispatch:
     inputs:
       dates:

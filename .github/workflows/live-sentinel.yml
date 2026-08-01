@@ -19,27 +19,29 @@ name: Live sentinel (arranca el directo solo)
 # El 95 % de las ejecuciones salen verdes en segundos: no hay velada.
 
 on:
-  # >>> CRON DESACTIVADO A PROPOSITO HASTA EL 8-AGO <<<
+  # ACTIVADO EL 1-AGO-2026, despues de que la velada del 1063 se perdiera entera
+  # por no lanzarlo a mano. El motivo por el que estuvo apagado ya no existe: se
+  # apago para que no coincidiera con el lanzamiento manual del 1-ago (un
+  # dispatch de mas no se encola, CANCELA el relevo — el fallo del 11-jul), y a
+  # partir de ahora NO habra lanzamiento manual. Es este o nada.
   #
-  # El dueno decidio el 25-jul que el directo del 1-ago se lanza A MANO y que
-  # este centinela se estrena el 8-ago (evento 1087): no se apuesta la unica
-  # velada de la semana a codigo sin estrenar.
+  # HORARIO, no cada 2 h como decia el plan original. El motivo es aritmetico:
+  # el `lookahead` es de 5 h y esta MEDIDO que el scheduler de GitHub sirve los
+  # crons con huecos reales de 1h45 a 2h55 (muestreado el 1-ago sobre los runs
+  # de live-results.yml, que pide */10), con un peor caso historico de 3h33. Con
+  # cron cada 2 h, un hueco de 3h33 mas las 2 h nominales deja fuera la ventana
+  # de 5 h y la velada se pierde. Pidiendo cada hora, el peor caso sigue
+  # cayendo dentro. Sale gratis: sin velada el run muere en verde en segundos.
   #
-  # Y con el cron activo el 1-ago pasaria algo peor que no lanzarlo: el
-  # centinela dispararia POR SU CUENTA ademas del lanzamiento manual, y un
-  # dispatch de mas no se encola — CANCELA el relevo. Es el fallo del 11-jul.
-  #
-  # PARA ESTRENARLO: descomentar estas dos lineas. Nada mas.
-  # schedule:
-  #   - cron: "0 */2 * * *"
-  #
-  # Cada 2 h. Con `lookahead` de 5 h, aunque el scheduler deje huecos de 3 h
-  # (medidos hoy mismo en keepalive: 2h43) siempre cae un run dentro de la
-  # ventana de la velada.
+  # NO subir `lookahead_hours` de 5: live_sentinel.py acota el sueno a
+  # SUENO_MAXIMO_MINUTOS = 300, asi que con mas lookahead el centinela
+  # despertaria antes de tiempo y lanzaria el bucle demasiado pronto.
+  schedule:
+    - cron: "0 * * * *"
   workflow_dispatch:
     inputs:
       lookahead_hours:
-        description: "Horas por delante que mira"
+        description: "Horas por delante que mira (no subir de 5)"
         default: "5"
       dry_run:
         description: "Calcula y enseña el plan, pero NO dispara nada"

@@ -26,7 +26,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from scripts.live_sentinel import ancla_de_evento, plan_de_arranque
+from scripts.live_sentinel import (
+    ancla_de_evento,
+    hay_algo_que_grabar,
+    plan_de_arranque,
+)
 
 UTC = timezone.utc
 
@@ -178,3 +182,39 @@ def test_el_1087_no_se_planifica_por_event_date():
     )
     assert plan is not None
     assert plan.arranque == _t("2026-08-08T19:45")
+
+
+# ------------------------------------------- la velada que YA se ha peleado
+
+
+def test_una_velada_con_todos_los_resultados_no_se_graba():
+    """EL FALLO DEL 1-AGO-2026, cazado en caliente a las 20:36Z.
+
+    El 1063 termino a las ~19:40Z y seguia en status 'upcoming' (el flip a
+    'completed' lo hace refresh-upcoming al dia siguiente, y con razon: guarda
+    en `event_date < CURRENT_DATE` para no cerrar un evento que aun no ha
+    ocurrido). Como el guard de gracia mira `start_time + 4 h` = 21:00Z, el
+    centinela daba la velada por viva y planeaba arrancar el bucle con
+    `dormir_segundos = 0`: cuatro workflows disparados sobre una velada
+    terminada, escribiendo sobre resultados ya cerrados.
+
+    La hora no basta para saber si una velada sigue viva. El dato, si.
+    """
+    assert hay_algo_que_grabar(combates_activos=14, combates_con_ganador=14) is False
+
+
+def test_una_velada_a_medias_si_se_graba():
+    """El caso normal a mitad de velada: han caido los prelims y falta el
+    estelar. Es EXACTAMENTE cuando mas falta hace el bucle."""
+    assert hay_algo_que_grabar(combates_activos=14, combates_con_ganador=8) is True
+
+
+def test_una_cartelera_sin_empezar_se_graba():
+    assert hay_algo_que_grabar(combates_activos=14, combates_con_ganador=0) is True
+
+
+def test_una_cartelera_vacia_se_graba_igual():
+    """Sin combates cargados aun no se puede concluir que la velada acabo: seria
+    dar por muerta una cartelera que el scraper todavia no ha traido. Ante la
+    duda, grabar — el bucle sale en verde en segundos si no hay nada."""
+    assert hay_algo_que_grabar(combates_activos=0, combates_con_ganador=0) is True

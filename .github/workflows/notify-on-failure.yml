@@ -60,20 +60,41 @@ on:
       # DATO sea coherente. Es la via por la que se habria cazado la pelea que
       # ESPN retiro en mitad del 1062 sin que nada fallara.
       - "Post-event review (coherencia del dato)"
+      # AÑADIDOS EL 1-AGO-2026. El centinela es el UNICO automatismo que
+      # garantiza que se grabe una velada, y era el unico critico SIN vigilar:
+      # si su paso "Hay velada?" revienta (Neon caido, cambio de esquema), el
+      # run sale en rojo y no lo lee nadie hasta el lunes.
+      - "Live sentinel (arranca el directo solo)"
+      # El plan B de la pelicula del combate.
+      - "Capture live ESPN samples (recon)"
+      # El que se entera de que la velada se esta perdiendo AHORA. Falla en rojo
+      # A PROPOSITO cuando rescata, para que el fallo no vuelva a ser invisible.
+      - "Watchdog del directo"
+      # El bucle: un 'timed_out' suyo a mitad del estelar es justo lo que hay
+      # que cazar, y hasta hoy no estaba en la lista.
+      - "Live event loop (ESPN)"
     types: [completed]
 
 permissions:
   issues: write
   actions: read
 
-concurrency:
-  group: notify-on-failure
-  cancel-in-progress: false
+# SIN concurrency, A PROPOSITO (quitado el 1-ago-2026). GitHub mantiene UN solo
+# run pendiente por grupo: un tercer aviso no se encola, EXPULSA al que
+# esperaba. A las 08:00-08:15Z coinciden refresh-records, refresh-news y
+# enrich-athlete-stats, así que si Neon se cae los tres fallan juntos y solo se
+# garantizaba el aviso de uno. El anti-spam de verdad lo da la reutilización del
+# Issue abierto de cada workflow, no el serializar los avisos.
 
 jobs:
   notify:
-    # Solo si el workflow vigilado ACABÓ EN FALLO.
-    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    # 'failure' NO es el unico final malo, y darlo por supuesto costo caro: el
+    # 11-jul-2026 tres runs de live-event-loop acabaron en 'cancelled' (un
+    # dispatch de mas expulsa al relevo en cola) y no se abrio ni un Issue. Un
+    # 'timed_out' del bucle a mitad de main card es igual de grave.
+    if: >-
+      ${{ contains(fromJSON('["failure","timed_out","cancelled"]'),
+                   github.event.workflow_run.conclusion) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
@@ -81,15 +102,37 @@ jobs:
       REPO: ${{ github.repository }}
       WF_NAME: ${{ github.event.workflow_run.name }}
       WF_URL: ${{ github.event.workflow_run.html_url }}
+      WF_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
     steps:
       - name: Abrir o comentar Issue de fallo
+        # UN HILO POR WORKFLOW, no uno global (cambiado el 1-ago-2026).
+        #
+        # EL FALLO QUE ARREGLA, encontrado el 1-ago: el Issue 16 llevaba abierto
+        # desde las 11:07Z por un keepalive que YA se habia recuperado solo. Como
+        # la busqueda cogia CUALQUIER Issue abierto con la etiqueta, todo fallo
+        # nuevo de los 27 workflows vigilados se convertia en el comentario N de
+        # ese hilo muerto. GitHub manda email al ABRIR un Issue, no al comentar
+        # en uno que ya sigues: el canal de avisos entero estaba amordazado por
+        # un Issue viejo, y nadie podia saberlo.
+        #
+        # Buscando por el titulo (que ahora lleva el nombre del workflow), un
+        # Issue olvidado solo silencia los avisos DE SU PROPIO workflow. El
+        # anti-spam se conserva: dos fallos seguidos del mismo cron siguen
+        # siendo comentarios en su hilo.
         run: |
           STAMP=$(date -u +'%Y-%m-%d %H:%M UTC')
-          BODY=$(printf '⛔ **%s** — el workflow **%s** ha fallado.\n\n[Ver el run](%s)\n\n_(Alerta automática de crons de datos. Revisa el run, arréglalo y cierra este Issue.)_' "$STAMP" "$WF_NAME" "$WF_URL")
-          ISSUE=$(gh issue list --repo "$REPO" --label cron-failure --state open --json number --jq '.[0].number // empty')
+          TITULO="🔴 Cron fallando — $WF_NAME"
+          BODY=$(printf '⛔ **%s** — el workflow **%s** ha terminado en `%s`.\n\n[Ver el run](%s)\n\n_(Alerta automática. Revisa el run, arréglalo y cierra este Issue: mientras siga abierto, los siguientes fallos de ESTE workflow serán comentarios y no te llegará un email nuevo.)_' "$STAMP" "$WF_NAME" "$WF_CONCLUSION" "$WF_URL")
+          # jq externo (viene preinstalado en los runners): el `--jq` de gh no
+          # admite `--arg`, y el titulo lleva el nombre del workflow, que puede
+          # traer parentesis y barras. Comparacion exacta, no `--search`, que
+          # hace busqueda difusa y casaria hilos de otros workflows.
+          ISSUE=$(gh issue list --repo "$REPO" --label cron-failure --state open \
+            --limit 100 --json number,title \
+            | jq -r --arg t "$TITULO" '[.[] | select(.title == $t)] | .[0].number // empty')
           if [ -n "$ISSUE" ]; then
             gh issue comment "$ISSUE" --repo "$REPO" --body "$BODY"
           else
             gh label create cron-failure --repo "$REPO" --color D73A4A --description "Un cron de datos ha fallado" --force
-            gh issue create --repo "$REPO" --title "🔴 Cron de datos fallando" --label cron-failure --body "$BODY"
+            gh issue create --repo "$REPO" --title "$TITULO" --label cron-failure --body "$BODY"
           fi
