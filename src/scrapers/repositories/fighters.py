@@ -78,6 +78,41 @@ def get_fighter_id_by_source(connection: PgConnection, source: str, source_id: s
         return int(row[0]) if row else None
 
 
+def get_fighter_id_by_espn_id(connection: PgConnection, espn_id: str) -> int | None:
+    """La ficha de un atleta de ESPN, MIRE DONDE MIRE que guarde su id.
+
+    Un mismo luchador puede tener su id de ESPN en dos sitios segun quien
+    creara la fila: los que entraron por ESPN lo llevan en
+    ``(source='espn', source_id=...)``, y los que entraron por ufcstats lo
+    llevan en la columna ``espn_id``, rellenada despues por el enriquecimiento.
+
+    :func:`get_fighter_id_by_source` solo mira el primero, y eso creo un
+    duplicado real el 2-ago-2026: la ficha buena de Michael Page (id 6866, con
+    foto, historial y ``espn_id='3022067'``) es ``source='ufcstats'``, asi que
+    una busqueda por (espn, 3022067) no la encontraba y se inserto una segunda
+    ficha con los mismos datos. El dano no fue tener dos filas: fue que
+    ``_add_to_index`` QUEMA una clave de nombre cuando dos ids la comparten, de
+    modo que 'michael page' dejo de resolver **en todo el proyecto**.
+
+    Se prefiere la fila nativa de ESPN cuando existen las dos, y entre varias
+    con la misma ``espn_id`` la de id mas bajo, que es la mas antigua y por
+    tanto la que arrastra el historial.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id FROM fighters
+             WHERE (source = 'espn' AND source_id = %(espn_id)s)
+                OR espn_id = %(espn_id)s
+             ORDER BY (source = 'espn' AND source_id = %(espn_id)s) DESC, id
+             LIMIT 1
+            """,
+            {"espn_id": espn_id},
+        )
+        row = cursor.fetchone()
+        return int(row[0]) if row else None
+
+
 def get_all_fighters(connection: PgConnection) -> list[FighterMatchRecord]:
     with connection.cursor() as cursor:
         cursor.execute(
