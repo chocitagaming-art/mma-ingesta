@@ -31,3 +31,22 @@ jobs:
           # servicio estaba dormido, este mismo ping lo despierta.
           curl -fsS --max-time 70 --retry 1 --retry-delay 5 --retry-all-errors \
             "${{ secrets.PREDICTION_SERVICE_URL }}/health"
+
+      # Deja constancia EN LA BASE de que el servicio contestó. Es lo único que
+      # el panel /estado puede mirar sin sondear Render él mismo (una sonda con
+      # presupuesto corto no distingue "dormido" de "muerto"; ver
+      # db/migrations/026_service_heartbeats.sql).
+      #
+      # Va DESPUÉS del curl y sin `if:`, así que solo corre cuando el ping ha
+      # salido bien: si el servicio está caído, el paso anterior falla, este no
+      # se ejecuta y el latido envejece — que es exactamente la señal que el
+      # panel necesita. El 1-ago ese envejecimiento habría delatado la caída.
+      - name: Anotar el latido
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c \
+            "INSERT INTO service_heartbeats (service, last_ok_at, detail)
+             VALUES ('prediction', now(), 'keepalive-prediction.yml run ${{ github.run_id }}')
+             ON CONFLICT (service) DO UPDATE
+               SET last_ok_at = EXCLUDED.last_ok_at, detail = EXCLUDED.detail"
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
