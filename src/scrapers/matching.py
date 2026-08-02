@@ -53,7 +53,6 @@ __all__ = [
     "fuzzy_match",
     "token_subset_match",
     "given_name_diminutive_match",
-    "name_query_variants",
 ]
 
 # Canonical compromise cutoff for general-purpose name comparison.
@@ -194,60 +193,6 @@ def given_name_diminutive_match(left: str, right: str) -> bool:
     if corto == largo:
         return False  # Idénticos: eso ya lo resuelve el nivel exacto.
     return len(corto) >= _MIN_DIMINUTIVE_LEN and largo.startswith(corto)
-
-
-def name_query_variants(name: str) -> list[str]:
-    """Consultas de búsqueda para un nombre de cartelera, de la más fiel a la más corta.
-
-    Los otros niveles de este módulo comparan dos nombres que YA se tienen. Este
-    resuelve el problema anterior: qué preguntarle a un buscador externo cuando
-    el nombre de la cartelera trae más de lo que la fuente conoce. Dos casos
-    reales de la velada del 8-ago-2026, ambos verificados contra la API de ESPN:
-
-    * ``"Jose Montanha da Silva"`` -> ESPN devuelve **cero** resultados. Con
-      ``"Jose Montanha"`` devuelve al atleta 5351808 ("José Montanha"). No es un
-      problema de umbral: la consulta larga no encuentra nada que puntuar.
-    * ``"Michael Venom Page"`` -> ESPN sí devuelve "Michael Page", pero el apodo
-      intercalado hunde la similitud a 0.80, por debajo del 0.87 canónico, y el
-      buscador lo descarta.
-
-    El orden importa: primero el nombre entero (para no cambiar el
-    comportamiento cuando ya acierta), después quitar UN token intermedio cada
-    vez (donde viven los apodos), después recortar por la derecha (donde viven
-    los apellidos de más) y por último nombre + último apellido. Se evita dejar
-    una partícula al final ("Jose Montanha da"), que no es un nombre y solo
-    gasta una petición.
-
-    Devuelve al menos ``[name]``, sin duplicados (comparados con :func:`fold`) y
-    en orden. NO valida nada: quien lo use mantiene su propia guarda — para eso
-    está :func:`token_subset_match`, que rechaza un candidato con tokens que la
-    cartelera no menciona.
-    """
-    tokens = name.split()
-    if len(tokens) < 3:
-        return [name] if name.strip() else []
-
-    variants = [name]
-    # Un token intermedio de menos: el hueco donde va el apodo.
-    for index in range(1, len(tokens) - 1):
-        variants.append(" ".join(tokens[:index] + tokens[index + 1:]))
-    # Recorte por la derecha: los apellidos de más. Nunca terminando en partícula.
-    for end in range(len(tokens) - 1, 1, -1):
-        head = tokens[:end]
-        if fold(head[-1]) in _PARTICLE_TOKENS:
-            continue
-        variants.append(" ".join(head))
-    # Nombre de pila + último apellido.
-    variants.append(f"{tokens[0]} {tokens[-1]}")
-
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for variant in variants:
-        key = fold(variant)
-        if key and key not in seen:
-            seen.add(key)
-            ordered.append(variant)
-    return ordered
 
 
 def ratio(left: str, right: str) -> float:

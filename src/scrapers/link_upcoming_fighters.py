@@ -24,7 +24,7 @@ from .enrich_ranked import (
     REQUEST_DELAY_SECONDS,
     _build_session,
     _fetch_athlete_by_id,
-    search_espn_athlete_relaxed,
+    _search_espn_athlete,
 )
 from .enrich_records_espn import _fetch_espn_record
 from .espn import EspnAthlete
@@ -36,8 +36,28 @@ LOGGER = logging.getLogger(__name__)
 
 
 def _resolve(session, name: str) -> tuple[EspnAthlete, tuple[int, int, int]] | None:
-    """Resolve an ESPN athlete + W-L-D for a name. No DB writes."""
-    found = search_espn_athlete_relaxed(session, name)
+    """Resolve an ESPN athlete + W-L-D for a name. No DB writes.
+
+    🪤 NO AFLOJES ESTA BUSQUEDA POR NOMBRE. Se intento el 2-ago-2026 y salio
+    mal en menos de una hora. La cartelera del 1087 decia "Jose Montanha da
+    Silva" y ESPN no encuentra ese nombre; probando variantes mas cortas,
+    "Jose Montanha" SI devuelve un atleta (5351808) que ademas pasa
+    `token_subset_match`. Parece el mismo hombre y NO LO ES: el que pelea es
+    4389073, "Henrique da Silva Lopes", apodo "Montanha" — nacido en 1985 y no
+    en 1996, 5-2-0 y no 6-1-0. Lo zanja el calendario de ESPN, donde el evento
+    600060621 aparece en el de 4389073 y no en el del otro.
+
+    Un nombre parecido no es una persona. Esta funcion CREA fichas y las suelda
+    a un combate, asi que es una ruta de IDENTIDAD, y la politica del proyecto
+    para esas rutas esta escrita en matching.py: umbral estricto, y un falso
+    positivo suelda el historial del luchador equivocado. Si un hueco no se
+    resuelve, la respuesta correcta es dejarlo sin resolver y que se vea, no
+    bajar el liston.
+
+    Lo que SI resuelve estos casos sin adivinar es el marcador de ESPN del
+    propio evento, que dice que atleta pelea cada combate por id.
+    """
+    found = _search_espn_athlete(session, name)
     if found is None:
         return None
     athlete_id, _espn_name = found
