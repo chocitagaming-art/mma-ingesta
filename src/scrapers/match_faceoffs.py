@@ -218,30 +218,60 @@ def _norm(text: str | None) -> str:
     return strip_accents(text or "").casefold()
 
 
-def event_city(location: str | None) -> str | None:
-    """City from 'Venue, City, State, Country' (2nd comma field), else the 1st.
-    'Paycom Center, Oklahoma City, OK, United States' -> 'Oklahoma City'."""
-    if not location:
-        return None
-    parts = [p.strip() for p in location.split(",") if p.strip()]
-    if len(parts) >= 2:
-        return parts[1]
-    return parts[0] if parts else None
-
-
-# Generic place words that don't distinguish one card from another.
-_PLACE_STOPWORDS = frozenset({"city", "the", "las", "los", "san", "de", "el", "st"})
+# Words that do NOT tell one card apart from another, so they cannot act as a
+# guard. Three groups, all chosen from the 185 real `events.location` rows:
+#  - generic articles/fillers that survive the 3-char cut,
+#  - VENUE TYPES: they name a building, not a place. "Belgrade Arena" is
+#    Belgrade; "arena" on its own would match any other card's faceoff video,
+#  - country/state words too common to discriminate: `usa` appears in 91 of the
+#    185 rows, so it would green-light almost any US event,
+#  - SPORT words that live inside venue names. This one bit for real: reading
+#    the whole `location` pulled `ufc` out of "UFC Apex, Las Vegas", and `ufc`
+#    is in EVERY faceoff title, so a Vegas card matched Oklahoma City's video.
+#    `test_match_vegas_event_rejects_other_citys_faceoff` caught it.
+_PLACE_STOPWORDS = frozenset(
+    {
+        "ufc", "mma", "fight", "fights", "night", "octagon",
+        "city", "the", "las", "los", "san", "de", "el", "st", "new",
+        "arena", "center", "centre", "stadium", "coliseum", "hall", "garden",
+        "gardens", "forum", "dome", "pavilion", "park", "place", "complex",
+        "casino", "resort", "hotel", "theater", "theatre", "sports", "field",
+        "palace", "expo", "convention", "entertainment", "grounds",
+        "usa", "united", "states", "kingdom", "america", "american",
+    }
+)
 
 
 def _place_tokens(location: str | None) -> set[str]:
     """Distinctive, whole-word place tokens for the city guard.
 
+    READS THE WHOLE `location`, NOT ONE COMMA FIELD — and that IS the fix
+    (2026-08-02). The old version took the 2nd field as "the city", which the
+    real data contradicts twice over:
+
+      'Belgrade Arena, BG, Serbia'      -> 2nd field 'BG', 2 chars, dropped by
+                                           the length cut -> EMPTY SET, and
+                                           `any()` over an empty set is False
+                                           ALWAYS. The 1063 faceoff was lost
+                                           this way and had to be matched by
+                                           hand; 'Washington, DC, USA' is the
+                                           same shape.
+      'London, England, United Kingdom' -> 2nd field is the STATE/REGION, so
+                                           the token was 'england' and a video
+                                           titled "UFC London ... Faceoffs"
+                                           never matched. Same for
+                                           'Miami, Florida, USA' and 8 more.
+
+    The 31-jul patch proposed raising the length cut to 4 instead. That attacks
+    the wrong thing and has a counterexample: 'Rio de Janeiro' would lose 'rio'.
+    The cut STAYS at 3; what changes is where the words come from.
+
     UFC titles Las Vegas / Apex Fight Nights "UFC Vegas NNN: Fighter Faceoffs"
     (not "Las Vegas"), and some rows carry 'Nevada' as the city, so any card in
-    Nevada / the Apex also accepts the 'vegas' token. Generic words ('city',
-    'las', ...) and 1-2 char fragments are dropped so they can't mis-match."""
-    city = _norm(event_city(location))
-    tokens = {t for t in city.split() if len(t) >= 3 and t not in _PLACE_STOPWORDS}
+    Nevada / the Apex also accepts the 'vegas' token.
+    """
+    palabras = (t.strip(".") for t in _norm(location).replace(",", " ").split())
+    tokens = {t for t in palabras if len(t) >= 3 and t not in _PLACE_STOPWORDS}
     full = _norm(location)
     if "vegas" in full or "nevada" in full or "apex" in full:
         tokens.add("vegas")

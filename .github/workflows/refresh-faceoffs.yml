@@ -14,6 +14,14 @@ name: Match face-off videos
 on:
   schedule:
     - cron: "0 20 * * *" # diario 20:00 UTC (víspera de los eventos, tarde US)
+    # SEGUNDA PASADA a las 23:00 UTC. Con solo la de las 20:00, un careo que la
+    # UFC publique el VIERNES después de esa hora no se recogía hasta el sábado
+    # a las 20:00 — y una velada del APEX arranca a las 00:00 UTC del domingo,
+    # así que el careo llegaba con la velada ya encima. Tres horas de margen
+    # cubren la franja en la que el canal publica de verdad (tarde-noche US).
+    # Es idempotente (first-writer-wins) y el `concurrency` de abajo impide que
+    # las dos pasadas se pisen, así que repetir no cuesta nada.
+    - cron: "0 23 * * *"
   workflow_dispatch:
 
 concurrency:
