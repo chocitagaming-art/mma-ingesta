@@ -1,0 +1,152 @@
+name: Sincronizar la conexion del servicio de prediccion (Render)
+
+# Por que existe: el 1-ago sobre las 23:00Z se roto la contrasena del rol de
+# solo lectura de Neon. Se actualizo en Vercel y NO en Render, y el
+# microservicio de prediccion se paso mas de NUEVE HORAS en bucle de caida:
+#
+#   psycopg2.OperationalError: ... password authentication failed for user
+#   'mma_app_readonly'
+#   ERROR:    Application startup failed. Exiting.
+#
+# El pool de Neon se abre en el `lifespan`, ANTES de que el servicio sirva nada,
+# asi que una contrasena mala no da un 500 en /predict: impide arrancar. Render
+# acepta el TCP en su borde y devuelve cero bytes hasta que se rinde con un 502,
+# que es el sintoma mas caro de diagnosticar que tiene este proyecto.
+#
+# Desde entonces el servicio tiene su PROPIO rol (`mma_prediction_ro`, ver
+# db/roles/mma_prediction_ro.sql), asi que rotar el de la web ya no puede
+# tumbarlo. Este workflow es la otra mitad: cuando se rote el del servicio,
+# basta con `gh secret set PREDICTION_DATABASE_URL` y lanzar esto, en vez de
+# entrar al panel de Render a pegar una cadena a mano.
+#
+# 🔒 EL REPO ES PUBLICO Y LOS REGISTROS DE ACTIONS TAMBIEN. El DSN entra por el
+# contexto `secrets` (GitHub lo enmascara), se manda a la API de Render dentro
+# de un cuerpo JSON construido con `jq --arg` (nunca interpolado en la linea de
+# ordenes, que acabaria en el registro) y no se imprime en ningun paso. Lo unico
+# que se publica son codigos de estado y el nombre de la variable.
+
+on:
+  workflow_dispatch:
+    inputs:
+      redesplegar:
+        description: "Redesplegar despues de actualizar (necesario: Render no reinicia solo al cambiar una variable)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  # Comparte grupo con deploy-render.yml seria lo ideal, pero ese usa el suyo.
+  # Aqui basta con no pisarse a si mismo.
+  group: render-sync-env
+  cancel-in-progress: false
+
+jobs:
+  sincronizar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+      SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+      SERVICE_URL: ${{ secrets.PREDICTION_SERVICE_URL }}
+      NUEVO_DSN: ${{ secrets.PREDICTION_DATABASE_URL }}
+    steps:
+      - name: Comprobar que el secreto existe y tiene forma de DSN
+        run: |
+          set -euo pipefail
+          if [ -z "${NUEVO_DSN:-}" ]; then
+            echo "::error::Falta el secreto PREDICTION_DATABASE_URL del repo."
+            exit 1
+          fi
+          case "$NUEVO_DSN" in
+            postgres://*|postgresql://*) ;;
+            *) echo "::error::PREDICTION_DATABASE_URL no parece una cadena de conexion."; exit 1 ;;
+          esac
+          # Solo metadatos: longitud y rol. Nunca el valor.
+          rol=$(printf '%s' "$NUEVO_DSN" | sed -E 's#^[a-z]+://([^:]+):.*#\1#')
+          echo "Longitud: ${#NUEVO_DSN} caracteres. Rol: $rol"
+          if [ "$rol" = "neondb_owner" ]; then
+            echo "::error::Ese es el rol DUENO. El servicio solo lee: usa mma_prediction_ro."
+            exit 1
+          fi
+
+      - name: Actualizar DATABASE_URL en Render
+        run: |
+          set -euo pipefail
+          # `jq --arg` mete el valor en el JSON sin que pase por la linea de
+          # ordenes ni por el registro; --rawfile no vale porque anadiria el
+          # salto de linea final.
+          cuerpo=$(jq -nc --arg v "$NUEVO_DSN" '[{key:"DATABASE_URL", value:$v}]')
+          codigo=$(printf '%s' "$cuerpo" | curl -sS -o /tmp/resp.json -w '%{http_code}' \
+            -X PUT \
+            -H "Authorization: Bearer $RENDER_API_KEY" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            --data-binary @- \
+            "https://api.render.com/v1/services/$SERVICE_ID/env-vars")
+          echo "PUT /env-vars -> $codigo"
+          if [ "$codigo" != "200" ] && [ "$codigo" != "201" ]; then
+            # La respuesta de error de Render no lleva el valor enviado, pero se
+            # tacha igualmente por si acaso.
+            sed -E 's#([a-z]+)://[^:/@[:space:]]+:[^@[:space:]]+@#\1://***:***@#g' /tmp/resp.json
+            echo "::error::Render rechazo la actualizacion de variables."
+            exit 1
+          fi
+          # Confirmacion por comportamiento: releer y comprobar que la clave
+          # esta, sin imprimir su valor.
+          curl -sS -H "Authorization: Bearer $RENDER_API_KEY" -H "Accept: application/json" \
+            "https://api.render.com/v1/services/$SERVICE_ID/env-vars" \
+            | jq -r '.[].envVar.key' | sort | tr '\n' ' '
+          echo
+
+      - name: Redesplegar y esperar a que quede vivo
+        if: ${{ inputs.redesplegar }}
+        run: |
+          set -euo pipefail
+          respuesta=$(curl -sS -X POST \
+            -H "Authorization: Bearer $RENDER_API_KEY" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d '{"clearCache":"do_not_clear"}' \
+            "https://api.render.com/v1/services/$SERVICE_ID/deploys")
+          deploy_id=$(echo "$respuesta" | jq -r '.id // empty')
+          if [ -z "$deploy_id" ]; then
+            echo "::error::Render no devolvio un id de despliegue."
+            exit 1
+          fi
+          echo "Despliegue lanzado: $deploy_id"
+          for intento in $(seq 1 80); do
+            estado=$(curl -sS \
+              -H "Authorization: Bearer $RENDER_API_KEY" -H "Accept: application/json" \
+              "https://api.render.com/v1/services/$SERVICE_ID/deploys/$deploy_id" \
+              | jq -r '.status // "unknown"')
+            echo "[$intento] $estado"
+            case "$estado" in
+              live) echo "Despliegue vivo."; exit 0 ;;
+              build_failed|update_failed|canceled|pre_deploy_failed)
+                echo "::error::El despliegue termino en '$estado'. Lanza render-diagnostico.yml para ver por que."
+                exit 1 ;;
+            esac
+            sleep 15
+          done
+          echo "::error::Se agoto la espera y el despliegue sigue sin estar vivo."
+          exit 1
+
+      - name: Comprobar que el servicio responde de verdad
+        if: ${{ inputs.redesplegar }}
+        run: |
+          set -euo pipefail
+          # No basta un 200 en la raiz: /health comprueba que el modelo esta
+          # cargado Y que la base contesta, que es justo lo que fallaba.
+          for intento in $(seq 1 10); do
+            codigo=$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 60 "$SERVICE_URL/health" || echo "000")
+            echo "[$intento] /health -> $codigo $(cat /tmp/health.json 2>/dev/null)"
+            if [ "$codigo" = "200" ]; then
+              grep -q '"status"' /tmp/health.json || { echo "::error::200 sin cuerpo de salud."; exit 1; }
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Quedo desplegado pero /health no responde 200."
+          exit 1
