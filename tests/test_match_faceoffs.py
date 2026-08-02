@@ -13,7 +13,6 @@ from src.scrapers import match_faceoffs
 from src.scrapers.match_faceoffs import (
     FeedVideo,
     TargetEvent,
-    event_city,
     fetch_channel_uploads,
     match_event,
     parse_feed,
@@ -67,13 +66,6 @@ def test_parse_feed_extracts_id_title_date():
 
 def test_parse_feed_bad_xml_returns_empty():
     assert parse_feed("<not-a-feed") == []
-
-
-def test_event_city_second_field_then_first():
-    assert event_city("Paycom Center, Oklahoma City, OK, United States") == "Oklahoma City"
-    assert event_city("Etihad Arena, Abu Dhabi, United Arab Emirates") == "Abu Dhabi"
-    assert event_city("Las Vegas") == "Las Vegas"
-    assert event_city(None) is None
 
 
 # ----------------------------------------------------------------------- match
@@ -517,3 +509,92 @@ def test_main_with_youtube_key_runs_api_rescue(monkeypatch, fakedb):
     match_faceoffs.main()
     assert seen["api_key"] == "quota-key"
     assert seen["published_after"] is not None
+
+
+# ------------------------------------------------- guarda de ciudad (2-ago-26)
+# El careo del 1063 se perdio porque `_place_tokens` devolvia un CONJUNTO VACIO
+# y `any()` sobre vacio es False siempre. La causa no era el corte de longitud
+# (el parche del 31-jul proponia subirlo a 4, y eso rompe "Rio de Janeiro"):
+# era leer solo el 2o campo de `location`.
+
+
+def test_belgrade_ya_no_devuelve_el_conjunto_vacio():
+    # EL CASO REAL DEL 1063. El 2o campo es 'BG', de 2 caracteres: se caia por
+    # el corte de longitud y el conjunto quedaba vacio. 'Belgrade' estaba en el
+    # 1er campo, que el codigo no miraba nunca.
+    tokens = match_faceoffs._place_tokens("Belgrade Arena, BG, Serbia")
+    assert "belgrade" in tokens
+    assert tokens, "un conjunto vacio hace que any() sea False SIEMPRE"
+
+
+def test_washington_dc_tenia_el_mismo_fallo():
+    assert "washington" in match_faceoffs._place_tokens("Washington, DC, USA")
+
+
+def test_rio_sobrevive_al_corte_de_tres_caracteres():
+    # El contraejemplo que tumbo el parche del 31-jul: con un corte de 4, 'rio'
+    # desaparece y "UFC Rio" deja de casar. El corte SIGUE en 3.
+    tokens = match_faceoffs._place_tokens("Rio de Janeiro, Rio de Janeiro, Brazil")
+    assert "rio" in tokens
+    assert "janeiro" in tokens
+
+
+def test_la_ciudad_cuenta_aunque_el_segundo_campo_sea_el_estado():
+    # 'London, England, United Kingdom': el 2o campo es la REGION, asi que antes
+    # el unico token era 'england' y un video "UFC London ... Faceoffs" no
+    # casaba. Le pasaba igual a Miami/Florida y a 8 mas.
+    assert "london" in match_faceoffs._place_tokens("London, England, United Kingdom")
+    assert "miami" in match_faceoffs._place_tokens("Miami, Florida, USA")
+
+
+def test_los_tipos_de_recinto_no_son_tokens():
+    # 'arena' nombra un edificio, no un sitio: como token casaria con el careo
+    # de cualquier otra velada dentro de la ventana de fechas.
+    tokens = match_faceoffs._place_tokens("Belgrade Arena, BG, Serbia")
+    assert "arena" not in tokens
+
+
+def test_el_pais_demasiado_repetido_no_es_token():
+    # 'usa' sale en 91 de las 185 location reales: no discrimina nada.
+    tokens = match_faceoffs._place_tokens("Miami, Florida, USA")
+    assert "usa" not in tokens
+    assert "united" not in match_faceoffs._place_tokens(
+        "Meta APEX, Las Vegas, NV, United States"
+    )
+
+
+def test_el_1087_del_apex_sigue_dando_vegas():
+    # La velada del 8-ago. Tiene que seguir funcionando por los dos caminos: el
+    # token normal y la regla especial de Nevada/Apex.
+    tokens = match_faceoffs._place_tokens("Meta APEX, Las Vegas, NV, United States")
+    assert "vegas" in tokens
+
+
+def test_ninguna_location_real_se_queda_sin_tokens():
+    # Las formas que existen de verdad en la BD (185 distintas el 2-ago-2026),
+    # una por cada patron. Ninguna puede devolver el conjunto vacio.
+    for location in (
+        "Belgrade Arena, BG, Serbia",
+        "Washington, DC, USA",
+        "T-Mobile Arena, Las Vegas, NV, United States",
+        "Rio de Janeiro, Brazil",
+        "Natal, Rio Grande do Norte, Brazil",
+        "Ottawa, Ontario, Canada",
+        "Etihad Arena, Abu Dhabi, United Arab Emirates",
+        "Las Vegas",
+    ):
+        assert match_faceoffs._place_tokens(location), f"sin tokens: {location}"
+
+
+def test_sin_location_no_revienta():
+    assert match_faceoffs._place_tokens(None) == set()
+    assert match_faceoffs._place_tokens("") == set()
+
+
+def test_ufc_no_puede_ser_token_aunque_este_en_el_nombre_del_recinto():
+    # REGRESION REAL del 2-ago: al leer la location entera, "UFC Apex, Las
+    # Vegas" aportaba el token 'ufc'... que sale en TODOS los titulos de careo,
+    # asi que una velada de Vegas casaba con el video de Oklahoma City.
+    tokens = match_faceoffs._place_tokens("UFC Apex, Las Vegas, NV, United States")
+    assert "ufc" not in tokens
+    assert "vegas" in tokens, "pero la guarda buena tiene que seguir ahi"
