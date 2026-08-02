@@ -31,7 +31,13 @@ from .espn import EspnAthlete, _fetch_athlete
 from .logging_config import configure_logging
 # fold is re-exported as _fold: several scrapers do `from .enrich_ranked import
 # _fold` (kept for import stability). noqa: ruff can't see the cross-module use.
-from .matching import DEFAULT_THRESHOLD, fold as _fold, fold_ratio as _similar  # noqa: F401
+from .matching import (  # noqa: F401
+    DEFAULT_THRESHOLD,
+    fold as _fold,
+    fold_ratio as _similar,
+    name_query_variants,
+    token_subset_match,
+)
 from .repositories.fighters import (
     get_fighter_id_by_source,
     update_fighter_enrichment,
@@ -94,6 +100,40 @@ def _search_espn_athlete(session: requests.Session, name: str) -> tuple[str, str
             LOGGER.info("Rejected weak match for %r: %r (%.2f)", name, best[2], best[0])
         return None
     return best[1], best[2]
+
+
+def search_espn_athlete_relaxed(session: requests.Session, name: str) -> tuple[str, str] | None:
+    """Como :func:`_search_espn_athlete`, pero reintentando con nombres más cortos.
+
+    El nombre que imprime una cartelera y el que guarda ESPN no siempre son el
+    mismo: la cartelera añade apodos ("Michael **Venom** Page") y apellidos que
+    la ficha no lleva ("Jose Montanha **da Silva**"). Con el nombre entero la
+    búsqueda devuelve cero resultados o un candidato por debajo del umbral, y el
+    combate se queda sin ficha — que en la práctica significa que el bucle del
+    directo no lo escribe y el job sale **en verde**.
+
+    El primer intento es siempre el nombre entero, así que un caso que hoy
+    acierta sigue acertando exactamente igual. Solo si ese falla se prueban las
+    variantes de :func:`name_query_variants`, y entonces se exige una guarda
+    extra: :func:`token_subset_match`, que rechaza cualquier candidato con un
+    token que la cartelera no menciona. Sin ella, buscar "Jose Montanha" podría
+    devolver a un "Jose Montanha Pereira" distinto y soldarle el combate.
+
+    Devuelve ``(espn_athlete_id, espn_display_name)`` o ``None``. Gasta una
+    petición por variante, y para en cuanto una acierta.
+    """
+    for index, variant in enumerate(name_query_variants(name)):
+        found = _search_espn_athlete(session, variant)
+        if found is None:
+            continue
+        athlete_id, espn_name = found
+        if index == 0:
+            return athlete_id, espn_name
+        if token_subset_match(name, espn_name):
+            LOGGER.info("Relaxed match for %r via %r -> %r", name, variant, espn_name)
+            return athlete_id, espn_name
+        LOGGER.info("Rejected relaxed match for %r via %r: %r", name, variant, espn_name)
+    return None
 
 
 def _fetch_athlete_by_id(session: requests.Session, athlete_id: str) -> EspnAthlete | None:
