@@ -24,7 +24,7 @@ from .enrich_ranked import (
     REQUEST_DELAY_SECONDS,
     _build_session,
     _fetch_athlete_by_id,
-    _search_espn_athlete,
+    search_espn_athlete_relaxed,
 )
 from .enrich_records_espn import _fetch_espn_record
 from .espn import EspnAthlete
@@ -37,7 +37,7 @@ LOGGER = logging.getLogger(__name__)
 
 def _resolve(session, name: str) -> tuple[EspnAthlete, tuple[int, int, int]] | None:
     """Resolve an ESPN athlete + W-L-D for a name. No DB writes."""
-    found = _search_espn_athlete(session, name)
+    found = search_espn_athlete_relaxed(session, name)
     if found is None:
         return None
     athlete_id, _espn_name = found
@@ -46,6 +46,26 @@ def _resolve(session, name: str) -> tuple[EspnAthlete, tuple[int, int, int]] | N
         return None
     record = _fetch_espn_record(session, athlete_id) or (0, 0, 0)
     return athlete, record
+
+
+# ESPN publica huecos como si fueran datos: un alcance de 0 cm y una postura
+# "--". Hoy hay 27 fichas con reach_cm = 0 y 26 con stance = '--', y el alcance
+# alimenta el modelo de predicción, donde un cero no es "no lo sé" sino un
+# luchador sin brazos. Aquí solo se crean fichas NUEVAS, así que convertir el
+# hueco en NULL no puede pisar un dato bueno: o llega vacío de ESPN o no llega.
+_ESPN_EMPTY_STANCE = {"--", "-", "n/a", ""}
+
+
+def _clean_measure(value: float | None) -> float | None:
+    """Un 0 de ESPN es un hueco, no una medida."""
+    return value if value else None
+
+
+def _clean_stance(value: str | None) -> str | None:
+    """Convierte los marcadores de hueco de ESPN ('--') en NULL."""
+    if value is None:
+        return None
+    return None if value.strip().lower() in _ESPN_EMPTY_STANCE else value
 
 
 def _get_unlinked_slots(connection) -> list[tuple[int, str, str]]:
@@ -101,9 +121,9 @@ def link_upcoming(dry_run: bool = False) -> dict[str, int]:
                 headshot_url=athlete.headshot_url,
                 nationality=athlete.nationality,
                 birth_date=athlete.birth_date,
-                height_cm=athlete.height_cm,
-                reach_cm=athlete.reach_cm,
-                stance=athlete.stance,
+                height_cm=_clean_measure(athlete.height_cm),
+                reach_cm=_clean_measure(athlete.reach_cm),
+                stance=_clean_stance(athlete.stance),
                 weight_grams=athlete.weight_grams,
                 wins=record[0],
                 losses=record[1],
