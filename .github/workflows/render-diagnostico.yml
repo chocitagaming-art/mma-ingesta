@@ -1,0 +1,101 @@
+name: Diagnostico de Render (solo lectura)
+
+# Por que existe: el 1-ago a las 23:12Z el microservicio de prediccion dejo de
+# responder (TCP aceptado en 25 ms y CERO bytes durante 420 s, hasta que el
+# borde de Render devuelve su propio 502) y NADA de lo que el dueno mira a
+# diario lo enseñaba: el panel /estado tiene 22 comprobaciones y ninguna mira
+# Render, asi que estado-guardian salio en verde con el servicio muerto. El
+# aviso solo llego por los Issues de monitor.yml y keepalive-prediction.yml.
+#
+# Hasta ahora, para saber POR QUE se habia caido habia que entrar al panel de
+# Render a mano. Este workflow contesta esa pregunta desde Actions, en lectura
+# pura: no despliega, no reinicia, no cambia un solo ajuste. Para levantarlo
+# esta deploy-render.yml, que es otra cosa.
+#
+# 🔒 ESTE REPO ES PUBLICO, Y LOS REGISTROS DE ACTIONS TAMBIEN.
+# Un traceback de conexion de psycopg2 imprime el DSN entero, contrasena
+# incluida. Por eso:
+#   1. DATABASE_URL se declara en `env` aunque el script no la use: al pasar por
+#      el contexto `secrets`, GitHub la registra y la enmascara si aparece.
+#   2. Ademas TODO lo que se imprime pasa por un filtro `sed` que tacha
+#      cualquier URI con credenciales y cualquier token largo. Cinturon y
+#      tirantes: el enmascarado de GitHub solo cubre coincidencias exactas.
+
+on:
+  workflow_dispatch:
+    inputs:
+      con_logs:
+        description: "Incluir tambien las lineas de log (tachadas). Sin esto, solo estado y eventos."
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostico:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+      SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+      # No se usa: esta aqui para que GitHub la registre y la tache si asoma.
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - name: Estado del servicio
+        run: |
+          set -euo pipefail
+          # `redactar` es la unica via de salida de este workflow. Tacha:
+          #   - URIs con credenciales  ->  postgresql://***:***@host
+          #   - cadenas de 24+ caracteres de aspecto de secreto (claves, tokens)
+          redactar() {
+            sed -E \
+              -e 's#([a-zA-Z+]+)://[^:/@[:space:]]+:[^@[:space:]]+@#\1://***:***@#g' \
+              -e 's#\b(rnd_|sk-|ghp_|AIza)[A-Za-z0-9_-]{8,}#\1***#g' \
+              -e 's#\b[A-Za-z0-9_-]{40,}\b#***#g'
+          }
+
+          echo "===== SERVICIO ====="
+          curl -sS -H "Authorization: Bearer $RENDER_API_KEY" -H "Accept: application/json" \
+            "https://api.render.com/v1/services/$SERVICE_ID" \
+            | jq '{name, type, suspended, suspenders, autoDeploy, branch,
+                   plan: .serviceDetails.plan,
+                   region: .serviceDetails.region,
+                   healthCheckPath: .serviceDetails.healthCheckPath,
+                   numInstances: .serviceDetails.numInstances,
+                   updatedAt}' \
+            | redactar
+
+          echo
+          echo "===== ULTIMOS 8 DESPLIEGUES ====="
+          curl -sS -H "Authorization: Bearer $RENDER_API_KEY" -H "Accept: application/json" \
+            "https://api.render.com/v1/services/$SERVICE_ID/deploys?limit=8" \
+            | jq -r '.[] | "\(.deploy.createdAt)  \(.deploy.status)  \(.deploy.id)  \(.deploy.commit.message // "" | split("\n")[0])"' \
+            | redactar
+
+          echo
+          echo "===== EVENTOS RECIENTES (aqui sale el motivo de una caida) ====="
+          curl -sS -H "Authorization: Bearer $RENDER_API_KEY" -H "Accept: application/json" \
+            "https://api.render.com/v1/services/$SERVICE_ID/events?limit=25" \
+            | jq -r '.[] | "\(.event.timestamp)  \(.event.type)  \(.event.details | tostring)"' \
+            | redactar
+
+      - name: Lineas de log (tachadas)
+        if: ${{ inputs.con_logs }}
+        run: |
+          set -euo pipefail
+          redactar() {
+            sed -E \
+              -e 's#([a-zA-Z+]+)://[^:/@[:space:]]+:[^@[:space:]]+@#\1://***:***@#g' \
+              -e 's#\b(rnd_|sk-|ghp_|AIza)[A-Za-z0-9_-]{8,}#\1***#g' \
+              -e 's#\b[A-Za-z0-9_-]{40,}\b#***#g'
+          }
+          echo "===== ULTIMAS LINEAS DE LOG ====="
+          # El endpoint de logs necesita el ownerId del servicio.
+          owner=$(curl -sS -H "Authorization: Bearer $RENDER_API_KEY" -H "Accept: application/json" \
+            "https://api.render.com/v1/services/$SERVICE_ID" | jq -r '.ownerId')
+          curl -sS -H "Authorization: Bearer $RENDER_API_KEY" -H "Accept: application/json" \
+            "https://api.render.com/v1/logs?ownerId=$owner&resource=$SERVICE_ID&limit=100" \
+            | jq -r '.logs[]? | "\(.timestamp)  \(.message)"' \
+            | tail -80 \
+            | redactar
