@@ -139,3 +139,67 @@ jobs:
             gh label create cron-failure --repo "$REPO" --color D73A4A --description "Un cron de datos ha fallado" --force
             gh issue create --repo "$REPO" --title "$TITULO" --label cron-failure --body "$BODY"
           fi
+
+  # ---------------------------------------------------------------------------
+  # EL RELEVO: cerrar el Issue cuando el workflow vuelve a verde.
+  #
+  # Anadido el 6-ago-2026, y llega tarde. Este fichero ABRIA Issues y no cerraba
+  # NINGUNO -su `if:` solo miraba failure/timed_out/cancelled-, asi que cada
+  # aviso se quedaba abierto para siempre. Y el propio cuerpo del Issue explica
+  # por que eso es grave: "mientras siga abierto, los siguientes fallos de ESTE
+  # workflow seran comentarios y no te llegara un email nuevo". GitHub manda
+  # correo al ABRIR, no al comentar.
+  #
+  # Medido el 6-ago: seis Issues abiertos, y tres correspondian a cosas ya
+  # resueltas (#19 con el servicio en pie, #21 sin nada sin desplegar, #23 con la
+  # fuente respondiendo en 0,2 s). El #19 llevaba casi tres dias abierto con su
+  # cron en verde. Con la velada del sabado 8 encima, eso significaba que un
+  # fallo del centinela del directo NO habria mandado ningun correo: habria sido
+  # un comentario mudo dentro de un hilo viejo.
+  #
+  # No hace falta que nadie se acuerde de cerrarlos a mano. Ese era el fallo.
+  cerrar:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # NUNCA hace fallar el run. Si el cierre no sale, se pierde una comodidad;
+    # si tumbara el workflow, se perderia el canal de avisos entero.
+    continue-on-error: true
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      WF_NAME: ${{ github.event.workflow_run.name }}
+      WF_URL: ${{ github.event.workflow_run.html_url }}
+    steps:
+      - name: Cerrar el Issue de este workflow si ya vuelve a estar verde
+        run: |
+          set -uo pipefail
+          TITULO="🔴 Cron fallando — $WF_NAME"
+          # Mismo emparejamiento EXACTO por titulo que usa el job de arriba: con
+          # `--search` la busqueda es difusa y cerraria el hilo de otro workflow.
+          ISSUE=$(gh issue list --repo "$REPO" --label cron-failure --state open \
+            --limit 100 --json number,title,labels \
+            | jq -r --arg t "$TITULO" '[.[] | select(.title == $t)] | .[0] | select(.) | @json')
+
+          if [ -z "$ISSUE" ]; then
+            echo "No hay Issue abierto para '$WF_NAME'. Nada que cerrar."
+            exit 0
+          fi
+
+          NUM=$(echo "$ISSUE" | jq -r '.number')
+
+          # SALVAVIDAS: hay Issues que NO se cierran aunque su cron vuelva a
+          # verde, porque la condicion que los abrio sigue viva y son la unica
+          # senal de que algo cambio en una fuente de fuera. El caso real es el
+          # #22: ufc.com dejo de emitir `data-fmid` y el impacto esta mitigado
+          # por diseno, asi que el smoke puede volver a pasar sin que el problema
+          # se haya ido. Cerrarlo seria apagar la unica alarma que lo vigila.
+          # Se marcan a mano con la etiqueta `no-cerrar-solo`.
+          if echo "$ISSUE" | jq -e '.labels[]? | select(.name == "no-cerrar-solo")' >/dev/null; then
+            echo "::notice title=Relevo::El Issue #$NUM lleva 'no-cerrar-solo'. Se deja abierto a proposito."
+            exit 0
+          fi
+
+          STAMP=$(date -u +'%Y-%m-%d %H:%M UTC')
+          gh issue close "$NUM" --repo "$REPO" --reason completed --comment "$(printf '✅ **%s** — **%s** ha vuelto a terminar en `success`, así que este aviso se cierra solo.\n\n[Ver el run](%s)\n\n_Se cierra para que el PRÓXIMO fallo de este workflow vuelva a abrir un Issue nuevo y te llegue un email. Mientras un aviso sigue abierto, los fallos siguientes son comentarios mudos._\n\n_Si este Issue no debe cerrarse aunque su cron pase, ponle la etiqueta `no-cerrar-solo`._' "$STAMP" "$WF_NAME" "$WF_URL")"
+          echo "Issue #$NUM cerrado."
