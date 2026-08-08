@@ -67,7 +67,12 @@ import requests
 
 from .config import get_settings
 from .db import connect
-from .espn import _build_exact_name_index, _build_normalized_name_index, _match_fighter
+from .espn import (
+    _build_exact_name_index,
+    _build_normalized_name_index,
+    _match_fighter,
+    build_espn_session,
+)
 from .espn_live_stats import collect_fight_stats
 from .logging_config import configure_logging
 from .models import EventRecord
@@ -595,21 +600,12 @@ def fetch_scoreboard(session: requests.Session, dates: str) -> dict[str, Any]:
     return response.json()
 
 
-def _build_session(settings) -> requests.Session:
-    session = requests.Session()
-    session.headers.update(
-        {
-            "Accept": "application/json",
-            "User-Agent": settings.user_agent.replace("ufcstats.com", "espn.com"),
-        }
-    )
-    return session
-
-
 def refresh_live_results(dates: str | None = None, dry_run: bool = False) -> Counter:
     settings = get_settings()
     window = dates or default_dates_window()
-    session = _build_session(settings)
+    # Sin User-Agent propio: `site.api.espn.com` (el scoreboard de aquí abajo)
+    # responde 403 a cualquiera. Ver `espn.build_espn_session`.
+    session = build_espn_session()
     payload = fetch_scoreboard(session, window)
     events = parse_scoreboard(payload)
     live_events = events_worth_processing(events)

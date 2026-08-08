@@ -36,6 +36,38 @@ ESPN_PAGE_SIZE = 100
 FUZZY_MATCH_THRESHOLD = IDENTITY_THRESHOLD
 
 
+def build_espn_session() -> requests.Session:
+    """Sesión para las APIs de ESPN. NO manda User-Agent propio, y eso es el punto.
+
+    El 8-ago-2026 `site.api.espn.com` empezó a responder 403 a CUALQUIER
+    User-Agent propio. El bucle del directo lleva ese host, así que la velada de
+    esa noche se estaba perdiendo entera: 12 runs seguidos de `live-results` en
+    rojo desde la 01:50Z, y `live-event-loop.yml` corre el MISMO módulo.
+
+    Medido, no supuesto — alternando UA contra el mismo endpoint con 3 s de
+    pausa, para descartar rate-limiting:
+
+        mma-ingesta/1.0 (+https://espn.com)  -> 403   403
+        python-requests/2.34.2               -> 200   200
+        sin cabecera User-Agent              -> 200
+
+    No es la IP de GitHub (falla igual desde una IP doméstica) y no es el
+    fingerprint TLS/JA3 (`curl` con su UA por defecto pasa y con uno propio no:
+    mismo cliente, mismo JA3, distinto resultado). Es el header, y sólo el
+    header. Por eso aquí NO se pone un UA de navegador: también da 403 —
+    lo que ESPN acepta es el UA del cliente HTTP, no uno inventado.
+
+    Vive en UNA función porque el fallo venía de tener SEIS copias del mismo
+    `headers.update`: al bloquearse el host había que acordarse de las seis.
+    Los otros dos hosts (`sports.core.api`, `site.web.api`) responden 200 con y
+    sin UA — medido el mismo día—, así que unificar no les cambia nada hoy y
+    les cubre el día que ESPN extienda el bloqueo.
+    """
+    session = requests.Session()
+    session.headers.update({"Accept": "application/json"})
+    return session
+
+
 @dataclass(frozen=True)
 class EspnAthlete:
     athlete_id: str
@@ -53,13 +85,7 @@ class EspnAthlete:
 def scrape_and_enrich(max_pages: int | None = None) -> Counter:
     settings = get_settings()
     counts: Counter = Counter()
-    session = requests.Session()
-    session.headers.update(
-        {
-            "Accept": "application/json",
-            "User-Agent": settings.user_agent.replace("ufcstats.com", "espn.com"),
-        }
-    )
+    session = build_espn_session()
     with connect(settings.database_url) as connection:
         fighters = get_all_fighters(connection)
         exact_name_index = _build_exact_name_index(fighters)

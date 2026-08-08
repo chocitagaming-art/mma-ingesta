@@ -11,6 +11,7 @@ import requests
 
 from .config import get_settings
 from .db import connect
+from .espn import build_espn_session
 from .matching import DEFAULT_THRESHOLD, alnum_name, ratio
 
 
@@ -68,13 +69,7 @@ def _fetch_espn_name(session: requests.Session, athlete_id: str) -> str | None:
 
 def verify_headshots() -> VerificationSummary:
     settings = get_settings()
-    session = requests.Session()
-    session.headers.update(
-        {
-            "Accept": "application/json",
-            "User-Agent": settings.user_agent.replace("ufcstats.com", "espn.com"),
-        }
-    )
+    session = build_espn_session()
 
     with connect(settings.database_url) as connection:
         with connection.cursor() as cursor:

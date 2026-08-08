@@ -11,6 +11,7 @@ import requests
 
 from .config import get_settings
 from .db import connect
+from .espn import build_espn_session
 from .espn_import_all import (
     _clean_text,
     _extract_headshot_url,
@@ -49,14 +50,11 @@ ENRICHMENT_FIELDS = (
 
 
 def _build_session() -> requests.Session:
-    session = requests.Session()
-    session.headers.update(
-        {
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0 (compatible; mma-ingesta/1.0; +https://espn.com)",
-        }
-    )
-    return session
+    """Ver `espn.build_espn_session`. El UA que había aquí era un
+    `Mozilla/5.0 (compatible; mma-ingesta/1.0; ...)`, y disfrazarlo de navegador
+    no ayuda: medido el 8-ago-2026, ESPN también lo responde con 403.
+    """
+    return build_espn_session()
 
 
 def _get_json(session: requests.Session, url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:

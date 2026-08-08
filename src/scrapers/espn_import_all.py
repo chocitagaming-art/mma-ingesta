@@ -15,6 +15,7 @@ import requests
 
 from .config import get_settings
 from .db import connect
+from .espn import build_espn_session
 from .logging_config import configure_logging
 from .matching import IDENTITY_THRESHOLD, normalize_name as _normalize_name, ratio
 from .models import FighterRecord
@@ -48,13 +49,7 @@ class EspnAthlete:
 def import_all_athletes(max_pages: int | None = None) -> Counter:
     settings = get_settings()
     counts: Counter = Counter()
-    session = requests.Session()
-    session.headers.update(
-        {
-            "Accept": "application/json",
-            "User-Agent": settings.user_agent.replace("ufcstats.com", "espn.com"),
-        }
-    )
+    session = build_espn_session()
     with connect(settings.database_url) as connection:
         fighters = get_all_fighters(connection)
     exact_name_index = _build_exact_name_index(fighters)

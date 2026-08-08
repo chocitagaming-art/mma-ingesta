@@ -27,7 +27,7 @@ import requests
 
 from .config import Settings, get_settings
 from .db import connect
-from .espn import EspnAthlete, _fetch_athlete
+from .espn import EspnAthlete, _fetch_athlete, build_espn_session
 from .logging_config import configure_logging
 # fold is re-exported as _fold: several scrapers do `from .enrich_ranked import
 # _fold` (kept for import stability). noqa: ruff can't see the cross-module use.
@@ -56,15 +56,17 @@ NAME_MATCH_THRESHOLD = DEFAULT_THRESHOLD
 REQUEST_DELAY_SECONDS = 0.35
 
 
-def _build_session(settings: Settings) -> requests.Session:
-    session = requests.Session()
-    session.headers.update(
-        {
-            "Accept": "application/json",
-            "User-Agent": settings.user_agent.replace("ufcstats.com", "espn.com"),
-        }
-    )
-    return session
+def _build_session(settings: Settings | None = None) -> requests.Session:
+    """Sesión de ESPN. Delega en `espn.build_espn_session`: ver allí por qué NO
+    lleva User-Agent propio.
+
+    `settings` se conserva —y por eso es opcional— porque esta función la llaman
+    ocho módulos (`enrich_records_espn`, `enrich_upcoming`, `espn_fight_history`,
+    `link_upcoming_fighters`, `refresh_fighter_records`, `resolve_espn_ids`,
+    `enrich_upcoming` y el `conftest` de los smoke). Cambiarles la firma el día
+    de una velada era superficie que no hacía falta tocar.
+    """
+    return build_espn_session()
 
 
 def _search_espn_athlete(session: requests.Session, name: str) -> tuple[str, str] | None:

@@ -26,9 +26,9 @@ from src.scrapers.db import connect
 from src.scrapers.espn import (
     _build_exact_name_index,
     _build_normalized_name_index,
+    build_espn_session,
 )
 from src.scrapers.espn_live_results import (
-    _build_session,
     _resolve_fighter,
     fetch_scoreboard,
     match_db_event,
@@ -51,7 +51,7 @@ def main() -> None:
     args = ap.parse_args()
 
     settings = get_settings()
-    payload = fetch_scoreboard(_build_session(settings), args.dates)
+    payload = fetch_scoreboard(build_espn_session(), args.dates)
     events = parse_scoreboard(payload)
     print(f"ESPN scoreboard dates={args.dates}: {len(events)} event(s)\n")
 
