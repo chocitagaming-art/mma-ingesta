@@ -31,6 +31,8 @@ from pathlib import Path
 
 import requests
 
+from src.scrapers.espn import build_espn_session
+
 SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard"
 FIGHTCENTER_URL = "https://site.web.api.espn.com/apis/common/v3/sports/mma/ufc/fightcenter/{event_id}"
 CORE_COMP_URL = (
@@ -128,11 +130,11 @@ def main() -> None:
     dates = args.dates or datetime.now(timezone.utc).strftime("%Y%m%d")
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    session = requests.Session()
-    session.headers.update({
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) mma-status-recon",
-    })
+    # Sin User-Agent propio: este script pide SCOREBOARD_URL, y
+    # `site.api.espn.com` responde 403 a cualquiera — el `Mozilla/5.0 (...)
+    # mma-status-recon` que había aquí incluido, medido. Ver
+    # `espn.build_espn_session`.
+    session = build_espn_session()
     counts: Counter = Counter()
 
     events_today = poll_once(session, out_dir, dates, counts)

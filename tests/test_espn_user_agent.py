@@ -95,12 +95,19 @@ def test_ningun_scraper_de_espn_construye_su_propia_sesion():
     es CORRECTO (`_drop_user_agent` lo retira cuando impersona Chrome, y el
     camino de respaldo sin `curl_cffi` lo necesita). Ese host bloquea por JA3 y
     no por header, que es el problema contrario al de aquí.
+
+    🪤 Y mira `scripts/` además de `src/scrapers/`, porque la primera versión
+    solo miraba `src/` y por eso NO cazó `scripts/capture_live_samples.py`, que
+    fijaba a mano un `Mozilla/5.0 (...) mma-status-recon` contra el MISMO host
+    vetado. Ése es el plan B de la película del combate, y además escribe la
+    tabla de la que el vigilante deduce si la velada se está perdiendo: se
+    habría quedado 235 minutos capturando 403 en silencio y saliendo en verde.
     """
     from pathlib import Path
 
-    raiz = Path(__file__).resolve().parent.parent / "src" / "scrapers"
+    repo = Path(__file__).resolve().parent.parent
     culpables = []
-    for fichero in sorted(raiz.glob("*.py")):
+    for fichero in sorted([*(repo / "src" / "scrapers").glob("*.py"), *(repo / "scripts").glob("*.py")]):
         texto = fichero.read_text(encoding="utf-8")
         if "api.espn.com" not in texto.lower():
             continue
