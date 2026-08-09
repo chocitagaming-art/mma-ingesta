@@ -45,6 +45,20 @@ STATS_LEAF = "competitors/{athlete_id}/statistics"
 REQUEST_DELAY_SECONDS = 0.3
 _SAFE_LABEL_RE = re.compile(r"[^A-Za-z0-9_-]+")
 
+# Cuántas pasadas seguidas puede fallar el scoreboard antes de dar el run por
+# perdido. Con el intervalo por defecto (120 s) son 10 minutos seguidos sin que
+# ESPN conteste: eso ya no es una pasada mala, es la fuente cerrada.
+#
+# 🪤 El 8-ago este script ocupó el runner los 235 minutos capturando 403 y
+# terminó en VERDE con el artifact vacío: `poll_once` devolvía -1 y `main` solo
+# miraba `== 0`, así que el -1 se colaba por el hueco. Un run verde que no
+# guarda nada no prueba nada, y encima tapa la avería. La regla de la casa es
+# que **los jobs fallen cuando no producen nada**.
+MAX_CONSECUTIVE_SCOREBOARD_ERRORS = 5
+
+# Código de salida cuando el run termina sin haber capturado nada útil.
+EXIT_NOTHING_CAPTURED = 1
+
 
 def _now_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -138,6 +152,12 @@ def main() -> None:
     counts: Counter = Counter()
 
     events_today = poll_once(session, out_dir, dates, counts)
+    if events_today < 0:
+        # El scoreboard no contestó en la PRIMERA pasada. No es mala suerte: es
+        # la fuente cerrada (así se veía el 403 del 8-ago). Salir YA y en ROJO,
+        # en vez de ocupar el runner 235 minutos capturando el mismo error.
+        print(json.dumps({"aborted": "scoreboard unreachable on first poll", "dates": dates}))
+        raise SystemExit(EXIT_NOTHING_CAPTURED)
     if events_today == 0:
         # Guard del cron: sábado sin cartelera -> salir barato y en verde.
         print(json.dumps({"skipped": "no events today", "dates": dates}))
@@ -146,14 +166,37 @@ def main() -> None:
 
     if not args.once:
         deadline = time.monotonic() + args.duration_minutes * 60
+        consecutive_errors = 0
         while time.monotonic() < deadline:
             time.sleep(max(1, args.interval_seconds))
-            poll_once(session, out_dir, dates, counts)
+            events_now = poll_once(session, out_dir, dates, counts)
             counts["polls"] += 1
+            # Una pasada mala no mata la ventana (misma filosofía que
+            # `run_bounded_loop`), pero una racha sí: si ESPN se cierra a mitad
+            # de velada, seguir hasta el final es quemar el runner y salir en
+            # verde sin haber grabado la segunda mitad.
+            if events_now < 0:
+                consecutive_errors += 1
+                if consecutive_errors >= MAX_CONSECUTIVE_SCOREBOARD_ERRORS:
+                    print(json.dumps({
+                        "aborted": "scoreboard unreachable",
+                        "consecutive_errors": consecutive_errors,
+                        "dates": dates,
+                        **{k: counts[k] for k in sorted(counts)},
+                    }, indent=2))
+                    raise SystemExit(EXIT_NOTHING_CAPTURED)
+            else:
+                consecutive_errors = 0
             if counts["polls"] % 10 == 0:
                 print(json.dumps({"progress": dict(counts)}), flush=True)
 
     print(json.dumps({"dates": dates, **{k: counts[k] for k in sorted(counts)}}, indent=2))
+
+    # Cinturón: si el run termina sin un solo fichero guardado, no es un run en
+    # verde. Hoy es inalcanzable (la primera pasada ya aborta), y está a
+    # propósito: deja escrito el invariante para quien toque el aborto de arriba.
+    if counts["saved"] == 0:
+        raise SystemExit(EXIT_NOTHING_CAPTURED)
 
 
 if __name__ == "__main__":

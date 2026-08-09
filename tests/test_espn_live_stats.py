@@ -20,6 +20,7 @@ from src.scrapers.espn_live_stats import (
     parse_stat_values,
 )
 from src.scrapers.repositories.live_stats import (
+    RESEAL_AFTER_HOURS,
     delete_live_fight_stat_samples,
     delete_live_fight_stats,
     get_final_stats_fight_ids,
@@ -213,6 +214,48 @@ def test_upsert_live_fight_stats_seals_with_is_final(fakedb):
     assert params[1] == "post" and params[7] is True
 
 
+def test_upsert_live_fight_stats_abre_la_puerta_al_re_sellado(fakedb):
+    """El sello es inmutable MIENTRAS está fresco, no para siempre.
+
+    Sin esta segunda condición el arreglo del re-sellado no serviría de nada:
+    el bucle volvería a pedir la pelea a ESPN, recibiría los números corregidos
+    y el `WHERE NOT is_final` tiraría la escritura a la basura en silencio.
+    Las dos mitades tienen que ir juntas.
+    """
+    conn = fakedb.Connection(lambda sql, params=None: [])
+    upsert_live_fight_stats(
+        conn, 11, "post", "STATUS_FINAL", "Final", 3, "5:00",
+        {"201": EXPECTED_COMPACT}, is_final=True, reseal_after_hours=2,
+    )
+    sql, params = conn.cursors[0].executed[0]
+    flat = " ".join(sql.split())
+
+    # Sigue protegiendo el dato de un escritor solapado rezagado...
+    assert "WHERE NOT live_fight_stats.is_final" in flat
+    # ...y admite la corrección en frío pasada la ventana.
+    assert "OR live_fight_stats.updated_at < NOW() - make_interval(hours => %s)" in flat
+    assert params[8] == 2
+
+
+def test_las_dos_mitades_del_re_sellado_usan_la_misma_ventana(fakedb):
+    """Si alguien cambia una y no la otra, el re-sellado se rompe en silencio.
+
+    Con la ventana del lector más corta que la del escritor, el bucle re-pide
+    la pelea y la escritura se descarta: gasto de HTTP sin ningún efecto, y
+    ningún test rojo. Este fichero fija que el valor por defecto es uno solo.
+    """
+    lector = fakedb.Connection(lambda sql, params=None: [])
+    get_final_stats_fight_ids(lector, [11])
+
+    escritor = fakedb.Connection(lambda sql, params=None: [])
+    upsert_live_fight_stats(
+        escritor, 11, "post", "STATUS_FINAL", "Final", 3, "5:00", None, is_final=True,
+    )
+
+    assert lector.cursors[0].executed[0][1][1] == RESEAL_AFTER_HOURS
+    assert escritor.cursors[0].executed[0][1][8] == RESEAL_AFTER_HOURS
+
+
 def test_get_final_stats_fight_ids_only_sealed_finals(fakedb):
     conn = fakedb.Connection(lambda sql, params=None: [(11,), (13,)])
     assert get_final_stats_fight_ids(conn, [11, 12, 13]) == {11, 13}
@@ -221,8 +264,28 @@ def test_get_final_stats_fight_ids_only_sealed_finals(fakedb):
     # Solo is_final cuenta como final: una 'post' sin sellar se reintenta.
     assert "is_final = true" in flat
     assert "stats IS NOT NULL" not in flat
-    assert params == ([11, 12, 13],)
+    assert params == ([11, 12, 13], RESEAL_AFTER_HOURS)
     assert get_final_stats_fight_ids(conn, []) == set()
+
+
+def test_get_final_stats_fight_ids_deja_pasar_los_sellos_viejos(fakedb):
+    """Re-sellado: un sello VIEJO ya no cuenta como final, y la pelea se re-pide.
+
+    Es el arreglo del 9-ago. El bucle sella el total segundos después de la
+    campana y ESPN sigue corrigiendo sus números después: comparado con el acta
+    de ufcstats, el evento 1063 (leído en frío, horas más tarde) acierta 28/28,
+    mientras que los eventos con el bucle denso se quedan en 12/24. El dato de
+    ESPN es bueno; lo congelábamos demasiado pronto.
+    """
+    conn = fakedb.Connection(lambda sql, params=None: [])
+    get_final_stats_fight_ids(conn, [11], reseal_after_hours=2)
+    sql, params = conn.cursors[0].executed[0]
+    flat = " ".join(sql.split())
+
+    assert "updated_at >= NOW() - make_interval(hours => %s)" in flat, (
+        "sin la ventana de frescura, una pelea sellada no se re-pide JAMÁS"
+    )
+    assert params == ([11], 2)
 
 
 def test_prune_live_fight_stats_deletes_by_age(fakedb):

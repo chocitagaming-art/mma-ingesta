@@ -23,6 +23,29 @@ import json
 
 from psycopg2.extensions import connection as PgConnection
 
+# Cuánto tiene que llevar sellada una pelea antes de volver a pedirla a ESPN.
+#
+# EL PROBLEMA, MEDIDO EL 9-ago-2026. El bucle sella el total segundos después
+# de la campana, y ESPN sigue corrigiendo sus números minutos u horas más
+# tarde. Comparando la última muestra del directo contra el acta de ufcstats:
+#
+#     evento 1063 (14 muestras, todas escritas HORAS después)  28/28 exactos
+#     eventos con el bucle denso (lectura inmediata)           12/24
+#
+# Es decir: los números de ESPN son buenos; los congelamos demasiado pronto.
+# Con esto, una pelea sellada se vuelve a pedir UNA vez pasadas estas horas y
+# el sello se re-escribe con lo que ESPN diga ya en frío.
+#
+# Se auto-limita: cada re-lectura refresca `updated_at`, así que dentro de una
+# ventana de bucle normal (~9 h entre los dos jobs) cada pelea se re-lee una o
+# dos veces, no en cada pasada. Sin esto, quitar el sello costaría ~14.000
+# peticiones HTTP de más por velada.
+#
+# ⚠️ Límite conocido: una pelea que termina cerca del final de la ventana no
+# llega a re-leerse. No es grave — la consolidación del domingo tira de
+# ufcstats, que es la fuente buena. Esto solo mejora el dato PROVISIONAL.
+RESEAL_AFTER_HOURS = 2
+
 
 def upsert_live_fight_stats(
     connection: PgConnection,
@@ -34,12 +57,20 @@ def upsert_live_fight_stats(
     display_clock: str | None,
     stats: dict[str, dict[str, int]] | None,
     is_final: bool = False,
+    reseal_after_hours: int = RESEAL_AFTER_HOURS,
 ) -> None:
     """Escribe/pisa la fila viva de una pelea (una fila por fight_id).
 
     is_final: solo TRUE cuando el llamador confirmó stats FRESCAS de ambos
     lados en 'post' (ver _process_live_stats). Se guarda con OR sobre el valor
-    almacenado: una vez sellado, ningún escritor posterior lo desella."""
+    almacenado: una vez sellado, ningún escritor posterior lo desella.
+
+    El sello protege el DATO, no solo el flag: mientras está fresco, el
+    DO UPDATE no entra y un escritor solapado rezagado no puede pisar el total
+    bueno con números de mitad de pelea. Pasadas `reseal_after_hours`, en
+    cambio, la puerta se abre a propósito UNA vez para recoger las correcciones
+    que ESPN publica en frío (ver RESEAL_AFTER_HOURS). El escritor rezagado ya
+    no es un riesgo a esas alturas: el evento hace horas que terminó."""
     with connection.cursor() as cursor:
         cursor.execute(
             """
@@ -66,6 +97,10 @@ def upsert_live_fight_stats(
                 is_final = live_fight_stats.is_final OR EXCLUDED.is_final,
                 updated_at = NOW()
             WHERE NOT live_fight_stats.is_final
+               -- Ventana de re-sellado: pasadas RESEAL_AFTER_HOURS desde la
+               -- última escritura, la fila sellada vuelve a admitir el total
+               -- corregido que ESPN publica en frío.
+               OR live_fight_stats.updated_at < NOW() - make_interval(hours => %s)
             """,
             (
                 fight_id,
@@ -76,6 +111,7 @@ def upsert_live_fight_stats(
                 display_clock,
                 json.dumps(stats, ensure_ascii=False) if stats is not None else None,
                 is_final,
+                reseal_after_hours,
             ),
         )
 
@@ -219,11 +255,23 @@ def last_in_progress_clock(connection: PgConnection, fight_id: int) -> str | Non
     return row[0] if row else None
 
 
-def get_final_stats_fight_ids(connection: PgConnection, fight_ids: list[int]) -> set[int]:
-    """Peleas cuyo total final SELLADO (is_final) ya está guardado: el bucle
-    deja de re-pedirlas a ESPN. Una fila 'post' que NO llegó a is_final (el
-    endpoint de stats falló o solo respondió un lado en la pasada de cierre)
-    se reintenta barato en cada pasada hasta capturar el total completo."""
+def get_final_stats_fight_ids(
+    connection: PgConnection,
+    fight_ids: list[int],
+    reseal_after_hours: int = RESEAL_AFTER_HOURS,
+) -> set[int]:
+    """Peleas que el bucle NO tiene que volver a pedirle a ESPN en esta pasada.
+
+    Son las que tienen su total SELLADO (is_final) **y el sello todavía
+    fresco**. Dos casos quedan fuera a propósito:
+
+    - Una fila 'post' que NO llegó a is_final (el endpoint de stats falló o
+      solo respondió un lado en la pasada de cierre): se reintenta barato en
+      cada pasada hasta capturar el total completo.
+    - Una fila sellada hace más de `reseal_after_hours`: se vuelve a pedir UNA
+      vez para recoger las correcciones que ESPN publica en frío. Ver
+      RESEAL_AFTER_HOURS, que es donde está medido por qué.
+    """
     if not fight_ids:
         return set()
     with connection.cursor() as cursor:
@@ -233,8 +281,9 @@ def get_final_stats_fight_ids(connection: PgConnection, fight_ids: list[int]) ->
             FROM live_fight_stats
             WHERE fight_id = ANY(%s)
               AND is_final = true
+              AND updated_at >= NOW() - make_interval(hours => %s)
             """,
-            (fight_ids,),
+            (fight_ids, reseal_after_hours),
         )
         return {int(row[0]) for row in cursor.fetchall()}
 

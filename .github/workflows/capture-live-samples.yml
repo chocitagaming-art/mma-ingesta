@@ -44,7 +44,13 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: pip install requests
+      # 4bb2756 metió `from src.scrapers.espn import build_espn_session` en este
+      # script, que hasta entonces vivía de stdlib + requests. La cadena real es
+      # capture_live_samples -> src.scrapers.espn -> src.config (dotenv) -> src.db
+      # (psycopg2), así que `pip install requests` lo mataba en 26 s. Se usa el
+      # requirements completo, como los otros 27 workflows: si mañana el script
+      # importa una pieza más, esto no vuelve a romperse en silencio.
+      - run: pip install -r requirements-scrapers.txt
       - name: Capture samples
         run: |
           ARGS="--out samples"
