@@ -200,21 +200,33 @@ def test_una_velada_con_todos_los_resultados_no_se_graba():
 
     La hora no basta para saber si una velada sigue viva. El dato, si.
     """
-    assert hay_algo_que_grabar(combates_activos=14, combates_con_ganador=14) is False
+    assert hay_algo_que_grabar(combates_activos=14, combates_resueltos=14) is False
 
 
 def test_una_velada_a_medias_si_se_graba():
     """El caso normal a mitad de velada: han caido los prelims y falta el
     estelar. Es EXACTAMENTE cuando mas falta hace el bucle."""
-    assert hay_algo_que_grabar(combates_activos=14, combates_con_ganador=8) is True
+    assert hay_algo_que_grabar(combates_activos=14, combates_resueltos=8) is True
 
 
 def test_una_cartelera_sin_empezar_se_graba():
-    assert hay_algo_que_grabar(combates_activos=14, combates_con_ganador=0) is True
+    assert hay_algo_que_grabar(combates_activos=14, combates_resueltos=0) is True
 
 
 def test_una_cartelera_vacia_se_graba_igual():
     """Sin combates cargados aun no se puede concluir que la velada acabo: seria
     dar por muerta una cartelera que el scraper todavia no ha traido. Ante la
     duda, grabar — el bucle sale en verde en segundos si no hay nada."""
-    assert hay_algo_que_grabar(combates_activos=0, combates_con_ganador=0) is True
+    assert hay_algo_que_grabar(combates_activos=0, combates_resueltos=0) is True
+
+
+def test_un_no_contest_no_deja_la_velada_viva_para_siempre():
+    """UN EMPATE Y UN NO CONTEST NO TIENEN GANADOR, Y NO SE LO VA A DAR NADIE.
+
+    Exigir `winner_id` para dar la velada por acabada es el mismo error que este
+    guard vino a arreglar, en el otro sentido: la hora decia que seguia viva y
+    aqui el DATO tambien lo diria, para siempre. Caso real: UFC 321
+    (Aspinall-Gane), 13 combates, 12 con ganador y uno anulado (method 'CNC').
+    """
+    assert hay_algo_que_grabar(combates_activos=13, combates_resueltos=13) is False
+

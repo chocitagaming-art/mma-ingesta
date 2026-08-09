@@ -26,7 +26,7 @@ from scripts.live_watchdog import estado_de_velada
 def test_entran_muestras_todo_bien():
     """El caso normal de una velada bien grabada: el bucle esta escribiendo."""
     assert estado_de_velada(
-        muestras_recientes=37, combates_activos=14, combates_con_ganador=6
+        muestras_recientes=37, combates_activos=14, combates_resueltos=6
     ) == "OK"
 
 
@@ -35,7 +35,7 @@ def test_velada_en_marcha_y_cero_muestras_es_un_rescate():
     muestra porque nadie habia lanzado el bucle. Nada en todo el repo era capaz
     de formular esta pregunta."""
     assert estado_de_velada(
-        muestras_recientes=0, combates_activos=14, combates_con_ganador=0
+        muestras_recientes=0, combates_activos=14, combates_resueltos=0
     ) == "CAIDO"
 
 
@@ -44,7 +44,7 @@ def test_el_bucle_muerto_a_mitad_tambien_es_un_rescate():
     note: los combates ya resueltos siguen ahi y el reloj sigue dentro de la
     ventana. Lo unico que cambia es que las muestras se paran."""
     assert estado_de_velada(
-        muestras_recientes=0, combates_activos=14, combates_con_ganador=8
+        muestras_recientes=0, combates_activos=14, combates_resueltos=8
     ) == "CAIDO"
 
 
@@ -53,7 +53,7 @@ def test_velada_terminada_no_se_rescata():
     bucle solo gastaria un runner. Es la misma regla que el centinela usa para
     no revivir una velada acabada (hay_algo_que_grabar)."""
     assert estado_de_velada(
-        muestras_recientes=0, combates_activos=14, combates_con_ganador=14
+        muestras_recientes=0, combates_activos=14, combates_resueltos=14
     ) == "TERMINADA"
 
 
@@ -62,7 +62,21 @@ def test_velada_terminada_manda_aunque_sigan_entrando_muestras():
     bucle sigue vivo unos minutos y sigue escribiendo; eso no es motivo para
     tratarla como viva ni para relanzar nada."""
     assert estado_de_velada(
-        muestras_recientes=12, combates_activos=14, combates_con_ganador=14
+        muestras_recientes=12, combates_activos=14, combates_resueltos=14
+    ) == "TERMINADA"
+
+
+def test_velada_con_un_no_contest_tambien_esta_terminada():
+    """UN EMPATE Y UN NO CONTEST NO TIENEN GANADOR, Y NO SE LO VA A DAR NADIE.
+
+    Contarlos como pendientes deja la velada eternamente sin terminar dentro de
+    la ventana: en cuanto el bucle deja de escribir, `muestras_recientes` cae a
+    cero y esto devolvia CAIDO, o sea un relanzamiento en falso la noche de la
+    velada. Caso real: UFC 321 (Aspinall-Gane), 13 combates, 12 con ganador y
+    uno anulado (method 'CNC'). Los 13 estan resueltos.
+    """
+    assert estado_de_velada(
+        muestras_recientes=0, combates_activos=13, combates_resueltos=13
     ) == "TERMINADA"
 
 
@@ -72,5 +86,6 @@ def test_cartelera_sin_combates_cargados_se_rescata():
     segundos: su primera pasada ve el scoreboard vacio y termina. Lo caro es el
     falso negativo, no el falso positivo."""
     assert estado_de_velada(
-        muestras_recientes=0, combates_activos=0, combates_con_ganador=0
+        muestras_recientes=0, combates_activos=0, combates_resueltos=0
     ) == "CAIDO"
+

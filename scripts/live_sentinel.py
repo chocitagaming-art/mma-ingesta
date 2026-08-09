@@ -86,8 +86,9 @@ EVENTOS_SQL = """
            count(f.id) FILTER (WHERE f.status IS DISTINCT FROM 'cancelled')
                AS combates_activos,
            count(f.id) FILTER (WHERE f.status IS DISTINCT FROM 'cancelled'
-                                 AND f.winner_id IS NOT NULL)
-               AS combates_con_ganador
+                                 AND (f.winner_id IS NOT NULL
+                                      OR f.method IS NOT NULL))
+               AS combates_resueltos
     FROM events e
     LEFT JOIN fights f ON f.event_id = e.id
     WHERE e.status = 'upcoming'
@@ -130,7 +131,7 @@ def ancla_de_evento(
     return None
 
 
-def hay_algo_que_grabar(combates_activos: int, combates_con_ganador: int) -> bool:
+def hay_algo_que_grabar(combates_activos: int, combates_resueltos: int) -> bool:
     """¿Queda velada por delante, o esto ya se ha peleado entero?
 
     EL FALLO QUE TAPA, cazado en caliente el 1-ago-2026 a las 20:36Z: el 1063
@@ -148,10 +149,15 @@ def hay_algo_que_grabar(combates_activos: int, combates_con_ganador: int) -> boo
     velada terminada, y una pasada de mas del bucle sale en verde en segundos
     (su primera pasada ve el scoreboard vacio y termina), mientras que una
     velada perdida no se recupera nunca.
+
+    RESUELTO no es CON GANADOR. Un empate y un no contest no tienen ganador y no
+    se lo va a dar nadie, asi que exigir `winner_id` repetia el mismo fallo que
+    este guard vino a tapar, pero por el lado del dato: la velada se quedaba
+    viva para siempre. La senal de que el combate se celebro es `method`.
     """
     if combates_activos == 0:
         return True
-    return combates_con_ganador < combates_activos
+    return combates_resueltos < combates_activos
 
 
 def plan_de_arranque(
@@ -197,8 +203,8 @@ def _proximo_evento(dsn: str, lookahead_horas: int) -> tuple[dict, Plan] | None:
         conn.close()
 
     ahora = datetime.now(UTC)
-    for id_, nombre, early, prelims, inicio, activos, con_ganador in filas:
-        if not hay_algo_que_grabar(activos, con_ganador):
+    for id_, nombre, early, prelims, inicio, activos, resueltos in filas:
+        if not hay_algo_que_grabar(activos, resueltos):
             continue  # esta ya se ha peleado entera; el reloj no lo sabe
         ancla = ancla_de_evento(early, prelims, inicio)
         plan = plan_de_arranque(ancla, inicio, ahora, lookahead_horas)

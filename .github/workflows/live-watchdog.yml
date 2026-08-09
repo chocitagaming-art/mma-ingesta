@@ -64,7 +64,7 @@ jobs:
           DIAG=$(python -m scripts.live_watchdog --json)
           echo "$DIAG"
           echo "estado=$(echo "$DIAG" | jq -r '.estado')" >> "$GITHUB_OUTPUT"
-          echo "$DIAG" | jq -r '.veladas[] | "- **\(.nombre)** (id \(.event_id)): `\(.estado)` — \(.muestras_recientes) muestras en 45 min, \(.combates_con_ganador)/\(.combates_activos) resueltos"' >> "$GITHUB_STEP_SUMMARY"
+          echo "$DIAG" | jq -r '.veladas[] | "- **\(.nombre)** (id \(.event_id)): `\(.estado)` — \(.muestras_recientes) muestras en 45 min, \(.combates_resueltos)/\(.combates_activos) resueltos"' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Ya hay un bucle corriendo?
         # MISMO guard que live-sentinel.yml, y por el mismo motivo: GitHub solo

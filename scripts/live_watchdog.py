@@ -67,8 +67,9 @@ VELADAS_SQL = f"""
            count(f.id) FILTER (WHERE f.status IS DISTINCT FROM 'cancelled')
                AS combates_activos,
            count(f.id) FILTER (WHERE f.status IS DISTINCT FROM 'cancelled'
-                                 AND f.winner_id IS NOT NULL)
-               AS combates_con_ganador,
+                                 AND (f.winner_id IS NOT NULL
+                                      OR f.method IS NOT NULL))
+               AS combates_resueltos,
            (SELECT count(*)
               FROM live_fight_stat_samples s
               JOIN fights sf ON sf.id = s.fight_id
@@ -87,7 +88,7 @@ VELADAS_SQL = f"""
 
 
 def estado_de_velada(
-    muestras_recientes: int, combates_activos: int, combates_con_ganador: int
+    muestras_recientes: int, combates_activos: int, combates_resueltos: int
 ) -> str:
     """'OK' | 'CAIDO' | 'TERMINADA' para una velada que ya ha empezado.
 
@@ -100,8 +101,13 @@ def estado_de_velada(
     traido no es una velada terminada. Un rescate de mas cuesta un runner que
     sale en verde en segundos; un rescate de menos cuesta la velada entera, y
     eso no se recupera (la serie del 1063 esta perdida para siempre).
+
+    RESUELTO no es lo mismo que CON GANADOR: un empate y un no contest no
+    tienen ganador y no se lo va a dar nadie nunca, asi que exigir winner_id
+    dejaba la velada eternamente sin terminar y la relanzaba en falso al parar
+    el bucle. La senal de que el combate se celebro es `method`.
     """
-    if combates_activos > 0 and combates_con_ganador >= combates_activos:
+    if combates_activos > 0 and combates_resueltos >= combates_activos:
         return "TERMINADA"
     return "OK" if muestras_recientes > 0 else "CAIDO"
 
@@ -117,16 +123,16 @@ def _veladas_en_marcha(dsn: str) -> list[dict]:
         conn.close()
 
     veladas = []
-    for id_, nombre, ancla, activos, con_ganador, muestras in filas:
+    for id_, nombre, ancla, activos, resueltos, muestras in filas:
         veladas.append(
             {
                 "event_id": id_,
                 "nombre": nombre,
                 "ancla_utc": ancla.isoformat() if ancla else None,
                 "combates_activos": activos,
-                "combates_con_ganador": con_ganador,
+                "combates_resueltos": resueltos,
                 "muestras_recientes": muestras,
-                "estado": estado_de_velada(muestras, activos, con_ganador),
+                "estado": estado_de_velada(muestras, activos, resueltos),
             }
         )
     return veladas
@@ -168,7 +174,7 @@ def main() -> None:
         print(
             f"[{v['estado']}] {v['nombre']} (id {v['event_id']}): "
             f"{v['muestras_recientes']} muestras en los ultimos {VENTANA_MINUTOS} min, "
-            f"{v['combates_con_ganador']}/{v['combates_activos']} combates resueltos"
+            f"{v['combates_resueltos']}/{v['combates_activos']} combates resueltos"
         )
 
 
