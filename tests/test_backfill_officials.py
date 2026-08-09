@@ -223,9 +223,14 @@ def test_fill_event_fills_officials_only_bout(fakedb):
     assert referee_updates == [("Herb Dean", 11)]
     scorecard_inserts = [p for s, p in statements if "INSERT INTO fight_scorecards" in s]
     assert scorecard_inserts == [
-        (11, "Ben Cartlidge", 28, 29),
-        (11, "Anders Ohlsson", 28, 29),
-        (11, "Vito Paolillo", 27, 30),
+        # DERIVADO A MANO, no copiado de lo que produce el código. La página del
+        # fixture pone W en el bloque 0 (Magomedov) y L en el 1 (Pereira), y el
+        # par de notas va (PERDEDOR, GANADOR): Pereira 28/28/27, Magomedov
+        # 29/29/30. Aquí ROJO ES MAGOMEDOV, que ganó, así que rojo lleva las
+        # altas. Este test afirmaba lo contrario, y esa era la premisa falsa.
+        (11, "Ben Cartlidge", 29, 28),
+        (11, "Anders Ohlsson", 29, 28),
+        (11, "Vito Paolillo", 30, 27),
     ]
     # The already-real result is never rewritten.
     assert not any("winner_id" in s for s, _p in statements)
@@ -252,9 +257,14 @@ def test_fill_event_admits_decision_bout_missing_only_scorecards(fakedb):
     assert not any("winner_id" in s for s, _p in statements)
     scorecard_inserts = [p for s, p in statements if "INSERT INTO fight_scorecards" in s]
     assert scorecard_inserts == [
-        (11, "Ben Cartlidge", 28, 29),
-        (11, "Anders Ohlsson", 28, 29),
-        (11, "Vito Paolillo", 27, 30),
+        # DERIVADO A MANO, no copiado de lo que produce el código. La página del
+        # fixture pone W en el bloque 0 (Magomedov) y L en el 1 (Pereira), y el
+        # par de notas va (PERDEDOR, GANADOR): Pereira 28/28/27, Magomedov
+        # 29/29/30. Aquí ROJO ES MAGOMEDOV, que ganó, así que rojo lleva las
+        # altas. Este test afirmaba lo contrario, y esa era la premisa falsa.
+        (11, "Ben Cartlidge", 29, 28),
+        (11, "Anders Ohlsson", 29, 28),
+        (11, "Vito Paolillo", 30, 27),
     ]
     assert counts["referees_filled"] == 0
     assert counts["scorecards_inserted"] == 3
@@ -292,10 +302,14 @@ def test_fill_event_orients_scorecards_for_swapped_corners(fakedb):
     )
     _fill_event(conn, client, None, 5, [swapped], EVENT_URL, counts, False)
     scorecard_inserts = [p for s, p in _statements(conn) if "INSERT INTO fight_scorecards" in s]
+    # Aquí ROJO ES PEREIRA, que perdió, así que rojo lleva las notas BAJAS.
+    # Es el espejo del test de arriba y la pareja importa: uno solo de los dos
+    # pasaría igual con la regla vieja (posición) que con la nueva (W/L).
+    # Juntos, solo pasan con la buena.
     assert scorecard_inserts == [
-        (11, "Ben Cartlidge", 29, 28),
-        (11, "Anders Ohlsson", 29, 28),
-        (11, "Vito Paolillo", 30, 27),
+        (11, "Ben Cartlidge", 28, 29),
+        (11, "Anders Ohlsson", 28, 29),
+        (11, "Vito Paolillo", 27, 30),
     ]
     assert counts["scorecards_inserted"] == 3
 

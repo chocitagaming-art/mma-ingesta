@@ -62,6 +62,7 @@ from .fight_officials import (
     insert_scorecard,
     parse_fight_officials,
     resolve_first_person_is_red,
+    scores_by_person,
     update_fight_referee,
 )
 from .http import UfcStatsClient
@@ -606,12 +607,21 @@ def _fill_officials(connection, bout, fight_page_soup, counts, dry_run) -> None:
             bout.id, bout.red_name, bout.blue_name,
         )
         return
-    for card in officials.scorecards:
-        red_score, blue_score = (
-            (card.first_score, card.second_score)
-            if red_first
-            else (card.second_score, card.first_score)
+    # Sin badge W en la página no hay a qué anclar el par de notas: empate,
+    # no-contest o marcado ilegible. Se descarta la tarjeta entera antes que
+    # inventar la orientación — es el fallo que costó 2412 peleas espejadas.
+    # Va DESPUÉS del `red_first is None` porque son dos causas distintas: allí
+    # no sabemos qué persona es qué esquina; aquí no sabemos qué nota es de quién.
+    if officials.scorecards and officials.winner_index is None:
+        counts["officials_unanchored"] += 1
+        LOGGER.warning(
+            "  sin ganador en la página: no se orientan las tarjetas del bout %s (%s vs %s)",
+            bout.id, bout.red_name, bout.blue_name,
         )
+        return
+    for card in officials.scorecards:
+        first, second = scores_by_person(card, officials.winner_index)
+        red_score, blue_score = (first, second) if red_first else (second, first)
         if dry_run:
             counts["scorecards_inserted"] += 1
         elif insert_scorecard(connection, bout.id, card.judge_name, red_score, blue_score):

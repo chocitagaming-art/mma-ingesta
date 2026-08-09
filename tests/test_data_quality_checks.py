@@ -7,13 +7,15 @@ the markdown render, and that collect() never writes. fakedb answers each query.
 from src.scrapers import data_quality_checks as dqc
 
 
-def _responder(dup_rank=(), no_bouts=(), dup_names=()):
+def _responder(dup_rank=(), no_bouts=(), dup_names=(), espejadas=()):
     def responder(sql, params=None):
         flat = " ".join(sql.split())
         if "FROM rankings" in flat:
             return list(dup_rank)
         if "FROM events" in flat and "status = 'upcoming'" in flat:
             return list(no_bouts)
+        if "FROM fight_scorecards" in flat:
+            return list(espejadas)
         if "FROM fighters" in flat:
             return list(dup_names)
         return []
@@ -89,3 +91,55 @@ def test_render_markdown_sections_and_clean_state():
     assert "Ghost Event" in md
     assert "john doe" in md
     assert "puesto #5" in md
+
+
+# ------------------------------- tarjetas de jueces con la orientación invertida
+
+
+def test_las_tarjetas_espejadas_son_criticas(fakedb):
+    """Una sola pelea ya dispara la alarma: no hay umbral que valga.
+
+    EL FALLO QUE VIGILA. `fight_scorecards` llegó a tener 2412 de 4020 peleas
+    (60 %) con las notas en la esquina equivocada, y la ficha pública las
+    pintaba EN COLOR: afirmaba que un juez le había dado el combate al que lo
+    perdió. Nadie se enteró porque nada lo miraba.
+    """
+    fila = (3180, "Lance Gibson Jr.", "King Green", "S-DEC", 2, 1)
+    conn = fakedb.Connection(_responder(espejadas=[fila]))
+    datos = dqc.collect(conn)
+
+    assert datos["mirrored_scorecards"] == [{
+        "fight_id": 3180, "red": "Lance Gibson Jr.", "blue": "King Green",
+        "method": "S-DEC", "cards_for_red": 2, "cards_for_blue": 1,
+    }]
+    assert dqc.has_critical(datos) is True
+    assert "3180" in dqc._render_markdown(datos)
+
+
+def test_sin_espejadas_no_alarma(fakedb):
+    conn = fakedb.Connection(_responder())
+    datos = dqc.collect(conn)
+
+    assert datos["mirrored_scorecards"] == []
+    assert dqc.has_critical(datos) is False
+    assert "Ninguna" in dqc._render_markdown(datos)
+
+
+def test_la_consulta_excluye_las_peleas_sin_ganador(fakedb):
+    """Los empates y los anulados NO son un fallo: son indecidibles.
+
+    ufcstats marca 'D'/'D' o 'NC'/'NC' en los dos bloques, así que no hay a qué
+    anclar el par y su orden en la fuente es arbitrario. Si la consulta los
+    incluyera, la alarma sonaría para siempre por 82 peleas que nadie puede
+    arreglar — y una alarma que no se puede apagar deja de mirarse.
+    """
+    conn = fakedb.Connection(_responder())
+    dqc.collect(conn)
+    sql = next(
+        " ".join(s.split())
+        for cur in conn.cursors for s, _p in cur.executed
+        if "FROM fight_scorecards" in " ".join(s.split())
+    )
+
+    assert "f.winner_id IS NOT NULL" in sql
+    assert "t.n_red <> t.n_blue" in sql, "un 1-1-1 no tiene mayoría que comparar"

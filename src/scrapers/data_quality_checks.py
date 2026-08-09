@@ -109,11 +109,68 @@ def _duplicate_fighter_names(connection) -> list[dict]:
         ]
 
 
+def _mirrored_scorecards(connection) -> list[dict]:
+    """Peleas donde la MAYORÍA de las tarjetas le da el combate al que perdió.
+
+    EL FALLO QUE ESTO VIGILA. Durante meses `fight_scorecards` guardó las notas
+    con las esquinas intercambiadas en **2412 peleas de 4020 (60 %)**, y la web
+    las pintaba EN COLOR: afirmaba, en la ficha pública, que un juez le había
+    dado la pelea al perdedor. La causa era un docstring que decía que ufcstats
+    imprime las notas en el orden de los bloques de persona; las imprime como
+    (perdedor, ganador), medido sobre 367 páginas de 1995 a 2026 sin una sola
+    excepción.
+
+    Es un invariante duro y barato: si un juez pone 30-27 y el ganador oficial
+    es el otro, o la tarjeta está del revés o el ganador está mal. Una sola fila
+    aquí ya es motivo de alarma — por eso es CRITICAL.
+
+    ⚠️ Se excluyen a propósito las peleas SIN ganador (empates y resultados
+    anulados): ufcstats marca 'D'/'D' o 'NC'/'NC' en los dos bloques, no hay a
+    qué anclar el par y su orden en la fuente es arbitrario. Son 82 peleas, y la
+    web las pinta sin color y con un aviso en vez de inventarse el lado.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            WITH t AS (
+              SELECT fight_id,
+                     count(*) FILTER (WHERE red_score  > blue_score) AS n_red,
+                     count(*) FILTER (WHERE blue_score > red_score)  AS n_blue
+              FROM fight_scorecards
+              GROUP BY fight_id)
+            SELECT f.id,
+                   -- fighter_red_name está a NULL en buena parte del histórico:
+                   -- sin el COALESCE el informe sale con los nombres en blanco y
+                   -- no se puede ir a mirar la ficha.
+                   COALESCE(f.fighter_red_name, fr.name),
+                   COALESCE(f.fighter_blue_name, fb.name),
+                   f.method, t.n_red, t.n_blue
+            FROM t
+            JOIN fights f ON f.id = t.fight_id
+            LEFT JOIN fighters fr ON fr.id = f.fighter_red_id
+            LEFT JOIN fighters fb ON fb.id = f.fighter_blue_id
+            WHERE f.winner_id IS NOT NULL
+              AND t.n_red <> t.n_blue
+              AND ( (t.n_red  > t.n_blue AND f.winner_id = f.fighter_blue_id)
+                 OR (t.n_blue > t.n_red  AND f.winner_id = f.fighter_red_id) )
+            ORDER BY f.id
+            """
+        )
+        return [
+            {
+                "fight_id": int(r[0]), "red": r[1], "blue": r[2], "method": r[3],
+                "cards_for_red": int(r[4]), "cards_for_blue": int(r[5]),
+            }
+            for r in cursor.fetchall()
+        ]
+
+
 def _collect_raw(connection) -> dict:
     return {
         "duplicate_rank_positions": _duplicate_rank_positions(connection),
         "upcoming_without_bouts": _upcoming_without_bouts(connection),
         "duplicate_fighter_names": _duplicate_fighter_names(connection),
+        "mirrored_scorecards": _mirrored_scorecards(connection),
     }
 
 
@@ -128,7 +185,13 @@ def collect(connection=None) -> dict:
 
 def has_critical(data: dict) -> bool:
     """Whether a CRITICAL invariant was violated (drives the workflow's exit code)."""
-    return bool(data["duplicate_rank_positions"]) or bool(data["upcoming_without_bouts"])
+    return (
+        bool(data["duplicate_rank_positions"])
+        or bool(data["upcoming_without_bouts"])
+        # Una sola pelea con la mayoría de tarjetas apuntando al perdedor ya es
+        # una mentira publicada en color. No hay umbral que valga.
+        or bool(data.get("mirrored_scorecards"))
+    )
 
 
 def _render_markdown(data: dict) -> str:
@@ -161,6 +224,26 @@ def _render_markdown(data: dict) -> str:
     else:
         for e in no_bouts:
             lines.append(f"- **{e['name']}** (id={e['id']}) [{e['event_date']}]")
+    espejadas = data.get("mirrored_scorecards", [])
+    lines += [
+        "",
+        f"## ⚖️ Tarjetas de jueces con la orientación invertida ({len(espejadas)}) — CRÍTICO",
+        "",
+        "> La mayoría de las tarjetas le da el combate a quien lo PERDIÓ. O están",
+        "> del revés o el ganador está mal. La ficha pública lo pinta en color, así",
+        "> que una sola fila aquí ya es una mentira publicada.",
+        "",
+    ]
+    if not espejadas:
+        lines.append("_Ninguna: toda tarjeta apunta al ganador oficial._")
+    else:
+        for e in espejadas[:50]:
+            lines.append(
+                f"- fight **{e['fight_id']}** · {e['red']} vs {e['blue']} ({e['method']}) "
+                f"→ {e['cards_for_red']}-{e['cards_for_blue']} a favor del perdedor"
+            )
+        if len(espejadas) > 50:
+            lines.append(f"- … y {len(espejadas) - 50} más")
     lines += [
         "",
         f"## 👥 Nombres de luchador duplicados ({len(dup_names)}) — informativo",

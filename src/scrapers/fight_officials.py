@@ -13,13 +13,33 @@ judge ("<span>Ben Cartlidge</span> 28 - 29."). For finishes the Details
 paragraph is free text ("Punches to Head On Ground") with no judge items, so
 only the referee is captured there.
 
-Score orientation: the page's two person blocks (b-fight-details__person, each
-linking /fighter-details/<hash>) appear in the same order as the scores
-("first - second"). The first person is normally the DB's red corner (the
-event importer assigns red to the first fighter link), but the mapping is
-re-derived per fight from the persons' fighter source ids — falling back to
-fuzzy names at IDENTITY_THRESHOLD (0.92), then to the positional default — so
-a historically swapped row still gets its scores on the right corners.
+Score orientation. 🪤 THIS PARAGRAPH USED TO BE WRONG, and the lie cost 2412
+fights (7230 rows) published with the judges' cards mirrored — coloured, on the
+public fight pages, claiming a judge had given the bout to the loser. It said:
+
+    "the page's two person blocks appear in the same order as the scores"
+
+They do NOT. Measured over 367 fight-details pages spanning 1995-2026, with
+zero counterexamples:
+
+    the score pair is always (LOSER's score, WINNER's score)
+
+regardless of which person block comes first. The two rival hypotheses die on
+the crossed cases — the fights where the LOSER is listed first, where "person
+order" and "loser first" disagree: 267 pages scored 100% for loser-first and
+65.6% for person-order (which is simply how often ufcstats happens to list the
+loser first, and why the old parser looked right 38% of the time).
+
+So the anchor is the W/L badge (i.b-fight-details__person-status), which the
+page carries explicitly — no inference needed. `winner_index` records which
+person block won; `scores_by_person` turns a card into (first person's score,
+second person's score); and the existing corner mapping
+(`resolve_first_person_is_red`, which was always correct) takes it from there.
+
+⚠️ Draws and no-contests carry 'D'/'D' or 'NC'/'NC' on BOTH blocks: there is no
+anchor and the pair's order is arbitrary (measured: 17 pages with the winner's
+score second vs 6 with it first). Those fights MUST be skipped, never guessed —
+`winner_index` is None and the scorecards are not written.
 
 Pipeline (completed ufcstats fights without referee, events within
 --lookback-days, default 30, newest first; --limit caps the page fetches):
@@ -67,8 +87,12 @@ _SCORE_RE = re.compile(r"(\d{1,3})\s*-\s*(\d{1,3})")
 @dataclass(frozen=True)
 class ParsedScorecard:
     judge_name: str
-    first_score: int   # score of the page's FIRST person block
-    second_score: int  # score of the page's SECOND person block
+    # The pair as ufcstats prints it: LOSER first, WINNER second. Never person
+    # order — see the module docstring for the 367-page measurement. The names
+    # used to say `first_score`/`second_score`, and that WAS the bug: the field
+    # name asserted something false, so every reader inherited it.
+    loser_score: int
+    winner_score: int
 
 
 @dataclass(frozen=True)
@@ -77,6 +101,10 @@ class ParsedOfficials:
     scorecards: list[ParsedScorecard]
     # (fighter source_id '/fighter-details/<hash>', display name) in page order.
     persons: list[tuple[str | None, str]]
+    # Index into `persons` of the block carrying the 'W' badge. None when the
+    # page has no winner (draw / no-contest) or the badges are unreadable: then
+    # the pair cannot be oriented and the caller must skip, not guess.
+    winner_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -126,16 +154,23 @@ def parse_fight_officials(soup: BeautifulSoup) -> ParsedOfficials:
         scorecards.append(
             ParsedScorecard(
                 judge_name=judge_name,
-                first_score=int(score_match.group(1)),
-                second_score=int(score_match.group(2)),
+                loser_score=int(score_match.group(1)),
+                winner_score=int(score_match.group(2)),
             )
         )
 
     persons: list[tuple[str | None, str]] = []
+    winners: list[int] = []
     for person in soup.select(".b-fight-details__person"):
         link = person.select_one("a[href*='/fighter-details/']")
         if link is None:
             continue
+        # The W/L badge, which is what orients the whole thing. A page with a
+        # winner shows 'W' on one block and 'L' on the other; a draw shows
+        # 'D'/'D' and a no-contest 'NC'/'NC' — neither anchors anything.
+        status = person.select_one("i.b-fight-details__person-status")
+        if status is not None and status.get_text(strip=True).upper() == "W":
+            winners.append(len(persons))
         href = link.get("href", "")
         persons.append(
             (
@@ -143,7 +178,26 @@ def parse_fight_officials(soup: BeautifulSoup) -> ParsedOfficials:
                 " ".join(link.get_text(" ", strip=True).split()),
             )
         )
-    return ParsedOfficials(referee=referee, scorecards=scorecards, persons=persons)
+    # Exactly two blocks and exactly one winner, or there is nothing to anchor to.
+    winner_index = winners[0] if len(persons) == 2 and len(winners) == 1 else None
+    return ParsedOfficials(
+        referee=referee,
+        scorecards=scorecards,
+        persons=persons,
+        winner_index=winner_index,
+    )
+
+
+def scores_by_person(card: ParsedScorecard, winner_index: int) -> tuple[int, int]:
+    """The card as (first person block's score, second person block's score).
+
+    ufcstats prints (loser, winner); the corner mapping downstream speaks in
+    person order. This is the single place that translates between the two, and
+    it is the whole fix: before, the two orders were assumed to be the same.
+    """
+    if winner_index == 0:
+        return card.winner_score, card.loser_score
+    return card.loser_score, card.winner_score
 
 
 # ------------------------------------------------------------------ mapping
@@ -288,14 +342,23 @@ def _process_fight(
         if not dry_run:
             update_fight_referee(connection, fight.fight_id, officials.referee)
 
+    # Sin badge W no hay a qué anclar el par (empate / no-contest / marcado
+    # ilegible). Se sale DESPUÉS de haber escrito el árbitro, que sí es válido,
+    # y sin escribir una sola tarjeta: adivinar la orientación es exactamente el
+    # fallo que este módulo acaba de pagar en 2412 peleas.
+    if officials.scorecards and officials.winner_index is None:
+        counts["scorecards_unanchored"] += len(officials.scorecards)
+        LOGGER.info(
+            "Sin ganador en la página: no se orientan %d tarjetas del combate %d (%s)",
+            len(officials.scorecards), fight.fight_id, fight.source_id,
+        )
+        return
+
     red_first = first_person_is_red(officials, fight)
     for card in officials.scorecards:
         counts["scorecards_parsed"] += 1
-        red_score, blue_score = (
-            (card.first_score, card.second_score)
-            if red_first
-            else (card.second_score, card.first_score)
-        )
+        first, second = scores_by_person(card, officials.winner_index)
+        red_score, blue_score = (first, second) if red_first else (second, first)
         if not dry_run and insert_scorecard(
             connection, fight.fight_id, card.judge_name, red_score, blue_score
         ):
@@ -357,7 +420,11 @@ def main() -> None:
 
     keys = [
         "fights_targeted", "fights_without_officials", "referees_parsed",
-        "scorecards_parsed", "scorecards_inserted", "fight_errors",
+        # scorecards_unanchored: tarjetas que la página no permite orientar
+        # (empate / no-contest). Se cuentan a la vista a propósito: un cero
+        # silencioso escondería que se están descartando datos.
+        "scorecards_parsed", "scorecards_unanchored", "scorecards_inserted",
+        "fight_errors",
     ]
     print(json.dumps({key: counts.get(key, 0) for key in keys}, indent=2))
     if args.dry_run:

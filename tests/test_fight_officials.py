@@ -25,6 +25,7 @@ from src.scrapers.fight_officials import (
     list_target_fights,
     parse_fight_officials,
     resolve_first_person_is_red,
+    scores_by_person,
     update_fight_referee,
 )
 
@@ -152,6 +153,140 @@ def test_parse_decision_page_reads_referee_and_three_scorecards():
         ("/fighter-details/06734ca9d88dec3a", "Shara Magomedov"),
         ("/fighter-details/595db60957de51d3", "Michel Pereira"),
     ]
+    # El bloque 0 lleva la W, así que el par (28, 29) es (Pereira, Magomedov).
+    assert officials.winner_index == 0
+
+
+# ---------------------------------------------- el ancla: W/L, no la posición
+#
+# 🪤 LOS TESTS DE ESTE BLOQUE SON LOS QUE HABRÍAN CAZADO EL BUG, y ninguno
+# existía. La suite entera usaba un fixture con el GANADOR en el primer bloque,
+# y ahí las dos reglas —"la primera nota es del primer bloque" y "la primera
+# nota es del perdedor"— dan el mismo resultado. Coinciden en el 38 % de las
+# páginas reales, que es exactamente la proporción de fichas que se veían bien.
+#
+# Lo que separa las dos reglas es el CASO CRUZADO: una página donde el perdedor
+# aparece listado primero. Medido sobre 367 páginas de 1995 a 2026, la regla del
+# perdedor acierta 367/367 y la de la posición 65,6 %.
+
+
+def _persons(first_name: str, first_status: str, second_name: str, second_status: str) -> str:
+    """Bloque de personas con los badges que se pidan (W/L, L/W, D/D, NC/NC).
+
+    Se construye el HTML en vez de parchear el de `_persons_block` con
+    `.replace()`: dos reemplazos encadenados W->L y L->W se pisan entre sí y el
+    segundo deshace el primero. (Sí, se intentó primero. Falló en verde en el
+    sentido peor: el test pasaba afirmando otra cosa de la que creía.)
+    """
+    hrefs = (
+        "http://ufcstats.com/fighter-details/06734ca9d88dec3a",
+        "http://ufcstats.com/fighter-details/595db60957de51d3",
+    )
+    bloques = "".join(
+        f"""
+  <div class="b-fight-details__person">
+    <i class="b-fight-details__person-status">{estado}</i>
+    <div class="b-fight-details__person-text">
+      <h3 class="b-fight-details__person-name">
+        <a class='b-link b-fight-details__person-link' href={href}>{nombre} </a>
+      </h3>
+    </div>
+  </div>"""
+        for href, nombre, estado in (
+            (hrefs[0], first_name, first_status),
+            (hrefs[1], second_name, second_status),
+        )
+    )
+    return f'<div class="b-fight-details__persons clearfix">{bloques}\n</div>\n'
+
+
+def test_el_ancla_es_el_badge_no_la_posicion():
+    """El caso cruzado: el PERDEDOR aparece primero en la página.
+
+    Con la regla vieja el ganador se llevaría las notas bajas. Es el único
+    test del fichero que distingue una regla de la otra.
+    """
+    html = _details_page(
+        _persons("Michel Pereira", "L", "Shara Magomedov", "W"),
+        "Decision - Unanimous", JUDGE_ITEMS,
+    )
+    officials = parse_fight_officials(_soup(html))
+
+    assert officials.winner_index == 1, "la W está en el segundo bloque"
+    card = officials.scorecards[0]
+    assert (card.loser_score, card.winner_score) == (28, 29)
+    # Traducido a orden de persona: Pereira (bloque 0) perdió, luego lleva el 28.
+    assert scores_by_person(card, officials.winner_index) == (28, 29)
+
+
+def test_con_el_ganador_primero_el_orden_se_invierte():
+    """El mismo par de notas, la otra colocación. Los dos juntos fijan la regla."""
+    officials = parse_fight_officials(_soup(DECISION_HTML))  # W primero
+
+    card = officials.scorecards[0]
+    assert (card.loser_score, card.winner_score) == (28, 29)
+    # Magomedov (bloque 0) ganó, luego lleva el 29.
+    assert scores_by_person(card, officials.winner_index) == (29, 28)
+
+
+def test_un_empate_no_se_puede_orientar_y_no_se_inventa():
+    """Empate: los dos bloques llevan 'D'. No hay nada a lo que anclarse.
+
+    Medido en la fuente: en las páginas sin ganador el orden del par es
+    arbitrario (17 con la nota del ganador segunda contra 6 con ella primera).
+    Adivinar aquí es acertar la mitad de las veces con cara de certeza.
+    """
+    html = _details_page(
+        _persons("Shara Magomedov", "D", "Michel Pereira", "D"),
+        "Decision - Majority", JUDGE_ITEMS,
+    )
+    officials = parse_fight_officials(_soup(html))
+
+    assert officials.winner_index is None
+    assert len(officials.scorecards) == 3, "las notas se leen; lo que falta es a quién van"
+
+
+def test_un_no_contest_tampoco():
+    html = _details_page(
+        _persons("Shara Magomedov", "NC", "Michel Pereira", "NC"),
+        "Overturned", JUDGE_ITEMS,
+    )
+    assert parse_fight_officials(_soup(html)).winner_index is None
+
+
+def test_dos_ganadores_o_ninguno_tampoco_orientan():
+    """Guardarraíl contra un marcado roto: se exige exactamente una W."""
+    dos_w = _details_page(
+        _persons("Shara Magomedov", "W", "Michel Pereira", "W"),
+        "Decision - Unanimous", JUDGE_ITEMS,
+    )
+    assert parse_fight_officials(_soup(dos_w)).winner_index is None
+
+
+def test_process_fight_no_escribe_tarjetas_sin_ganador(fakedb):
+    """Y el consumidor lo respeta: árbitro sí, tarjetas no.
+
+    El árbitro es válido aunque no haya ganador — no depende de la orientación.
+    Perder ese dato por prudencia sería pagar dos veces el mismo error.
+    """
+    conn = fakedb.Connection(lambda sql, params=None: [])
+    html = _details_page(
+        _persons("Shara Magomedov", "D", "Michel Pereira", "D"),
+        "Decision - Majority", JUDGE_ITEMS,
+    )
+    client = _FakeClient(html)
+    counts: Counter = Counter()
+
+    _process_fight(conn, client, counts, _fight(), dry_run=False)
+
+    statements = [
+        (" ".join(sql.split()), params)
+        for cur in conn.cursors for sql, params in cur.executed
+    ]
+    assert [p for s, p in statements if "SET referee" in s] == [("Herb Dean", 11)]
+    assert not [s for s, _p in statements if "INSERT INTO fight_scorecards" in s]
+    assert counts["scorecards_unanchored"] == 3
+    assert counts["scorecards_inserted"] == 0
 
 
 def test_parse_finish_page_reads_referee_only():
@@ -312,10 +447,21 @@ def test_process_fight_writes_referee_and_oriented_scorecards(fakedb):
     referee_updates = [s for s in statements if "SET referee" in s[0]]
     assert [p for _s, p in referee_updates] == [("Herb Dean", 11)]
     scorecard_inserts = [p for s, p in statements if "INSERT INTO fight_scorecards" in s]
+    # DERIVADO A MANO desde el fixture, no copiado de lo que produce el código —
+    # este test AFIRMABA LO CONTRARIO y era el bug:
+    #
+    #   la página:  bloque 0 = W = Magomedov · bloque 1 = L = Pereira
+    #   las notas:  28-29 · 28-29 · 27-30, y van (PERDEDOR, GANADOR)
+    #     => Pereira   28, 28, 27      (perdió: notas bajas)
+    #     => Magomedov 29, 29, 30
+    #
+    #   este caso pone las esquinas al revés: rojo = Pereira, el que perdió.
+    #   Luego rojo lleva las bajas. Dar 29-28 a rojo sería afirmar que los
+    #   jueces le dieron el combate al que lo perdió: 2412 fichas publicadas así.
     assert scorecard_inserts == [
-        (11, "Ben Cartlidge", 29, 28),
-        (11, "Anders Ohlsson", 29, 28),
-        (11, "Vito Paolillo", 30, 27),
+        (11, "Ben Cartlidge", 28, 29),
+        (11, "Anders Ohlsson", 28, 29),
+        (11, "Vito Paolillo", 27, 30),
     ]
     assert counts["referees_parsed"] == 1
     assert counts["scorecards_inserted"] == 3
