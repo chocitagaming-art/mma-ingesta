@@ -1,0 +1,36 @@
+-- El directo del evento: el vídeo de YouTube que la UFC emite en abierto la
+-- noche de la velada, por evento.
+--
+-- Hermano de faceoff_video_id (migración 022) y con la misma forma: guardamos
+-- solo el video id (11 chars) y el front deriva el reproductor. NULL = no hay
+-- directo, y entonces NO SE PINTA NADA. Esa es la mitad importante: un hueco
+-- vacío es preferible a enseñar un vídeo que no es el de esta velada.
+--
+-- ⚠️ QUÉ VÍDEO VA AQUÍ, porque el nombre engaña. La UFC NO emite los combates
+-- gratis en YouTube: el estelar es de pago (Paramount+, DAZN según el mercado).
+-- Lo que sí publica en abierto es la PREVIA del evento y, a veces, las
+-- preliminares iniciales. Eso es lo que va en esta columna, y por eso el rótulo
+-- de pantalla sale del TÍTULO REAL del vídeo y no de una frase escrita a mano:
+-- si el vídeo se llama «UFC 330 | Previa del Evento», eso es lo que se lee, y
+-- nadie se sienta esperando el combate estelar.
+--
+-- Ejemplo verificado el 15-ago-2026 (UFC 330, evento 1088):
+--   qM-h-OudTqM · «UFC 330 | Previa del Evento ¡EN VIVO!» · canal ufcespanol
+--   liveBroadcastContent=upcoming · scheduledStartTime 2026-08-15T20:30:00Z
+--   embeddable=true · sin regionRestriction
+--
+-- Se rellena a mano o desde la ingesta. La vía automática está comprobada y es
+-- barata —playlistItems + videos.list sobre el canal oficial son 2 unidades de
+-- cuota, no las 100 de un search.list— y el título trae el nombre del evento,
+-- así que casarlo es trivial. Pero la columna manda: un dato escrito nunca se
+-- equivoca de vídeo.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS live_video_id TEXT;
+
+-- Y el TÍTULO del vídeo, que no es un adorno: es lo que impide mentir.
+--
+-- Con solo el id habría que inventarse un rótulo («Directo oficial», «La velada
+-- en directo») y cualquiera de ellos hace creer que ahí se ve el combate. El
+-- título real lo dice por nosotros. Se guarda en vez de pedirlo a la API en cada
+-- render por dos motivos: no gastar cuota en cada visita, y que la página siga
+-- entendiéndose si YouTube no contesta.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS live_video_title TEXT;
