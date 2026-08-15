@@ -192,6 +192,8 @@ def fetch_channel_uploads(
     playlist_id = uploads_playlist_id(channel_id)
     videos: list[FeedVideo] = []
     page_token: str | None = None
+    reached_old = False
+    oldest: date | None = None
     for _ in range(max_pages):
         params = {
             "part": "snippet,contentDetails",
@@ -204,6 +206,8 @@ def fetch_channel_uploads(
         data = fetch(params)
         reached_old = False
         for video in parse_playlist_page(data):
+            if oldest is None or video.published < oldest:
+                oldest = video.published
             if published_after is not None and video.published < published_after:
                 reached_old = True
                 continue
@@ -211,6 +215,25 @@ def fetch_channel_uploads(
         page_token = data.get("nextPageToken")
         if reached_old or not page_token:
             break
+
+    # 🪤 EL TOPE SE AGOTÓ SIN LLEGAR A LA FECHA PEDIDA, Y HASTA HOY ESO ERA MUDO.
+    #
+    # El bucle salía del `for` sin log ni excepción, así que quien lo llamaba
+    # recibía una lista corta indistinguible de «el canal no tiene más vídeos».
+    # El rescate seguía adelante y devolvía «no match» para eventos cuyos vídeos
+    # NI SIQUIERA SE DESCARGARON — que es exactamente la mentira que este
+    # proyecto persigue: no es que mirase y no estuviera, es que no miró.
+    #
+    # El aviso lleva la fecha REALMENTE alcanzada dentro. Un «truncado» a secas
+    # no dice cuánto falta, y sin eso nadie sabe qué `--max-pages` pedir.
+    if published_after is not None and not reached_old and page_token:
+        LOGGER.warning(
+            "Uploads TRUNCADO: %d paginas agotadas y solo se llego a %s, "
+            "no a %s. Faltan videos por mirar; sube --max-pages.",
+            max_pages,
+            oldest,
+            published_after,
+        )
     return videos
 
 
@@ -238,6 +261,17 @@ _PLACE_STOPWORDS = frozenset(
         "casino", "resort", "hotel", "theater", "theatre", "sports", "field",
         "palace", "expo", "convention", "entertainment", "grounds",
         "usa", "united", "states", "kingdom", "america", "american",
+        # 🪤 Del recuento previo al backfill: el 1059 es "National Gymnastics
+        # Arena, Baku, Azerbaijan" y "arena" ya estaba, pero "national" y
+        # "gymnastics" no, asi que entraban como si fueran el nombre del sitio.
+        # "national" es la palabra generica de cientos de recintos, y con la
+        # ventana de 45 dias el riesgo era casi nulo; con los ~210 dias que
+        # pide el backfill del historico, un video cualquiera con "face-off" y
+        # "national" en el titulo se le escribiria encima — y la escritura es
+        # first-writer-wins, o sea irreversible. Quitandolas, al 1059 le quedan
+        # "baku" y "azerbaijan", que son los tokens que de verdad lo nombran:
+        # no pierde nada y cierra un falso positivo.
+        "national", "gymnastics",
     }
 )
 
@@ -412,6 +446,15 @@ def main() -> None:
         "--rescue-days", type=int, default=_RESCUE_LOOKBACK_DAYS, dest="rescue_days",
         help="API rescue look-back window in days (needs YOUTUBE_API_KEY). Default 45.",
     )
+    # El tope de paginacion, expuesto porque un backfill lo necesita MAYOR y
+    # hasta ahora estaba clavado en el modulo. El default no se toca: el cron
+    # diario mira 45 dias y con 20 paginas le sobra. Quien barra el historico
+    # pide mas — y si se queda corto, ahora el WARNING de fetch_channel_uploads
+    # se lo dice con la fecha a la que llego de verdad.
+    parser.add_argument(
+        "--max-pages", type=int, default=_UPLOADS_MAX_PAGES, dest="max_pages",
+        help=f"Cap on uploads pages (50 videos each, 1 quota unit). Default {_UPLOADS_MAX_PAGES}.",
+    )
     args = parser.parse_args()
 
     session = requests.Session()
@@ -430,8 +473,18 @@ def main() -> None:
     if api_key:
         cutoff = date.today() - timedelta(days=args.rescue_days + _DAYS_BEFORE + 2)
         try:
-            api_feed = fetch_channel_uploads(api_key, published_after=cutoff)
-            LOGGER.info("API rescue: %d uploads since %s", len(api_feed), cutoff)
+            api_feed = fetch_channel_uploads(
+                api_key, published_after=cutoff, max_pages=args.max_pages
+            )
+            # 🪤 Este log decia «since <cutoff>» — la fecha PEDIDA, no la
+            # alcanzada. Con el tope agotado imprimia exactamente lo mismo que
+            # en una corrida completa, asi que ni siquiera leyendo el log se
+            # podia saber si el feed estaba entero.
+            alcanzado = min((v.published for v in api_feed), default=None)
+            LOGGER.info(
+                "API rescue: %d uploads, pedido desde %s, alcanzado %s (max_pages=%d)",
+                len(api_feed), cutoff, alcanzado, args.max_pages,
+            )
         except Exception as exc:  # noqa: BLE001 - never let rescue break the RSS run
             LOGGER.warning("API rescue fetch failed (%s); continuing RSS-only.", exc)
             api_feed = None

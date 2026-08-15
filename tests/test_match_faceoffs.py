@@ -598,3 +598,137 @@ def test_ufc_no_puede_ser_token_aunque_este_en_el_nombre_del_recinto():
     tokens = match_faceoffs._place_tokens("UFC Apex, Las Vegas, NV, United States")
     assert "ufc" not in tokens
     assert "vegas" in tokens, "pero la guarda buena tiene que seguir ahi"
+
+
+# ------------------------------------------- el tope, y por que hasta hoy mentia
+#
+# 🪤 `test_fetch_channel_uploads_respects_max_pages` (arriba) comprueba que el
+# tope se respeta, y eso ya estaba bien. Lo que nadie miraba es lo que pasa
+# DESPUES: el bucle salia sin log ni excepcion, asi que una lista corta por
+# truncamiento era indistinguible de «el canal no tiene mas videos». El rescate
+# seguia y devolvia «no match» para eventos cuyos videos ni siquiera descargo.
+# No es que mirase y no estuviera: es que no miro.
+
+
+def test_uploads_avisa_cuando_agota_el_tope_sin_llegar_a_la_fecha(caplog):
+    endless = {
+        "items": [
+            {
+                "contentDetails": {"videoId": "v", "videoPublishedAt": "2026-07-10T00:00:00Z"},
+                "snippet": {"title": "recent"},
+            }
+        ],
+        "nextPageToken": "MORE",
+    }
+
+    with caplog.at_level("WARNING"):
+        fetch_channel_uploads(
+            "key",
+            published_after=date(2026, 1, 1),
+            max_pages=3,
+            fetcher=lambda params: endless,
+        )
+
+    avisos = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(avisos) == 1, "el truncamiento tiene que avisar"
+    texto = avisos[0].getMessage()
+    # Y con la fecha REALMENTE alcanzada dentro: un «truncado» a secas no dice
+    # cuanto falta, y sin eso nadie sabe que --max-pages pedir. Este asserto es
+    # el que separa un aviso util de uno decorativo.
+    assert "2026-07-10" in texto
+    assert "2026-01-01" in texto
+
+
+def test_uploads_NO_avisa_cuando_alcanza_la_fecha(caplog):
+    # CONTROL NEGATIVO, y es el que decide si el aviso sirve: una alarma que
+    # tambien salta en la corrida buena es ruido, y el cron la dispara dos veces
+    # al dia. Aqui la segunda pagina ya trae un video anterior al cutoff.
+    paginas = [
+        {
+            "items": [
+                {
+                    "contentDetails": {"videoId": "a", "videoPublishedAt": "2026-07-10T00:00:00Z"},
+                    "snippet": {"title": "recent"},
+                }
+            ],
+            "nextPageToken": "MORE",
+        },
+        {
+            "items": [
+                {
+                    "contentDetails": {"videoId": "b", "videoPublishedAt": "2025-12-01T00:00:00Z"},
+                    "snippet": {"title": "viejo"},
+                }
+            ],
+            "nextPageToken": "MORE",
+        },
+    ]
+    it = iter(paginas)
+
+    with caplog.at_level("WARNING"):
+        fetch_channel_uploads(
+            "key",
+            published_after=date(2026, 1, 1),
+            max_pages=20,
+            fetcher=lambda params: next(it),
+        )
+
+    assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+
+
+def test_el_flag_max_pages_llega_de_verdad_al_fetcher(monkeypatch):
+    # 🪤 EL MEDIO ARREGLO QUE ESTE TEST IMPIDE. Anadir `--max-pages` al parser y
+    # olvidarse de pasarlo en la llamada deja un flag que se acepta, no da
+    # error, y no hace absolutamente nada: el backfill seguiria cortando a 20
+    # paginas y el operador creeria que miro 120. Un test sobre el parser solo
+    # (`args.max_pages == 7`) da VERDE con ese medio arreglo puesto.
+    visto = {}
+
+    def falso_fetch_uploads(api_key, *, published_after=None, max_pages=None, **kw):
+        visto["max_pages"] = max_pages
+        visto["published_after"] = published_after
+        return []
+
+    monkeypatch.setattr(match_faceoffs, "fetch_channel_uploads", falso_fetch_uploads)
+    monkeypatch.setattr(
+        match_faceoffs,
+        "fetch_channel_feed",
+        lambda session: [FeedVideo("x", "UFC Vegas 1: Fighter Face-offs", date(2026, 7, 1))],
+    )
+    monkeypatch.setenv("YOUTUBE_API_KEY", "k")
+    monkeypatch.setattr(sys, "argv", ["match_faceoffs.py", "--max-pages", "7"])
+
+    # Se corta en `connect`, que es el primer sitio DESPUES del rescate: con
+    # --dump-feed el main sale antes de llegar a el y el test no probaria nada.
+    monkeypatch.setattr(match_faceoffs, "get_settings", lambda: SimpleNamespace(database_url="x"))
+    monkeypatch.setattr(match_faceoffs, "connect", _corta())
+
+    try:
+        match_faceoffs.main()
+    except _Corte:
+        pass
+
+    assert visto.get("max_pages") == 7
+
+
+class _Corte(Exception):
+    pass
+
+
+def _corta():
+    def _connect(*a, **kw):
+        raise _Corte()
+
+    return _connect
+
+
+def test_el_recinto_generico_del_1059_ya_no_es_un_token_de_lugar():
+    # "National Gymnastics Arena, Baku, Azerbaijan". Con la ventana de 45 dias
+    # del cron el riesgo era casi nulo; con los ~210 dias que pide el backfill
+    # del historico, cualquier video con "face-off" y "national" en el titulo se
+    # le escribiria encima — y es first-writer-wins, o sea irreversible.
+    tokens = match_faceoffs._place_tokens("National Gymnastics Arena, Baku, Azerbaijan")
+    assert "national" not in tokens
+    assert "gymnastics" not in tokens
+    # Y no pierde nada: le quedan los dos que de verdad lo nombran.
+    assert {"baku", "azerbaijan"} <= tokens
