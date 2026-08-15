@@ -99,12 +99,20 @@ LOOKAHEAD_DAYS = 2
 # pair.
 _BOUT_LINE_RE = re.compile(
     r"""^(?:.*?-\s*)?                     # "Main Event -" etc. (optional)
-        [^:]*\b(?:Bout|Championship|Title)\s*:\s*   # "<class> Bout:" / "<div> Championship:"
+        # "<class> Bout:" / "<div> Championship:" / "Catchweight Bout (130-lbs):"
+        # The optional bracket is consumed BEFORE the colon on purpose: in a
+        # catchweight line it holds the agreed limit, which is a third
+        # parenthesised number that belongs to NOBODY. Leaving it to <red> would
+        # let "130" be read as an athlete's weight.
+        [^:]*\b(?:Bout|Championship|Title)(?:\s*\([^)]*\))?\s*:\s*
         (?P<red>.+?)\s*
-        \(\s*(?P<red_lbs>\d{2,3}(?:\.\d+)?)\s*\)\s*(?P<red_miss>\*?)\s*
+        # The over-limit asterisk sits EITHER side of the closing bracket:
+        # "(158)*" (5 of 24 articles) and "(157.5*)" (2 of 24) are both real.
+        # One run of one or two: `*` and `**` are two different footnotes.
+        \(\s*(?P<red_lbs>\d{2,3}(?:\.\d+)?)\s*(?P<red_miss_in>\*{1,2})?\s*\)\s*(?P<red_miss>\*{1,2})?\s*
         vs\.?\s*
         (?P<blue>.+?)\s*
-        \(\s*(?P<blue_lbs>\d{2,3}(?:\.\d+)?)\s*\)\s*(?P<blue_miss>\*?)\s*$
+        \(\s*(?P<blue_lbs>\d{2,3}(?:\.\d+)?)\s*(?P<blue_miss_in>\*{1,2})?\s*\)\s*(?P<blue_miss>\*{1,2})?\s*$
     """,
     re.VERBOSE | re.IGNORECASE,
 )
@@ -116,8 +124,25 @@ _BOUT_LINE_RE = re.compile(
 # needs BOTH weights: promo copy says "Makhachev vs Machado Garry" all the time
 # and must never trip the alarm, because an alarm that cries wolf is an alarm
 # nobody reads.
+#
+# 🪤 THE TRIPWIRE MUST BE LOOSER THAN WHAT IT WATCHES, AND IT WASN'T. Until
+# 2026-08-16 this pattern carried its own copy of `\(\s*\d{2,3}(?:\.\d+)?\s*\)`
+# — the very subpattern _BOUT_LINE_RE uses — so an asterisk INSIDE the bracket
+# broke both at once and the loss was silent. Measured against the real Oklahoma
+# City article: 12 bout lines, 10 parsed, and `counts` came back as the EMPTY
+# dict, not even the key at zero.
+#
+#     Lightweight Bout: Chase Hooper (157.5*) vs Mitch Ramirez (155.5)
+#     Featherweight Bout: Ezra Elliott (147.5**) vs Damien Anderson (146)
+#
+# The asterisks are now tolerated on BOTH sides of the closing bracket and in
+# runs of one or two (ufc.com uses `*` and `**` as two separate footnotes on the
+# same page). A tripwire that shares a blind spot with the thing it watches is
+# not a tripwire: it is a second copy of the bug that also reports success.
 _BOUT_SHAPE_RE = re.compile(
-    r"\(\s*\d{2,3}(?:\.\d+)?\s*\)\s*\*?\s*vs\.?\s.*?\(\s*\d{2,3}(?:\.\d+)?\s*\)",
+    r"\(\s*\d{2,3}(?:\.\d+)?\s*\*{0,2}\s*\)\s*\*{0,2}\s*"
+    r"vs\.?\s.*?"
+    r"\(\s*\d{2,3}(?:\.\d+)?\s*\*{0,2}\s*\)",
     re.IGNORECASE,
 )
 
@@ -200,6 +225,26 @@ def find_weigh_in_article(fetch_html: FetchHtml, event_name: str) -> str | None:
 # ------------------------------------------------------------------- parsing
 
 
+def _strip_name_marker(raw: str) -> tuple[str, bool]:
+    """(name without a glued over-limit marker, whether one was there).
+
+    `(?P<red>.+?)` is happy to swallow a leading asterisk, and nothing
+    downstream objects: fold() (matching.py) does not remove it either, and
+    fold_ratio("*Alan Jouban", "Alan Jouban") scores 0.9565 — above the 0.92
+    identity cutoff — so the corner matches and the row is written with
+    missed_weight=FALSE. That is worse than the lost lines of the tripwire bug:
+    a lost line leaves no row, this one publishes the opposite of the record.
+
+    Only the EDGES of the already-captured name are touched, never the line. The
+    footnotes at the foot of the article start with the same asterisks and are
+    the only independent oracle this scraper has; stripping them off the whole
+    line to "clean it up" would destroy the one thing that can check the parser.
+    """
+    name = raw.strip()
+    clean = name.strip("*").strip()
+    return clean, clean != name
+
+
 def parse_weigh_ins(html: str, counts: Counter | None = None) -> list[ParsedWeighIn]:
     """Bout weigh-in lines from a ufc.com weigh-in results article.
 
@@ -229,14 +274,23 @@ def parse_weigh_ins(html: str, counts: Counter | None = None) -> list[ParsedWeig
                         "Weigh-in line looks like a bout but did not parse: %r", text
                     )
                 continue
+            red_name, red_marked = _strip_name_marker(match.group("red"))
+            blue_name, blue_marked = _strip_name_marker(match.group("blue"))
             results.append(
                 ParsedWeighIn(
-                    red_name=match.group("red").strip(),
+                    red_name=red_name,
                     red_lbs=float(match.group("red_lbs")),
-                    red_missed=bool(match.group("red_miss")),
-                    blue_name=match.group("blue").strip(),
+                    # Any of the three positions marks the same thing: over the
+                    # limit. Dropping the one glued to the name would write
+                    # missed_weight=FALSE, i.e. the opposite of the record.
+                    red_missed=bool(
+                        match.group("red_miss") or match.group("red_miss_in") or red_marked
+                    ),
+                    blue_name=blue_name,
                     blue_lbs=float(match.group("blue_lbs")),
-                    blue_missed=bool(match.group("blue_miss")),
+                    blue_missed=bool(
+                        match.group("blue_miss") or match.group("blue_miss_in") or blue_marked
+                    ),
                 )
             )
     return results
@@ -330,9 +384,25 @@ def upsert_weigh_in(
     weight_lbs: float | None,
     missed_weight: bool | None,
 ) -> bool:
-    """Idempotent upsert; the conflict branch never overwrites with NULL
-    (COALESCE), so a later re-run with a worse parse keeps the stored data.
-    Returns True when a row was inserted or updated."""
+    """Idempotent upsert. Returns True when a row was inserted or updated.
+
+    The COALESCE protects `weight_lbs` and ONLY `weight_lbs`: a later re-run
+    with a worse parse keeps the stored weight.
+
+    🪤 IT DOES NOT PROTECT `missed_weight`, however it reads. The value handed
+    in always comes out of `bool(...)` in parse_weigh_ins, so it is never None,
+    so `COALESCE(%s, weigh_ins.missed_weight)` is a no-op for that column and
+    the cron rewrites the boolean on every pass. The column is NOT NULL DEFAULT
+    FALSE (011_fase5.sql:40), so there is no "don't know" state to fall back on:
+    the day ufc.com moves the asterisk somewhere the line still matches but the
+    marker is not seen, every correctly flagged athlete gets silently unflagged.
+
+    That is accepted on purpose, and written down rather than fixed: the cron is
+    the authority for this column. Giving it a third state means a schema change
+    plus a consumer that today treats null and false alike (event-weigh-ins.tsx:
+    62 — and null being falsy, TypeScript would not say a word). The defence is
+    on the other side: the footnote cross-check in test_weigh_ins.py, which
+    reads a second source on the same page that the parser cannot fake."""
     with connection.cursor() as cursor:
         cursor.execute(
             """

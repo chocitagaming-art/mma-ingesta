@@ -10,7 +10,11 @@ HTML inline (structure copied from real 2026-06/07 fetches) + fakedb;
 no network, no real DB.
 """
 
+import re
 from collections import Counter
+from pathlib import Path
+
+from bs4 import BeautifulSoup
 
 from src.scrapers.weigh_ins import (
     EventFight,
@@ -269,6 +273,144 @@ def test_parse_weigh_ins_does_not_count_promo_lines_as_lost():
 def test_parse_weigh_ins_keeps_working_without_a_counter():
     # The counter is opt-in: existing callers pass nothing.
     assert len(parse_weigh_ins(TITLE_ARTICLE_HTML)) == 3
+
+
+# ------------------------------------------------- the real article, and why
+#
+# 🪤 EVERY TEST ABOVE THIS LINE WAS GREEN ON 2026-08-16 WHILE TWO REAL BOUTS
+# WERE BEING LOST AND THE TRIPWIRE REPORTED ZERO. They cannot see it: the HTML
+# they parse was typed by the same hand that wrote the regex, so it can only
+# contain the variants that hand already thought of. The four tests below run
+# against the article as ufc.com actually served it, and none of them asks the
+# module how many lines there are — they count independently and cross-check
+# against a second source inside the same page.
+
+_REAL_ARTICLE = (Path(__file__).parent / "fixtures" / "weigh_ins_oklahoma_city.html").read_text(
+    encoding="utf-8"
+)
+
+
+def _looks_like_a_bout(text: str) -> bool:
+    """Bout-shaped? Decided by scanning the string, NOT by a regex.
+
+    Deliberately shares no structure with _BOUT_LINE_RE or _BOUT_SHAPE_RE: an
+    oracle built from the same subpattern as the code it checks inherits its
+    blind spots, which is exactly how the tripwire came to share the parser's.
+    """
+    if " vs " not in text.lower() and " vs. " not in text.lower():
+        return False
+    weights = 0
+    for chunk in text.split("(")[1:]:
+        inside = chunk.split(")")[0]
+        digits = ""
+        for ch in inside:
+            if ch.isdigit() or ch == ".":
+                digits += ch
+            else:
+                break
+        if digits and 2 <= len(digits.split(".")[0]) <= 3:
+            weights += 1
+    return weights >= 2
+
+
+def _body_lines(html: str) -> list[str]:
+    soup = BeautifulSoup(html, "lxml")
+    return [
+        el.get_text(" ", strip=True).replace("\xa0", " ")
+        for block in soup.select(".field--name-text")
+        for el in block.find_all(["h4", "p", "li"])
+    ]
+
+
+def test_the_real_article_loses_no_bout_line_in_silence():
+    # CONSERVATION. Whatever the parser cannot read has to show up in the
+    # counter, so parsed + flagged always equals what is on the page. This is
+    # the assertion that survives the next wording change too: it never names
+    # the asterisk. Before the 2026-08-16 fix it read 10 + 0 against 12.
+    lines = _body_lines(_REAL_ARTICLE)
+    shaped = [line for line in lines if _looks_like_a_bout(line)]
+    assert len(shaped) == 12, "the fixture should still hold 12 bout lines"
+
+    counts: Counter = Counter()
+    parsed = parse_weigh_ins(_REAL_ARTICLE, counts)
+
+    assert len(parsed) + counts["bout_shaped_lines_unparsed"] == len(shaped)
+    assert len(parsed) == 12
+
+
+def test_the_footnotes_of_the_real_article_match_the_flagged_corners():
+    # A SECOND ORACLE INSIDE THE SAME PAGE, written by a different part of the
+    # CMS: every athlete over the limit gets a footnote naming them. The parser
+    # cannot fake this one. Before the fix it was 2 footnotes against 0 corners.
+    lines = _body_lines(_REAL_ARTICLE)
+    footnotes = [line for line in lines if line.lstrip().startswith("*")]
+    assert len(footnotes) == 2
+
+    parsed = parse_weigh_ins(_REAL_ARTICLE)
+    flagged = [
+        name
+        for entry in parsed
+        for name, missed in ((entry.red_name, entry.red_missed), (entry.blue_name, entry.blue_missed))
+        if missed
+    ]
+    assert len(flagged) == len(footnotes)
+    # And it is the RIGHT athletes, not just the right count: a parser that
+    # flagged two arbitrary corners would pass the length check alone.
+    for footnote in footnotes:
+        assert any(surname in footnote for surname in (n.split()[-1] for n in flagged))
+
+
+def test_the_tripwire_sees_the_asterisk_inside_the_bracket():
+    # THE BLIND SPOT ITSELF. Both regexes carried their own copy of
+    # `\(\s*\d{2,3}(?:\.\d+)?\s*\)`, so "(185*)" broke the two at once and the
+    # loss was mute. The keyword here is deliberately one the parser rejects, so
+    # the assertion tests the TRIPWIRE and not the parser: narrow _BOUT_SHAPE_RE
+    # back and this goes red even though every bout line still parses.
+    for variant in ("(185*)", "(185**)", "(185)*", "(185)**"):
+        html = f"""
+        <div class="field field--name-text">
+        <h4>Middleweight Skirmish - Someone New {variant} vs Someone Else (185)</h4>
+        </div>
+        """
+        counts: Counter = Counter()
+        assert parse_weigh_ins(html, counts) == []
+        assert counts["bout_shaped_lines_unparsed"] == 1, f"mute on {variant}"
+
+
+def test_catchweight_limit_is_never_read_as_an_athletes_weight():
+    # "Catchweight Bout (130-lbs):" was lost whole because the bracket sits
+    # between the keyword and the colon. The fix has a trap of its own: that
+    # bracket holds a THIRD weight that belongs to nobody, so the assertion that
+    # matters is not "the line parses" but "129.5 and 130 went to the right
+    # corners and the limit went nowhere".
+    html = """
+    <div class="field field--name-text">
+    <h4>Catchweight Bout (130-lbs): Allan Nascimento (129.5) vs Cody Durden (130)</h4>
+    </div>
+    """
+    counts: Counter = Counter()
+    entries = parse_weigh_ins(html, counts)
+    assert len(entries) == 1
+    assert (entries[0].red_name, entries[0].red_lbs) == ("Allan Nascimento", 129.5)
+    assert (entries[0].blue_name, entries[0].blue_lbs) == ("Cody Durden", 130.0)
+    assert counts["bout_shaped_lines_unparsed"] == 0
+
+
+def test_parsed_names_never_carry_a_marker():
+    # PURITY OF THE OUTPUT, and it never mentions asterisks either. A marker
+    # glued to a name is worse than a lost line: fold() (matching.py:86) does
+    # not strip it and fold_ratio still scores 0.9565, over the 0.92 identity
+    # cutoff — so the only guard that could have caught it waves it through and
+    # the row is written with missed_weight=FALSE. A wrong row, not a missing
+    # one. This catches `*`, `†`, `#` and whatever ufc.com invents next.
+    html = """
+    <div class="field field--name-text">
+    <h4>Lightweight Bout: *Farman Hasanov (172.5) vs Eric Nolan (170.5)</h4>
+    </div>
+    """
+    for entry in parse_weigh_ins(html) + parse_weigh_ins(_REAL_ARTICLE):
+        for name in (entry.red_name, entry.blue_name):
+            assert re.fullmatch(r"[A-Za-zÀ-ÿ' .\-]+", name), f"marker left in {name!r}"
 
 
 # ------------------------------------------------------------------ matching
