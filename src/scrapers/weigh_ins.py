@@ -17,12 +17,17 @@ articles; a candidate is accepted only when its slug carries "weigh" AND shares
 bouts in <h4> lines inside .field--name-text blocks:
 
     <h3><strong>MAIN CARD</strong></h3>
+    <h4><strong>Main Event -</strong> UFC Welterweight Championship:
+        Islam Makhachev (170) vs Ian Machado Garry (170)</h4>
     <h4><strong>Co-Main Event -</strong> Middleweight Bout:
         Shara Magomedov (186) vs Michel Pereira (185.5)</h4>
 
-Each line is "<weight class> Bout: Red (lbs) vs Blue (lbs)"; a trailing "*"
-after a weight marks a missed weight. Promo links/paragraphs in between simply
-don't match the pattern and are skipped.
+Most lines are "<weight class> Bout: Red (lbs) vs Blue (lbs)", but TITLE FIGHTS
+say "<division> Championship:" instead and never carry the word "Bout" — see
+_BOUT_LINE_RE. A trailing "*" after a weight marks a missed weight. Promo
+links/paragraphs in between simply don't match the pattern and are skipped;
+a skipped line that still LOOKS like a bout is counted and logged rather than
+dropped in silence (_BOUT_SHAPE_RE).
 
 LIMITATION: the article lands a few hours after the ceremony (Friday around
 noon ET) and its publication is editorial — a card without an article (rare,
@@ -81,9 +86,20 @@ LOOKAHEAD_DAYS = 2
 
 # "Middleweight Bout: Shara Magomedov (186) vs Michel Pereira (185.5)*"
 # The optional "<prefix> -" swallows "Main Event -" / "Co-Main Event -".
+#
+# 🪤 THE KEYWORD IS A LIST, NOT "Bout". Title fights are the one line ufc.com
+# does NOT call a Bout: it writes "UFC Welterweight Championship: Islam
+# Makhachev (170) vs Ian Machado Garry (170)". Requiring the literal "Bout"
+# dropped both title lines of UFC 330 in silence, which is why on 2026-08-15
+# not one of the 484 title fights in `fights` had ever had a weigh-in row.
+# The list stays CLOSED on purpose: dropping the keyword altogether and
+# accepting any "<anything>: A (n) vs B (n)" would let prose with two
+# parenthesised numbers through, and while match_bout would refuse to weld it
+# onto the wrong athlete, it could still write a wrong number onto the right
+# pair.
 _BOUT_LINE_RE = re.compile(
     r"""^(?:.*?-\s*)?                     # "Main Event -" etc. (optional)
-        [^:]*\bBout\s*:\s*                # "<weight class> Bout:"
+        [^:]*\b(?:Bout|Championship|Title)\s*:\s*   # "<class> Bout:" / "<div> Championship:"
         (?P<red>.+?)\s*
         \(\s*(?P<red_lbs>\d{2,3}(?:\.\d+)?)\s*\)\s*(?P<red_miss>\*?)\s*
         vs\.?\s*
@@ -91,6 +107,18 @@ _BOUT_LINE_RE = re.compile(
         \(\s*(?P<blue_lbs>\d{2,3}(?:\.\d+)?)\s*\)\s*(?P<blue_miss>\*?)\s*$
     """,
     re.VERBOSE | re.IGNORECASE,
+)
+
+# The tripwire for the NEXT time ufc.com changes the wording. Matches the SHAPE
+# of a bout line — two parenthesised weights either side of a "vs" — without
+# caring about the keyword, so a line that clearly announces a bout but fails
+# _BOUT_LINE_RE gets counted and logged instead of vanishing. It deliberately
+# needs BOTH weights: promo copy says "Makhachev vs Machado Garry" all the time
+# and must never trip the alarm, because an alarm that cries wolf is an alarm
+# nobody reads.
+_BOUT_SHAPE_RE = re.compile(
+    r"\(\s*\d{2,3}(?:\.\d+)?\s*\)\s*\*?\s*vs\.?\s.*?\(\s*\d{2,3}(?:\.\d+)?\s*\)",
+    re.IGNORECASE,
 )
 
 # fetch_html(url, params) -> page HTML. Injected in tests.
@@ -172,13 +200,21 @@ def find_weigh_in_article(fetch_html: FetchHtml, event_name: str) -> str | None:
 # ------------------------------------------------------------------- parsing
 
 
-def parse_weigh_ins(html: str) -> list[ParsedWeighIn]:
+def parse_weigh_ins(html: str, counts: Counter | None = None) -> list[ParsedWeighIn]:
     """Bout weigh-in lines from a ufc.com weigh-in results article.
 
     Reads every text line of the article's .field--name-text body blocks (the
     bout lines are <h4>s, but the selector tolerates <p> variants) and keeps
-    the ones matching "<class> Bout: A (lbs) vs B (lbs)". Interleaved promo
-    links ("Preview The Entire ... Card Here") simply don't match.
+    the ones matching "<class> Bout:" or "<division> Championship:" followed by
+    "A (lbs) vs B (lbs)". Interleaved promo links ("Preview The Entire ... Card
+    Here") simply don't match.
+
+    `counts` is optional and opt-in so existing callers keep working. When it
+    is passed, a line shaped like a bout that this parser could NOT read bumps
+    `bout_shaped_lines_unparsed` and logs a warning. That counter is the whole
+    lesson of the title-fight bug: the skip was silent, so the job finished
+    green with "weigh_ins_written: 42, event_errors: 0" while losing four
+    weights, and nobody found out until someone looked at the page.
     """
     soup = BeautifulSoup(html, "lxml")
     results: list[ParsedWeighIn] = []
@@ -187,6 +223,11 @@ def parse_weigh_ins(html: str) -> list[ParsedWeighIn]:
             text = element.get_text(" ", strip=True).replace("\xa0", " ")
             match = _BOUT_LINE_RE.match(text)
             if not match:
+                if counts is not None and _BOUT_SHAPE_RE.search(text):
+                    counts["bout_shaped_lines_unparsed"] += 1
+                    LOGGER.warning(
+                        "Weigh-in line looks like a bout but did not parse: %r", text
+                    )
                 continue
             results.append(
                 ParsedWeighIn(
@@ -326,7 +367,7 @@ def _process_event(
         counts["article_not_found"] += 1
         LOGGER.info("No weigh-in article found for event %d (%s)", event_id, event_name)
         return
-    entries = parse_weigh_ins(fetch_html(article_url, None))
+    entries = parse_weigh_ins(fetch_html(article_url, None), counts)
     if not entries:
         counts["article_unparseable"] += 1
         LOGGER.warning("Weigh-in article %r yielded no bouts (event %d)", article_url, event_id)
@@ -426,8 +467,8 @@ def main() -> None:
 
     keys = [
         "events_targeted", "article_not_found", "article_unparseable",
-        "events_with_article", "bouts_parsed", "bouts_unmatched",
-        "corners_unlinked", "weigh_ins_written", "event_errors",
+        "events_with_article", "bouts_parsed", "bout_shaped_lines_unparsed",
+        "bouts_unmatched", "corners_unlinked", "weigh_ins_written", "event_errors",
     ]
     print(json.dumps({key: counts.get(key, 0) for key in keys}, indent=2))
     if args.dry_run:

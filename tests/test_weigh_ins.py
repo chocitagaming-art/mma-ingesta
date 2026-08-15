@@ -206,6 +206,71 @@ def test_parse_weigh_ins_empty_for_non_weigh_in_article():
     assert parse_weigh_ins(html) == []
 
 
+# Real 2026-08-14 body of UFC 330. Numbered PPVs carry title fights, and
+# ufc.com writes those lines "<promotion> <division> Championship:" with NO
+# "Bout" token — the shape every other line uses. Verbatim from
+# /news/official-weigh-results-ufc-330-makhachev-vs-machado-garry.
+TITLE_ARTICLE_HTML = """
+<html><body>
+<div class="field field--name-text field--type-text-long field--label-hidden field__item">
+<h3><strong>MAIN CARD</strong></h3>
+<h4><strong>Main Event -</strong> UFC Welterweight Championship: Islam Makhachev (170) vs Ian Machado Garry (170)</h4>
+<h4><strong>Co-Main Event -</strong> UFC Strawweight Championship: Mackenzie Dern (115) vs Gillian Robertson (115)</h4>
+<h4>Lightweight Bout: Jalin Turner (156) vs Kaue Fernandes (156)</h4>
+</div>
+</body></html>
+"""
+
+
+def test_parse_weigh_ins_reads_title_fight_lines():
+    # The two championship lines were dropped in silence until 2026-08-15,
+    # which is why no title fight has ever had a weigh-in row.
+    entries = parse_weigh_ins(TITLE_ARTICLE_HTML)
+    assert len(entries) == 3
+    main = entries[0]
+    assert (main.red_name, main.red_lbs) == ("Islam Makhachev", 170.0)
+    assert (main.blue_name, main.blue_lbs) == ("Ian Machado Garry", 170.0)
+    comain = entries[1]
+    assert (comain.red_name, comain.red_lbs) == ("Mackenzie Dern", 115.0)
+    assert (comain.blue_name, comain.blue_lbs) == ("Gillian Robertson", 115.0)
+    assert entries[2].red_name == "Jalin Turner"
+
+
+def test_parse_weigh_ins_counts_bout_shaped_lines_it_could_not_read():
+    # THE POINT OF THIS TEST: the championship bug was invisible because a line
+    # that does not match is skipped without a trace, so the job reported
+    # "weigh_ins_written: 42, event_errors: 0" while losing four weights. A
+    # line that LOOKS like a bout (two names, two parenthesised weights, "vs")
+    # but does not parse has to leave a mark.
+    html = """
+    <div class="field field--name-text">
+    <h4>Middleweight Skirmish - Someone New (185) vs Someone Else (185)</h4>
+    </div>
+    """
+    counts: Counter = Counter()
+    assert parse_weigh_ins(html, counts) == []
+    assert counts["bout_shaped_lines_unparsed"] == 1
+
+
+def test_parse_weigh_ins_does_not_count_promo_lines_as_lost():
+    # The symmetric hole: if the alarm fires on ordinary prose it stops being
+    # read. Promo copy has names and a "vs" but no parenthesised weights.
+    html = """
+    <div class="field field--name-text">
+    <p><a href="/news/x">Preview: Makhachev vs Machado Garry, the entire card</a></p>
+    <p>In the co-main, Dern faces Robertson (a rematch) in Philadelphia.</p>
+    </div>
+    """
+    counts: Counter = Counter()
+    assert parse_weigh_ins(html, counts) == []
+    assert counts["bout_shaped_lines_unparsed"] == 0
+
+
+def test_parse_weigh_ins_keeps_working_without_a_counter():
+    # The counter is opt-in: existing callers pass nothing.
+    assert len(parse_weigh_ins(TITLE_ARTICLE_HTML)) == 3
+
+
 # ------------------------------------------------------------------ matching
 
 
