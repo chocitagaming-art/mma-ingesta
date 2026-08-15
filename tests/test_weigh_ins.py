@@ -277,7 +277,7 @@ def test_parse_weigh_ins_keeps_working_without_a_counter():
 
 # ------------------------------------------------- the real article, and why
 #
-# 🪤 EVERY TEST ABOVE THIS LINE WAS GREEN ON 2026-08-16 WHILE TWO REAL BOUTS
+# 🪤 EVERY TEST ABOVE THIS LINE WAS GREEN ON 2026-08-15 WHILE TWO REAL BOUTS
 # WERE BEING LOST AND THE TRIPWIRE REPORTED ZERO. They cannot see it: the HTML
 # they parse was typed by the same hand that wrote the regex, so it can only
 # contain the variants that hand already thought of. The four tests below run
@@ -326,7 +326,7 @@ def test_the_real_article_loses_no_bout_line_in_silence():
     # CONSERVATION. Whatever the parser cannot read has to show up in the
     # counter, so parsed + flagged always equals what is on the page. This is
     # the assertion that survives the next wording change too: it never names
-    # the asterisk. Before the 2026-08-16 fix it read 10 + 0 against 12.
+    # the asterisk. Before the 2026-08-15 fix it read 10 + 0 against 12.
     lines = _body_lines(_REAL_ARTICLE)
     shaped = [line for line in lines if _looks_like_a_bout(line)]
     assert len(shaped) == 12, "the fixture should still hold 12 bout lines"

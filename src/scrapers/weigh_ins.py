@@ -126,7 +126,7 @@ _BOUT_LINE_RE = re.compile(
 # nobody reads.
 #
 # 🪤 THE TRIPWIRE MUST BE LOOSER THAN WHAT IT WATCHES, AND IT WASN'T. Until
-# 2026-08-16 this pattern carried its own copy of `\(\s*\d{2,3}(?:\.\d+)?\s*\)`
+# 2026-08-15 this pattern carried its own copy of `\(\s*\d{2,3}(?:\.\d+)?\s*\)`
 # — the very subpattern _BOUT_LINE_RE uses — so an asterisk INSIDE the bracket
 # broke both at once and the loss was silent. Measured against the real Oklahoma
 # City article: 12 bout lines, 10 parsed, and `counts` came back as the EMPTY
