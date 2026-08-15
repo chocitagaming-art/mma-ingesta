@@ -110,7 +110,7 @@ def scrape_news(max_articles: int = 100) -> Counter:
                 fighter_id=fighter_id,
                 category=classification.category,
                 relevance=_calculate_relevance(classification.category, fighter_id),
-                image_url=article.image_url or fetch_og_image(article.url),
+                image_url=pick_image_url(article.image_url, article.url),
             )
             upsert_news_article(connection, record)
             connection.commit()
@@ -330,6 +330,47 @@ OG_IMAGE_RES = (
     ),
 )
 _OG_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; mma-ingesta/1.0; +https://ufcstats.com)"}
+
+
+def pick_image_url(
+    feed_image: str | None,
+    url: str,
+    fetch_og: Callable[[str], str | None] = None,  # type: ignore[assignment]
+) -> str | None:
+    """La imagen de una noticia: primero la que declara la PAGINA, luego la del feed.
+
+    🪤 EL ORDEN ES EL ARREGLO, y viene de un caso real. El 15-ago-2026 la
+    portada publicaba "Asi fue el ultimo e intenso cara a cara entre Makhachev y
+    Garry antes del UFC 330" ilustrada con UNA FOTO DE UN PARTIDO DE FUTBOL. No
+    era cosa nuestra: el <media:content> del propio feed de Marca apuntaba a
+    /imagenes/2018/05/27/15274426266232.jpg, de ocho anos antes, mientras la
+    pagina del articulo declaraba la buena en su og:image.
+
+    Aqui se hacia ``article.image_url or fetch_og_image(article.url)``, o sea el
+    feed mandaba y la pagina solo se consultaba si el feed venia vacio. Se
+    invierte: el og:image es lo que el MEDIO declara como imagen DE ESE
+    articulo, y el feed queda de reserva para cuando la pagina no trae ninguna.
+
+    Medido sobre las 25 ultimas noticias de Marca: en 19 las dos apuntan a la
+    misma foto (distinto CDN, misma fecha en la ruta), en 6 difieren y en 1 la
+    del feed era de otro deporte. Invertir el orden no cambia nada en el caso
+    normal y arregla el raro.
+
+    Coste: una peticion HTTP por noticia NUEVA (las ya guardadas se saltan antes
+    de llegar aqui), unas 15 por pasada.
+
+    ``fetch_og`` se inyecta para poder probar esto sin red. Si revienta, la
+    noticia entra igual con la imagen del feed: perder una foto es malo, perder
+    la noticia entera es peor.
+    """
+    if fetch_og is None:
+        fetch_og = fetch_og_image
+    try:
+        de_la_pagina = fetch_og(url)
+    except Exception as exc:  # noqa: BLE001 - una foto no puede tumbar una noticia
+        LOGGER.debug("og:image fallo para %s: %s", url, exc)
+        de_la_pagina = None
+    return de_la_pagina or feed_image
 
 
 def fetch_og_image(url: str, timeout: int = 10) -> str | None:

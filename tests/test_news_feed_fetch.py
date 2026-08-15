@@ -266,3 +266,59 @@ def test_build_summary_includes_per_source_breakdown():
         "UFC Español": 0,
     }
     assert summary["fetched"] == 41
+
+
+# ---------------------------------------------------------------- imagenes
+#
+# 🪤 EL RSS DE MARCA MIENTE A VECES. El 15-ago-2026 la portada publicaba una
+# noticia titulada "Asi fue el ultimo e intenso cara a cara entre Makhachev y
+# Garry antes del UFC 330" ILUSTRADA CON UNA FOTO DE UN PARTIDO DE FUTBOL. La
+# foto no era un error nuestro: el propio <media:content> del feed de Marca
+# apuntaba a /imagenes/2018/05/27/15274426266232.jpg, una imagen de hace ocho
+# anos. La pagina del articulo declaraba la correcta en su og:image.
+#
+# El scraper hacia `article.image_url or fetch_og_image(article.url)`: se
+# quedaba con la del feed y NUNCA llegaba a mirar la buena. Ahora es al reves.
+# El og:image es lo que el medio declara como imagen DE ESE articulo; el feed es
+# la reserva para cuando la pagina no lo trae.
+
+
+def test_la_imagen_sale_del_og_image_y_no_de_la_del_feed(monkeypatch):
+    """El caso real de Marca: el feed trae una foto de 2018, la pagina la buena."""
+    del monkeypatch  # la funcion bajo prueba no toca red: se le inyecta el fetcher
+    DEL_FEED = "https://objetos.estaticos-marca.com/assets/multimedia/imagenes/2018/05/27/15274426266232.jpg"
+    DE_LA_PAGINA = "https://objetos-xlk.estaticos-marca.com/files/article_main_microformat/uploads/2026/08/15/6a800c1f79554.jpeg"
+
+    elegida = news.pick_image_url(
+        feed_image=DEL_FEED,
+        url="https://www.marca.com/combates-ufc/2026/08/15/x.html",
+        fetch_og=lambda _url: DE_LA_PAGINA,
+    )
+    assert elegida == DE_LA_PAGINA
+
+
+def test_si_la_pagina_no_declara_imagen_se_usa_la_del_feed():
+    """La reserva. Sin esto, quitar la preferencia dejaria noticias sin foto."""
+    DEL_FEED = "https://ejemplo/foto.jpg"
+    assert news.pick_image_url(feed_image=DEL_FEED, url="https://x/y", fetch_og=lambda _u: None) == DEL_FEED
+
+
+def test_sin_ninguna_de_las_dos_no_se_inventa_nada():
+    assert news.pick_image_url(feed_image=None, url="https://x/y", fetch_og=lambda _u: None) is None
+
+
+def test_si_el_feed_no_trae_imagen_igual_se_pide_la_pagina():
+    """Es lo que ya pasaba con UFC Espanol, cuyo feed no lleva imagenes."""
+    assert (
+        news.pick_image_url(feed_image=None, url="https://x/y", fetch_og=lambda _u: "https://ok/f.jpg")
+        == "https://ok/f.jpg"
+    )
+
+
+def test_un_og_image_roto_no_tumba_la_noticia():
+    """fetch_og_image ya traga sus excepciones, pero si alguna se escapa la
+    noticia tiene que entrar igual con la imagen del feed en vez de perderse."""
+    def revienta(_url):
+        raise RuntimeError("WAF 403")
+
+    assert news.pick_image_url(feed_image="https://ejemplo/foto.jpg", url="https://x/y", fetch_og=revienta) == "https://ejemplo/foto.jpg"
