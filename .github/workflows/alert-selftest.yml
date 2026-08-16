@@ -6,7 +6,8 @@ name: Alert self-test (canario)
 # POR QUE EXISTE: el 25-jul-2026 se midio que notify-on-failure llevaba 86
 # ejecuciones seguidas en 'skipped', CERO Issues con etiqueta cron-failure en
 # toda su historia y la etiqueta ni siquiera creada. Es decir: el codigo que
-# abre el Issue (notify-on-failure.yml:78-88) nunca se habia ejecutado ni una
+# abre el Issue (su paso `Abrir o comentar Issue de fallo`) nunca se habia
+# ejecutado ni una
 # sola vez. Una alerta que nunca ha sonado no es una alerta, es una suposicion.
 # Y la fase 1 del plan —hacer que el bucle del directo falle en rojo— solo vale
 # algo si alguien se entera del rojo; sin esta prueba, el cambio solo habria

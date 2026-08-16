@@ -29,20 +29,34 @@ LO QUE SE ROMPIO Y ESTO IMPIDE QUE VUELVA (noche del UFC 330, 15-ago-2026):
    cruda es el unico plan B: si se pierde, la serie de la velada no se
    reconstruye desde ningun sitio. Por eso ahora son dos pasos con dos guards.
 
+3. LA ALARMA AMORDAZADA (anadido el 16-ago-2026, seccion 4 de este fichero).
+   Las autocancelaciones del centinela abrian un Issue de fallo cada hora de
+   velada y ese Issue tapaba el canal entero: el #32 estuvo abierto de las
+   19:18:17Z a las 21:15:23Z del 15-ago, es decir las dos horas justas antes
+   del UFC 330. `notify-on-failure.yml` ya no avisa de esos 'cancelled', y
+   distingue el caso comparando `github.event.workflow_run.path` con la ruta
+   del fichero del centinela. Esa comparacion es una cadena literal escrita a
+   mano en un YAML: si alguien renombra el fichero, o cambia el `name:` con el
+   que este workflow esta vigilado, el arreglo deja de casar SIN QUE NADA
+   FALLE. La seccion 4 es lo unico que ata ese cabo.
+
 Estos tests leen el YAML, no lo ejecutan. No tocan la red ni la base de datos.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
 import yaml
 
-WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+RAIZ = Path(__file__).resolve().parents[1]
+WORKFLOWS = RAIZ / ".github" / "workflows"
 
 WATCHDOG = WORKFLOWS / "live-watchdog.yml"
 SENTINEL = WORKFLOWS / "live-sentinel.yml"
+NOTIFY = WORKFLOWS / "notify-on-failure.yml"
 
 # Los dos ficheros que deciden si se dispara un run del directo.
 CON_GUARD = [WATCHDOG, SENTINEL]
@@ -238,3 +252,246 @@ def test_un_caido_fingido_no_manda_email():
     assert "exit 1" in ultimo["run"], "el paso que falla en rojo ya no es el ultimo"
     assert "steps.wd.outputs.estado == 'CAIDO'" in ultimo["if"]
     assert "steps.wd.outputs.simulado != 'true'" in ultimo["if"]
+
+
+# ------------------ 4. la excepcion del centinela dentro de notify-on-failure
+#
+# POR QUE HAY QUE VIGILAR ESTO Y NO OTRA COSA. El `if:` de un job disparado por
+# `workflow_run` SOLO se evalua desde la rama por defecto, asi que no existe
+# forma de ensayarlo: se estrena en produccion, la noche de la velada, que es
+# justo cuando importa. Y encima la excepcion del centinela cuelga de dos
+# cadenas literales escritas a mano —la ruta del fichero y el `name:` con el
+# que esta vigilado—, que es la clase de dato que se desincroniza sin que nada
+# se ponga en rojo. Los dos modos de fallo, dichos claro:
+#
+#   * Se renombra el FICHERO live-sentinel.yml y no se tocan los dos `if:`:
+#     vuelve el Issue falso cada sabado de velada. Ruidoso, pero se ve.
+#   * Se cambia el `name:` del centinela y no se toca la lista de vigilados de
+#     notify-on-failure.yml: entonces este workflow deja de dispararse por el
+#     centinela ENTERO, y un fallo de verdad de "Hay velada?" (Neon caido,
+#     cambio de esquema) sale en rojo sin que lo lea nadie hasta el lunes. Ese
+#     agujero es exactamente el que se tapo el 1-ago-2026 metiendolo en la
+#     lista. Este es el modo silencioso, y el caro.
+#
+# Se comprueba contra el YAML de verdad, no contra una copia de las cadenas.
+
+
+RUTA_EN_EL_IF = re.compile(r"workflow_run\.path\s*==\s*'([^']*)'")
+NEGACION = re.compile(r"&&\s*!\s*\(")
+
+
+def _yaml(fichero: Path) -> dict:
+    return yaml.safe_load(fichero.read_text(encoding="utf-8"))
+
+
+def _condicion(fichero: Path, job: str) -> str:
+    """El `if:` de un job, con los saltos del bloque plegado hechos espacios.
+
+    El `if:` de `notify` es un `>-` de varias lineas y YAML conserva sus `\\n`
+    (las lineas de continuacion van mas indentadas). Buscar subcadenas sin
+    normalizar antes daria falsos negativos segun donde caiga el corte.
+    """
+    jobs = _yaml(fichero)["jobs"]
+    assert job in jobs, f"{fichero.name} ya no tiene el job '{job}': {list(jobs)}"
+    return " ".join(jobs[job]["if"].split())
+
+
+def _rutas_comparadas(fichero: Path) -> dict[str, list[str]]:
+    """Por cada job, las rutas de workflow que compara su `if:`."""
+    return {
+        nombre: RUTA_EN_EL_IF.findall(cuerpo.get("if", "") or "")
+        for nombre, cuerpo in _yaml(fichero)["jobs"].items()
+    }
+
+
+def _vigilados(fichero: Path) -> list[str]:
+    """Los `name:` de los workflows que disparan notify-on-failure."""
+    datos = _yaml(fichero)
+    # PyYAML es YAML 1.1, donde `on` es un booleano: la clave del bloque no es
+    # la cadena "on" sino True. Se aceptan las dos por si algun dia se cambia
+    # de parser y deja de pasar.
+    disparadores = datos.get("on", datos.get(True))
+    return disparadores["workflow_run"]["workflows"]
+
+
+def test_la_excepcion_apunta_al_fichero_del_centinela_y_ese_fichero_existe():
+    """EL CABO SUELTO DEL ARREGLO DEL 16-AGO. La ruta del `if:` es una cadena
+    literal: si el fichero se renombra y la cadena no, la excepcion deja de
+    casar y vuelve el Issue falso de cada velada."""
+    esperada = SENTINEL.relative_to(RAIZ).as_posix()
+    assert SENTINEL.is_file(), (
+        f"no existe {esperada}. Si el centinela se ha renombrado, hay que "
+        "cambiar la ruta en LOS DOS `if:` de notify-on-failure.yml."
+    )
+
+    rutas = _rutas_comparadas(NOTIFY)
+    encontradas = sorted({r for lista in rutas.values() for r in lista})
+    assert encontradas == [esperada], (
+        f"notify-on-failure.yml compara contra {encontradas} y el centinela "
+        f"vive en '{esperada}'."
+    )
+
+
+def test_los_dos_sitios_que_nombran_la_ruta_van_a_la_vez():
+    """La ruta aparece DOS veces: en el `if:` de `notify` (que se calla) y en
+    el de `centinela_autocancelado` (que deja el rastro). Cambiar solo una deja
+    el peor de los dos mundos: ni Issue, ni ::notice."""
+    esperada = SENTINEL.relative_to(RAIZ).as_posix()
+    rutas = _rutas_comparadas(NOTIFY)
+
+    for job in ("notify", "centinela_autocancelado"):
+        assert rutas.get(job) == [esperada], (
+            f"el job '{job}' de notify-on-failure.yml compara contra "
+            f"{rutas.get(job)}, no contra ['{esperada}']."
+        )
+
+
+def test_el_centinela_sigue_vigilado_con_su_name_exacto():
+    """EL MODO DE FALLO SILENCIOSO. La lista de `workflows:` casa por `name:`
+    exacto. Si el titulo del centinela cambia y la lista no, notify-on-failure
+    no se dispara por el y un fallo de verdad (no una autocancelacion) no abre
+    ningun Issue. Es el agujero que se tapo el 1-ago-2026."""
+    nombre = _yaml(SENTINEL)["name"]
+    vigilados = _vigilados(NOTIFY)
+    assert nombre in vigilados, (
+        f"el `name:` del centinela es '{nombre}' y no esta en la lista de "
+        "workflows vigilados de notify-on-failure.yml: sus fallos DE VERDAD "
+        "ya no avisarian."
+    )
+
+
+def test_la_excepcion_solo_perdona_los_cancelled():
+    """La excepcion tiene que seguir siendo del tamano exacto del problema. Un
+    'failure' o un 'timed_out' del centinela son averias de las que hay que
+    enterarse; solo el 'cancelled' es funcionamiento normal (el cron horario
+    expulsa al run pendiente mientras otro duerme). Si alguien simplifica el
+    `if:` quitando la comprobacion de la conclusion, el centinela se queda sin
+    alarma para todo."""
+    condicion = _condicion(NOTIFY, "notify")
+    assert NEGACION.search(condicion), (
+        "el `if:` de `notify` ya no niega nada: o se ha perdido la excepcion "
+        "del centinela, o se ha reescrito de una forma que este test no sabe "
+        "leer. Comprobalo a mano antes de tocar el test."
+    )
+    _, excepcion = NEGACION.split(condicion, maxsplit=1)
+    assert "conclusion == 'cancelled'" in excepcion, (
+        "la excepcion del centinela ya no mira la conclusion: estaria "
+        "silenciando TAMBIEN sus 'failure' y 'timed_out'."
+    )
+    assert "workflow_run.path" in excepcion, (
+        "la excepcion ya no mira de que workflow viene: estaria silenciando "
+        "los 'cancelled' de todos los crons vigilados."
+    )
+
+
+def test_notify_sigue_avisando_de_los_tres_finales_malos():
+    """'failure' no es el unico final malo (11-jul-2026: tres runs del bucle
+    en 'cancelled' y ni un Issue). La excepcion del centinela recorta ese
+    tercer caso para UN solo workflow, no para todos."""
+    condicion = _condicion(NOTIFY, "notify")
+    for final in ("failure", "timed_out", "cancelled"):
+        assert f'"{final}"' in condicion, (
+            f"'{final}' ha desaparecido de la lista de conclusiones que avisan."
+        )
+
+
+def test_la_premisa_de_la_excepcion_sigue_siendo_cierta():
+    """POR QUE ES LEGITIMO CALLARSE UN 'cancelled' DEL CENTINELA: porque lo
+    cancela su propia concurrency. Con `cancel-in-progress: false` el que
+    duerme no se toca y el cancelado es siempre el que esperaba en la cola sin
+    ejecutar ni un paso. Si algun dia se quita ese bloque o se pone en true,
+    la premisa se cae y la excepcion pasa a tapar cancelaciones de verdad."""
+    concurrencia = _yaml(SENTINEL)["concurrency"]
+    assert concurrencia["cancel-in-progress"] is False, (
+        "el centinela ha cambiado su concurrency. Con cancel-in-progress: true "
+        "el cancelado seria el que duerme, y un 'cancelled' dejaria de ser "
+        "inofensivo: hay que revisar la excepcion de notify-on-failure.yml."
+    )
+
+
+def test_el_rastro_de_la_autocancelacion_no_abre_issues():
+    """A PROPOSITO, y conviene que se note al cambiarlo. Este job existe para
+    que la excepcion no sea una venda: deja un ::notice y una linea en el
+    resumen, pero NO manda correo (serian dos o tres por noche de velada, que
+    es justo el ruido que se vino a quitar). Si algun dia se decide que la
+    cancelacion REAL si avise, el dato ya esta calculado ahi; hay que borrar
+    este test a sabiendas, no de refilon."""
+    job = _yaml(NOTIFY)["jobs"]["centinela_autocancelado"]
+    guion = " ".join(str(paso.get("run", "")) for paso in job["steps"])
+
+    assert "gh issue create" not in guion and "gh issue comment" not in guion, (
+        "el job del rastro ha empezado a abrir Issues. Es un camino que CREA "
+        "cosas y que no se puede ensayar sin fusionar a main: leete el "
+        "comentario de arriba antes de darlo por bueno."
+    )
+    assert job.get("continue-on-error") is True, (
+        "el job del rastro puede tumbar el workflow que da TODAS las alarmas."
+    )
+
+
+# ------------------ 5. el cierre no puede cantar victoria sin haber cerrado
+#
+# ENCONTRADO EN LA REVISION DEL 16-AGO-2026, y es el mismo tipo de averia que
+# todo este fichero persigue: silencio que parece exito.
+#
+# El script del job `cerrar` lleva `set -uo pipefail` pero NO `set -e`. Con el
+# `gh issue close` suelto y un `echo "Issue #N cerrado."` detras, un fallo del
+# `gh` (un 5xx de la API, rate limit, un token con permisos recortados) seguia
+# de largo: el paso imprimia que habia cerrado y salia con 0. Y como el job
+# lleva `continue-on-error: true`, el run entero se quedaba VERDE.
+#
+# MEDIDO ejecutando el script de HEAD con un `gh` de mentira que devuelve 502:
+#   exit=0
+#   gh: HTTP 502
+#   Issue #42 cerrado.        <- mentira, el Issue seguia abierto
+#
+# Y un Issue que se queda abierto es exactamente la averia del Issue 16
+# (1-ago) y la del #32 (15-ago): GitHub manda email al ABRIR, no al comentar,
+# asi que el siguiente fallo de ese workflow habria sido un comentario mudo.
+# Ahora el cierre se comprueba y deja un ::error si no ha salido.
+
+
+def test_el_cierre_comprueba_que_el_gh_ha_funcionado():
+    """El `gh issue close` no puede ir suelto seguido de un echo de exito: sin
+    `set -e`, un fallo del `gh` sale con 0 y el paso miente en verde mientras
+    el Issue sigue abierto amordazando el canal."""
+    guion = _yaml(NOTIFY)["jobs"]["cerrar"]["steps"][0]["run"]
+
+    assert "if gh issue close" in guion, (
+        "el `gh issue close` del job `cerrar` ha vuelto a quedarse suelto. Sin "
+        "`set -e`, si el `gh` falla el paso sale con 0, imprime que cerro y el "
+        "Issue se queda abierto: el proximo fallo de ese workflow no manda "
+        "email. Envuelvelo en un `if ... ; then ... else ... fi`."
+    )
+    assert "::error title=Relevo::" in guion, (
+        "el cierre ya no deja constancia cuando falla. Con el "
+        "`continue-on-error: true` del job, sin el `::error` no queda ni rastro."
+    )
+
+
+CITA_POR_LINEA = re.compile(r"notify-on-failure\.?y?m?l?:\d+")
+
+
+def test_nadie_cita_notify_on_failure_por_numero_de_linea():
+    """notify-on-failure.yml es el fichero que mas cambia (tres veces solo el
+    16-ago-2026) y el que mas se cita desde otros workflows. Diez citas suyas
+    por numero de linea estaban CADUCADAS a la vez: apuntaban a :45, :69,
+    :78-88, :127, :133, :161 y :198 cuando el job `notify` esta en la :109, el
+    `TITULO=` en la :187 y el job `cerrar` en la :294.
+
+    Una cita caducada no rompe nada, y por eso es peligrosa: manda al que esta
+    depurando por que no le llego un email al sitio equivocado, justo cuando
+    tiene prisa. Se citan por NOMBRE de job o de paso, que sobrevive al
+    siguiente commit."""
+    culpables = []
+    for fichero in sorted(WORKFLOWS.glob("*.yml")):
+        for n, linea in enumerate(fichero.read_text(encoding="utf-8").splitlines(), 1):
+            if CITA_POR_LINEA.search(linea):
+                culpables.append(f"{fichero.name}:{n}: {linea.strip()}")
+
+    assert not culpables, (
+        "hay citas a notify-on-failure.yml por numero de linea, y caducan solas:\n"
+        + "\n".join(culpables)
+        + "\nCitalo por nombre: el job `notify`, el job `cerrar`, el paso "
+        "`Abrir o comentar Issue de fallo`, su `on: workflow_run: workflows:`..."
+    )

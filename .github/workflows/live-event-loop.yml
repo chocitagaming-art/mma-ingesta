@@ -141,7 +141,8 @@ jobs:
       # `github-actions[bot]`): es el corta-recursion del token automatico. Este
       # bucle SOLO se lanza asi, desde live-sentinel.yml:138-141 y
       # live-watchdog.yml:94-95, de modo que su entrada en la lista de vigilados
-      # ("Live event loop (ESPN)", notify-on-failure.yml:45) era LETRA MUERTA
+      # ("Live event loop (ESPN)", en el `on:` de notify-on-failure.yml) era
+      # LETRA MUERTA
       # desde el dia que se escribio. Escrita, leida y falsa.
       #
       # LAS PRUEBAS, medidas el 16-ago-2026:
@@ -159,10 +160,11 @@ jobs:
       #     "Keep-alive prediction service" (leido en su log). Ni siquiera los
       #     exitos emiten el evento.
       #
-      # MISMO TITULO Y MISMA ETIQUETA que notify-on-failure.yml:127, A PROPOSITO.
+      # MISMO TITULO Y MISMA ETIQUETA que el paso `Abrir o comentar Issue de
+      # fallo` de notify-on-failure.yml, A PROPOSITO.
       # Asi hay UN solo hilo por workflow: si algun dia alguien lanza el bucle a
       # mano (actor humano => el evento SI se emite), el job `cerrar` de
-      # notify-on-failure:161 recoge este mismo Issue sin tocar nada. Un titulo
+      # notify-on-failure.yml recoge este mismo Issue sin tocar nada. Un titulo
       # propio habria creado un segundo convenio de avisos que nadie cierra.
       #
       # `always() && job.status != 'success'` Y NO `failure()`: 'failure' no es
@@ -198,7 +200,8 @@ jobs:
           TITULO="🔴 Cron fallando — $WF_NAME"
           BODY=$(printf '⛔ **%s** — el workflow **%s** ha terminado en `%s`.\n\n[Ver el run](%s)\n\n_(Alerta automática. Revisa el run, arréglalo y cierra este Issue: mientras siga abierto, los siguientes fallos de ESTE workflow serán comentarios y no te llegará un email nuevo.)_' "$STAMP" "$WF_NAME" "${WF_ESTADO:-failure}" "$RUN_URL")
           # jq externo y comparacion EXACTA por titulo, calcado de
-          # notify-on-failure.yml:133: `--search` hace busqueda difusa y casaria
+          # su paso `Abrir o comentar Issue de fallo`: `--search` hace busqueda
+          # difusa y casaria
           # el hilo de OTRO workflow (el nombre lleva parentesis).
           ISSUE=$(gh issue list --repo "$REPO" --label cron-failure --state open \
             --limit 100 --json number,title \
@@ -212,7 +215,7 @@ jobs:
 
       # EL RELEVO, TAMBIEN AQUI DENTRO, y por el mismo motivo que el aviso.
       #
-      # El job `cerrar` de notify-on-failure.yml:161 NO puede cerrar este Issue:
+      # El job `cerrar` de notify-on-failure.yml NO puede cerrar este Issue:
       # se dispara con el mismo `workflow_run` que tampoco llega hasta aqui.
       # Sin este paso, el primer fallo dejaria un Issue abierto PARA SIEMPRE y el
       # siguiente fallo seria un comentario mudo — que es literalmente la averia
@@ -220,7 +223,8 @@ jobs:
       # Abrir avisos sin cerrarlos es peor que no avisar, porque parece que
       # funciona.
       #
-      # Respeta `no-cerrar-solo` igual que notify-on-failure.yml:198, para que
+      # Respeta `no-cerrar-solo` igual que el salvavidas del job `cerrar` de
+      # notify-on-failure.yml, para que
       # los dos cierres se comporten IGUAL y no haya que recordar cual es cual.
       #
       # SOBRE EL RELEVO A+B: el centinela lanza dos runs, A en curso y B en cola.
@@ -256,5 +260,19 @@ jobs:
           fi
 
           STAMP=$(date -u +'%Y-%m-%d %H:%M UTC')
-          gh issue close "$NUM" --repo "$REPO" --reason completed --comment "$(printf '✅ **%s** — **%s** ha vuelto a terminar en `success`, así que este aviso se cierra solo.\n\n[Ver el run](%s)\n\n_Se cierra para que el PRÓXIMO fallo de este workflow vuelva a abrir un Issue nuevo y te llegue un email. Mientras un aviso sigue abierto, los fallos siguientes son comentarios mudos._\n\n_Si este Issue no debe cerrarse aunque su cron pase, ponle la etiqueta `no-cerrar-solo`._' "$STAMP" "$WF_NAME" "$RUN_URL")"
-          echo "Issue #$NUM cerrado."
+          # SE COMPRUEBA SI EL CIERRE HA SALIDO BIEN (16-ago-2026). Aqui hay
+          # `set -uo pipefail` pero NO `set -e`: sin este `if`, un `gh issue
+          # close` que falla (un 5xx, rate limit, un token con permisos
+          # recortados) seguia de largo, imprimia "Issue #N cerrado." y salia
+          # con 0. La noche de la velada eso significa que el Issue del bucle
+          # se queda ABIERTO creyendo que se cerro, y a partir de ahi todos los
+          # fallos del bucle son comentarios mudos: el mma-app#20 (15-ago) otra
+          # vez, escondido en la ultima linea del script. Se anota con `::error`
+          # para que se vea en la pagina del run; el `continue-on-error` del
+          # paso impide que esto tumbe el bucle.
+          if gh issue close "$NUM" --repo "$REPO" --reason completed --comment "$(printf '✅ **%s** — **%s** ha vuelto a terminar en `success`, así que este aviso se cierra solo.\n\n[Ver el run](%s)\n\n_Se cierra para que el PRÓXIMO fallo de este workflow vuelva a abrir un Issue nuevo y te llegue un email. Mientras un aviso sigue abierto, los fallos siguientes son comentarios mudos._\n\n_Si este Issue no debe cerrarse aunque su cron pase, ponle la etiqueta `no-cerrar-solo`._' "$STAMP" "$WF_NAME" "$RUN_URL")"; then
+            echo "Issue #$NUM cerrado."
+          else
+            echo "::error title=Relevo::No se ha podido cerrar el Issue #$NUM de '$WF_NAME'. Sigue ABIERTO, y mientras lo este el proximo fallo del bucle sera un comentario sin email. Cierralo a mano."
+            exit 1
+          fi

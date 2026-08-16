@@ -8,6 +8,16 @@ name: Notify on cron failure
 # dueño lo cierra al arreglar). Nota: workflow_run solo actúa desde la rama
 # default (main). Los nombres deben coincidir EXACTO con el `name:` de cada
 # workflow vigilado.
+#
+# SI CITAS ESTE FICHERO DESDE OTRO, HAZLO POR NOMBRE DE JOB O DE PASO, nunca por
+# numero de linea. Este es el fichero que mas crece y el que mas se cita: el
+# 16-ago-2026 se encontraron DIEZ citas suyas caducadas a la vez, repartidas por
+# alert-selftest.yml, capture-live-samples.yml y live-event-loop.yml, apuntando
+# a :45, :69, :78-88, :127, :133, :161 y :198 cuando el job `notify` estaba ya
+# en la :109 y el job `cerrar` en la :294. Una cita caducada no rompe nada, y
+# por eso muerde: manda al sitio equivocado justo a quien esta buscando por que
+# no le ha llegado un email. Lo vigila
+# `tests/test_workflow_guards.py::test_nadie_cita_notify_on_failure_por_numero_de_linea`.
 on:
   workflow_run:
     workflows:
@@ -111,9 +121,53 @@ jobs:
     # 11-jul-2026 tres runs de live-event-loop acabaron en 'cancelled' (un
     # dispatch de mas expulsa al relevo en cola) y no se abrio ni un Issue. Un
     # 'timed_out' del bucle a mitad de main card es igual de grave.
+    #
+    # LA EXCEPCION DEL CENTINELA (anadida el 16-ago-2026, auditoria post-UFC
+    # 330). Un 'cancelled' del centinela NO es un fallo: es como esta disenado.
+    # El centinela duerme DENTRO del job hasta T-15min (live-sentinel.yml:93-104,
+    # hasta 5 h) mientras su cron horario (live-sentinel.yml:39-40) sigue
+    # encolando runs, y GitHub guarda UN solo run pendiente por grupo de
+    # concurrency (live-sentinel.yml:55-59): cada hora el nuevo EXPULSA al
+    # pendiente anterior. Ojo al matiz, que importa para entender que no se
+    # pierde nada: con `cancel-in-progress: false` el dormilon NO se toca; el
+    # cancelado es siempre el que esperaba en la cola sin haber ejecutado ni un
+    # paso.
+    #
+    # MEDIDO minuto a minuto la noche del UFC 330: el centinela de las
+    # 17:16:15Z (run 31897828461) durmio 3h59 y disparo sus cuatro dispatches a
+    # las 21:15:04Z. Mientras dormia se cancelaron los crons de las 18:20:25Z
+    # (run 31900854345) y las 19:18:05Z (run 31903523857). Este workflow abrio
+    # el Issue #32 a las 19:18:17Z, y el segundo cancelado entro como COMENTARIO
+    # MUDO a las 20:17:04Z; el job `cerrar` no lo cerro hasta las 21:15:23Z.
+    # O sea: la alarma del centinela estuvo AMORDAZADA de 19:18 a 21:15, que es
+    # exactamente la ventana previa a la velada y la unica hora del mes en que
+    # ese aviso vale para algo (GitHub manda email al ABRIR un Issue, no al
+    # comentar en uno que ya sigues). Mismo patron el 8-ago con el Issue #29
+    # (abierto 18:29:59Z, cerrado 20:45:19Z, tres crons cancelados: 31269349845,
+    # 31272068167 y 31274360454) y el 6-ago con el #25.
+    #
+    # SE COMPARA POR `path`, NO POR `name`. El payload de workflow_run trae
+    # `path` (comprobado: la API de runs/31903523857 devuelve
+    # '.github/workflows/live-sentinel.yml'). Cambiar el `name:` visible del
+    # workflow romperia un if por nombre EN SILENCIO -volveria a abrirse el
+    # Issue cada sabado de velada y nadie ataria el cabo-, mientras que el
+    # nombre del fichero no se toca al retocar un titulo.
+    #
+    # LO QUE ESTA EXCEPCION CUESTA, dicho claro: un centinela cancelado A MANO o
+    # por un fallo de infraestructura tampoco abre Issue. Por eso no se calla
+    # del todo: el job `centinela_autocancelado` de mas abajo deja un ::notice
+    # por cada cancelacion. En 242 runs del centinela solo ha habido 6
+    # cancelados, y 5 son estas autocancelaciones; el sexto (30203744406,
+    # 26-jul) lo paro el dueno a mano sabiendo lo que hacia.
+    #
+    # Ojo con la sintaxis: el `!` solo es seguro porque el escalar empieza por
+    # `${{`. Si una linea de un `if:` empieza por `!`, YAML lo lee como etiqueta
+    # y revienta con ConstructorError.
     if: >-
       ${{ contains(fromJSON('["failure","timed_out","cancelled"]'),
-                   github.event.workflow_run.conclusion) }}
+                   github.event.workflow_run.conclusion)
+          && !(github.event.workflow_run.conclusion == 'cancelled'
+               && github.event.workflow_run.path == '.github/workflows/live-sentinel.yml') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
@@ -155,6 +209,79 @@ jobs:
             gh label create cron-failure --repo "$REPO" --color D73A4A --description "Un cron de datos ha fallado" --force
             gh issue create --repo "$REPO" --title "$TITULO" --label cron-failure --body "$BODY"
           fi
+
+  # ---------------------------------------------------------------------------
+  # EL RASTRO DE LA EXCEPCION (anadido el 16-ago-2026, con el `if:` de arriba).
+  #
+  # El job `notify` se calla los 'cancelled' del centinela porque son su
+  # funcionamiento normal, no una averia (el por que largo esta en su `if:`).
+  # Pero apagar una alarma sin dejar rastro es exactamente como se pierden los
+  # fallos de verdad: una cancelacion por concurrency y una cancelacion porque
+  # alguien paro el run a mano o porque el runner perdio la comunicacion se ven
+  # IGUAL desde aqui. Este job es la diferencia entre "no aviso" y "no consta".
+  #
+  # No manda email A PROPOSITO: serian dos o tres correos por noche de velada
+  # (dos el 15-ago, tres el 8-ago), que es justo el ruido que se viene a quitar.
+  # Deja un ::notice anotado en la pagina del run y una linea en el resumen, que
+  # es donde se mira cuando algo no cuadra. Cuesta un runner de ~10 s y el repo
+  # es PUBLICO, asi que sale gratis.
+  #
+  # COMO DISTINGUE UNA COSA DE LA OTRA, y esto es lo que hace que la excepcion
+  # no sea una venda: un run expulsado por la concurrency NUNCA llega a arrancar
+  # su job, asi que la API devuelve CERO jobs. Uno cancelado de verdad (a mano o
+  # por el runner) ya tenia el job en marcha y aparece con sus pasos.
+  # COMPROBADO el 16-ago-2026 contra los dos casos reales que hay:
+  #   runs/31903523857/jobs (15-ago, expulsado por el cron) -> total_count 0
+  #   runs/30203744406/jobs (26-jul, parado a mano)         -> total_count 1,
+  #                                                            job 'centinela'
+  #                                                            con 13 pasos.
+  # Aqui SOLO se imprime el veredicto, no se abre ningun Issue: el `if:` de un
+  # job `workflow_run` no se puede ensayar sin fusionar a main, asi que un
+  # camino que CREA cosas no se mete a seis dias de la velada. Si mas adelante
+  # se quiere que la cancelacion real si avise, este es el sitio y este es el
+  # dato; el permiso `issues: write` ya esta concedido arriba.
+  centinela_autocancelado:
+    if: >-
+      ${{ github.event.workflow_run.conclusion == 'cancelled'
+          && github.event.workflow_run.path == '.github/workflows/live-sentinel.yml' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Igual que `cerrar`: si esto falla se pierde una anotacion, no el canal de
+    # avisos. Nunca puede tumbar el workflow que da las alarmas.
+    continue-on-error: true
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      WF_URL: ${{ github.event.workflow_run.html_url }}
+      WF_ID: ${{ github.event.workflow_run.id }}
+      WF_CREATED: ${{ github.event.workflow_run.created_at }}
+    steps:
+      - name: Dejar constancia de la autocancelacion del centinela
+        run: |
+          # `set +e` a proposito y sin `-o pipefail`: si la API de Actions
+          # contesta mal, la anotacion basica tiene que salir igual. Perder el
+          # veredicto es aceptable; perder el rastro entero no.
+          set +e
+          JOBS=$(gh api "repos/$REPO/actions/runs/$WF_ID/jobs" --jq '.total_count' 2>/dev/null)
+          case "$JOBS" in
+            0)
+              VEREDICTO="AUTOCANCELACION NORMAL: el run no llego a arrancar ningun job, o sea que lo expulso el cron horario mientras otro centinela dormia. No hay nada que mirar."
+              ;;
+            ""|*[!0-9]*)
+              VEREDICTO="NO SE HA PODIDO COMPROBAR si arranco el job (la API no contesto). Abre el run y mira si tiene pasos ejecutados: si los tiene, la cancelacion es real."
+              ;;
+            *)
+              VEREDICTO="OJO: este run YA HABIA ARRANCADO su job ($JOBS job(s)), asi que NO lo expulso la concurrency. Lo paro alguien a mano o se cayo el runner, y eso hay que mirarlo."
+              ;;
+          esac
+          echo "::notice title=Centinela::Run del centinela en 'cancelled' sin abrir Issue. $VEREDICTO $WF_URL"
+          {
+            echo "### Centinela cancelado — sin Issue a proposito"
+            echo "- run creado a las \`$WF_CREATED\`, jobs arrancados: \`${JOBS:-?}\`"
+            echo "- $VEREDICTO"
+            echo "- [ver el run]($WF_URL)"
+            echo "- Por que no abre Issue: el cron horario de live-sentinel.yml:39-40 expulsa al run pendiente mientras otro duerme (concurrency en live-sentinel.yml:55-59), y ese ruido amordazo la alarma del centinela de 19:18 a 21:15 la noche del UFC 330 (Issue #32)."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
   # EL RELEVO: cerrar el Issue cuando el workflow vuelve a verde.
@@ -217,5 +344,23 @@ jobs:
           fi
 
           STAMP=$(date -u +'%Y-%m-%d %H:%M UTC')
-          gh issue close "$NUM" --repo "$REPO" --reason completed --comment "$(printf '✅ **%s** — **%s** ha vuelto a terminar en `success`, así que este aviso se cierra solo.\n\n[Ver el run](%s)\n\n_Se cierra para que el PRÓXIMO fallo de este workflow vuelva a abrir un Issue nuevo y te llegue un email. Mientras un aviso sigue abierto, los fallos siguientes son comentarios mudos._\n\n_Si este Issue no debe cerrarse aunque su cron pase, ponle la etiqueta `no-cerrar-solo`._' "$STAMP" "$WF_NAME" "$WF_URL")"
-          echo "Issue #$NUM cerrado."
+          # SE COMPRUEBA SI EL CIERRE HA SALIDO BIEN (16-ago-2026, revision
+          # del arreglo del centinela). Aqui hay `set -uo pipefail` pero NO
+          # `set -e`: sin este `if`, un `gh issue close` que falla (un 5xx,
+          # rate limit, un token con permisos recortados) seguia de largo,
+          # imprimia "Issue #N cerrado." y el paso salia con 0. Y como este
+          # job lleva `continue-on-error: true`, el run entero se quedaba
+          # VERDE contando una mentira mientras el Issue seguia ABIERTO.
+          # Un Issue abierto de mas es precisamente la averia que este job
+          # existe para evitar: GitHub manda email al ABRIR, no al comentar,
+          # asi que el siguiente fallo de ESE workflow habria sido un
+          # comentario mudo. Es el fallo del Issue 16 (1-ago) y el del #32
+          # (15-ago) otra vez, escondido en la ultima linea del script.
+          # Se anota con `::error` para que se vea en la pagina del run; el
+          # `continue-on-error` del job impide que esto tumbe el canal.
+          if gh issue close "$NUM" --repo "$REPO" --reason completed --comment "$(printf '✅ **%s** — **%s** ha vuelto a terminar en `success`, así que este aviso se cierra solo.\n\n[Ver el run](%s)\n\n_Se cierra para que el PRÓXIMO fallo de este workflow vuelva a abrir un Issue nuevo y te llegue un email. Mientras un aviso sigue abierto, los fallos siguientes son comentarios mudos._\n\n_Si este Issue no debe cerrarse aunque su cron pase, ponle la etiqueta `no-cerrar-solo`._' "$STAMP" "$WF_NAME" "$WF_URL")"; then
+            echo "Issue #$NUM cerrado."
+          else
+            echo "::error title=Relevo::No se ha podido cerrar el Issue #$NUM de '$WF_NAME'. Sigue ABIERTO, y mientras lo este el proximo fallo de ese workflow sera un comentario sin email. Cierralo a mano."
+            exit 1
+          fi
