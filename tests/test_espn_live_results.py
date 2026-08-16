@@ -130,6 +130,13 @@ def _responder(sql, params=None):
         return [(5, "UFC 317: Topuria vs Oliveira")]
     if "FROM fights WHERE event_id" in flat:  # find_fight_id_by_fighters
         return [(11,)]
+    # last_in_progress_clock: el bucle SI vio la pelea en curso y guardo el mismo
+    # reloj que trae ahora el scoreboard, o sea la cuenta atras congelada. Sin
+    # esta rama el responder devolvia [] (sin serie) y desde el 16-ago-2026 eso
+    # significa "no escribo hora", con lo que este test dejaba de cubrir la
+    # inversion que precisamente vino a fijar.
+    if "FROM live_fight_stat_samples" in flat and "state = 'in'" in flat:
+        return [("2:27",)]
     if flat.startswith("UPDATE fights"):
         return [(1,)]  # rowcount 1 -> "updated"
     return []

@@ -235,8 +235,10 @@ def last_in_progress_clock(connection: PgConnection, fight_id: int) -> str | Non
     Lo usa `elapsed_end_time` para distinguir la cuenta atrás congelada del
     tiempo transcurrido: una cuenta atrás nunca sube dentro del asalto. Se pide
     solo al escribir el resultado (una vez por pelea), no en cada pasada.
-    Devuelve None si aún no hay serie — entonces se asume cuenta atrás, que es
-    lo que ESPN sirve mientras el combate está vivo.
+    Devuelve None si aún no hay serie — y entonces NO se escribe hora: sin serie
+    es que llegamos tarde, y ahí ESPN ya sirve el transcurrido oficial (medido
+    el 16-ago-2026 sobre las 12 finalizaciones del evento 1063). Adivinar salía
+    mal en las 12.
     """
     with connection.cursor() as cursor:
         cursor.execute(

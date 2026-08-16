@@ -154,17 +154,32 @@ def elapsed_end_time(
     NO se puede invertir a ciegas: en las decisiones ESPN sí manda el
     transcurrido ('5:00'), y por eso 4 de los 12 estaban bien.
 
-    EL DISCRIMINADOR ES LA IGUALDAD EXACTA con `previous_clock`, el último reloj
-    visto con la pelea EN CURSO. Cuando ESPN congela la cuenta atrás, el valor
-    de 'post' es EXACTAMENTE el mismo que el último de 'in' (12863: 2:17 → 2:17;
-    12865: 3:46 → 3:46; los doce combates del 1062 igual). Cuando publica el
-    tiempo oficial, difiere. Se probó antes con "menor o igual que el anterior"
-    y estaba mal: horas después del evento ESPN ya sirve el oficial, y un valor
-    pequeño y legítimo (la 12865 acabó en 1:12) se tomaba por cuenta atrás y se
-    invertía a 3:48. La igualdad no tiene ese fallo.
+    EL DISCRIMINADOR ES LA HIPÓTESIS MÁS CERCANA a `previous_clock`, el último
+    reloj visto con la pelea EN CURSO. El par (reloj de 'post', último de 'in')
+    admite dos lecturas y cada una deja un residuo: si ESPN ya sirviera el
+    transcurrido el desfase sería |seconds - (300 - previous)|, y si hubiera
+    congelado la cuenta atrás sería |seconds - previous|. Gana la pequeña.
 
-    Sin historial se asume cuenta atrás: es lo que ESPN sirve mientras el
-    combate está vivo, que es cuando se escribe el resultado.
+    Antes se exigía IGUALDAD EXACTA con `previous_clock`, y por ahí se coló el
+    UFC 330: la 15318 congeló 3:18 en las muestras 'in' y publicó 3:24 en la
+    primera 'post' — ESPN corrigiéndose a sí mismo 6 segundos. Esa deriva
+    bastaba para darlo por tiempo oficial, y se selló 3:24 habiendo sido 1:36
+    (108 s de error). No fue un accidente: la misma deriva, de 1 s, ya había
+    invertido la 13925, la 14231 y la 12845 en eventos anteriores. En las cuatro
+    lo tapó ufcstats al consolidar, no el código.
+
+    NO vale una tolerancia fija ("si difiere en menos de 10 s está congelado"):
+    rompe el patrón Steveson del 19-jul, donde el congelado (2:26) y el oficial
+    (2:31) se llevan 5 segundos y el bueno es el oficial. Comparar las dos
+    hipótesis ENTRE SÍ lo resuelve; compararlas contra un umbral inventado, no.
+
+    Se probó también con "menor o igual que el anterior" y estaba mal: horas
+    después del evento ESPN ya sirve el oficial, y un valor pequeño y legítimo
+    (la 12865 acabó en 1:12) se tomaba por cuenta atrás y se invertía a 3:48.
+
+    Sin historial NO se adivina: se devuelve None y lo rellena ufcstats. La
+    suposición contraria ("es cuenta atrás, que es lo que ESPN sirve en vivo")
+    se midió el 16-ago-2026 y falló 12 de 12. Ver el comentario de la rama.
 
     Es una APROXIMACIÓN de 1-2 segundos: el reloj se congela cuando ESPN
     registra el final, no cuando lo canta el árbitro. ufcstats la sustituye por
@@ -183,10 +198,45 @@ def elapsed_end_time(
         return None
 
     previous = _clock_seconds(previous_clock)
-    if previous is not None and seconds != previous:
-        # No está congelado: ESPN ya sirve el tiempo oficial transcurrido.
-        return _format_clock(seconds)
-    return _format_clock(ROUND_SECONDS - seconds)
+    if previous is not None:
+        # Las dos lecturas del mismo par de relojes, medidas contra el último
+        # 'in': `elapsed_gap` es el residuo si ESPN ya sirve el transcurrido y
+        # `frozen_gap` el residuo si congeló la cuenta atrás. Gana la pequeña.
+        elapsed_gap = abs(seconds - (ROUND_SECONDS - previous))
+        frozen_gap = abs(seconds - previous)
+        # El empate solo cambia la respuesta con previous == 2:30 exacto (si el
+        # empatado es `seconds`, las dos hipótesis dan el MISMO valor), y ahí
+        # son indistinguibles por construcción. Se resuelve hacia
+        # el transcurrido, que es además lo que hacía el código anterior. Es el
+        # lado barato: equivocarse ahí cuesta como mucho el doble de la deriva
+        # de ESPN (1-6 s medidos), mientras que caer del otro lado costaría el
+        # doble del intervalo de muestreo (~30 s, hasta 60 s de error).
+        if elapsed_gap <= frozen_gap:
+            # No está congelado: ESPN ya sirve el tiempo oficial transcurrido.
+            return _format_clock(seconds)
+        return _format_clock(ROUND_SECONDS - seconds)
+
+    # SIN HISTORIAL NO SE ADIVINA (16-ago-2026). Antes esta rama invertía a
+    # ciegas, "porque es lo que ESPN sirve mientras el combate está vivo". Se
+    # midió contra la base y es falso: las 12 finalizaciones del evento 1063 que
+    # pasaron por aquí (un único sondeo a las 19:43Z encontró el cartel entero
+    # terminado: 0 muestras 'in', 14 'post' en el mismo instante) tienen hoy un
+    # end_time que coincide con el reloj CRUDO en las 12 y con el invertido en
+    # NINGUNA. Los errores de la inversión iban de 16 s a 262 s.
+    #
+    # Y tiene sentido: si no hay serie es porque llegamos tarde, y para entonces
+    # ESPN ya sirve el transcurrido oficial, no la cuenta atrás. El caso que la
+    # rama vieja decía cubrir — en directo, sin historial y con el reloj
+    # congelado — no tiene NI UN ejemplo en toda la base.
+    #
+    # Aun así NO se devuelve el crudo, que es lo que acertaría en esos 12: no
+    # sabemos distinguir aquí "llegamos tarde" de "estamos en directo", y esa
+    # segunda rama es la que nadie ha medido nunca. Se devuelve None, lo rellena
+    # ufcstats unas horas después y end_time NULL es un estado ya soportado. Un
+    # hueco visible es mejor que un número que puede estar cuatro minutos
+    # equivocado y que alimenta segundos peleados, golpes por minuto y el radar,
+    # donde ya no hay forma de distinguirlo de un dato bueno.
+    return None
 
 
 def _format_clock(seconds: int) -> str:
