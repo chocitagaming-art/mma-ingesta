@@ -108,6 +108,19 @@ jobs:
         # pasado horas y el estado pudo cambiar. Ademas GitHub solo mantiene UN
         # run pendiente por grupo de concurrency: un dispatch de mas no se
         # encola, CANCELA el relevo. Paso el 11-jul.
+        #
+        # `.status != "completed"` Y NO `== "in_progress" or == "queued"`, que
+        # es lo que ponia hasta el 16-ago-2026 (mismo cambio, mismo dia, en
+        # live-watchdog.yml, donde esta el porque largo). En corto: el relevo
+        # que la concurrency deja esperando NO se reporta como 'queued' sino
+        # como 'pending', asi que el guard no lo veia. La noche del UFC 330 el
+        # watchdog 31909928211 imprimio "vivos: 1" habiendo DOS runs sin
+        # terminar — el relevo B (31908916644) estuvo 3h36 en 'pending' y era
+        # invisible para este jq. De los seis status posibles (queued,
+        # completed, in_progress, requested, waiting, pending) 'completed' es
+        # el UNICO terminal, asi que preguntar por lo terminal es lo unico que
+        # no deja fuera un estado. Los cancelled no cuelan como vivos: son
+        # status 'completed' con la palabra en `.conclusion`.
         id: guard
         if: steps.plan.outputs.hay_evento == 'true'
         env:
@@ -115,7 +128,7 @@ jobs:
         run: |
           VIVOS=$(gh run list -R "${{ github.repository }}" \
             -w live-event-loop.yml --limit 20 \
-            --json status --jq '[.[] | select(.status == "in_progress" or .status == "queued")] | length')
+            --json status --jq '[.[] | select(.status != "completed")] | length')
           echo "runs del bucle vivos: $VIVOS"
           echo "vivos=$VIVOS" >> "$GITHUB_OUTPUT"
           if [ "$VIVOS" != "0" ]; then

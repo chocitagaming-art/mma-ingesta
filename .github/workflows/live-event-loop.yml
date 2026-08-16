@@ -56,6 +56,17 @@ on:
         type: boolean
         default: false
 
+# HACEN FALTA PARA QUE EL PROPIO BUCLE PUEDA ABRIR SU AVISO (ver el ultimo paso
+# del job). El permiso por defecto del repo es `read` — comprobado el
+# 16-ago-2026 con `gh api repos/.../actions/permissions/workflow`, que devuelve
+# {"default_workflow_permissions":"read"} —, asi que sin este bloque el
+# `gh issue create` se estrella con un 403 y el aviso vuelve a ser mudo.
+# `contents: read` se declara EXPLICITAMENTE porque en cuanto se nombra un
+# permiso los demas pasan a "none", y este job hace `actions/checkout`.
+permissions:
+  contents: read
+  issues: write
+
 concurrency:
   group: live-event-loop
   cancel-in-progress: false
@@ -119,3 +130,131 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python -m src.scrapers.refresh_fighter_records --days 3
+
+      # -----------------------------------------------------------------------
+      # EL AVISO VIVE AQUI DENTRO, y no en notify-on-failure.yml.
+      # Anadido el 16-ago-2026, en la auditoria de la noche siguiente a UFC 330.
+      #
+      # POR QUE NO BASTABA CON notify-on-failure.yml. Ese fichero escucha
+      # `workflow_run`, y GitHub NO emite ese evento cuando el run lo lanzo un
+      # `workflow_dispatch` hecho con el GITHUB_TOKEN (actor
+      # `github-actions[bot]`): es el corta-recursion del token automatico. Este
+      # bucle SOLO se lanza asi, desde live-sentinel.yml:138-141 y
+      # live-watchdog.yml:94-95, de modo que su entrada en la lista de vigilados
+      # ("Live event loop (ESPN)", notify-on-failure.yml:45) era LETRA MUERTA
+      # desde el dia que se escribio. Escrita, leida y falsa.
+      #
+      # LAS PRUEBAS, medidas el 16-ago-2026:
+      #   - "Capture live ESPN samples (recon)" —hermano gemelo de este bucle, lo
+      #     dispara el mismo paso del mismo centinela— ha fallado DE VERDAD tres
+      #     veces: runs 31277648004 y 31277649060 (8-ago) y 31908917812 (16-ago,
+      #     "The hosted runner lost communication with the server", en plena
+      #     UFC 330). Cero Issues abiertos, cero runs de notify-on-failure.
+      #   - CONTRAPRUEBA: el canario alert-selftest.yml tambien es
+      #     `workflow_dispatch` puro, pero lo lanza una PERSONA. El run
+      #     30174577725 (25-jul, 20:55:59Z) abrio el Issue #13 a las 20:56:16Z:
+      #     17 segundos. La UNICA diferencia es quien dispara.
+      #   - Y el 16-ago a las 00:51:26Z este bucle termino en `success`; el run
+      #     de notify-on-failure de las 00:52:00Z no venia de aqui, venia de
+      #     "Keep-alive prediction service" (leido en su log). Ni siquiera los
+      #     exitos emiten el evento.
+      #
+      # MISMO TITULO Y MISMA ETIQUETA que notify-on-failure.yml:127, A PROPOSITO.
+      # Asi hay UN solo hilo por workflow: si algun dia alguien lanza el bucle a
+      # mano (actor humano => el evento SI se emite), el job `cerrar` de
+      # notify-on-failure:161 recoge este mismo Issue sin tocar nada. Un titulo
+      # propio habria creado un segundo convenio de avisos que nadie cierra.
+      #
+      # `always() && job.status != 'success'` Y NO `failure()`: 'failure' no es
+      # el unico final malo, y darlo por supuesto ya costo caro. El 11-jul-2026
+      # tres runs de ESTE bucle acabaron en `cancelled` (un dispatch de mas
+      # expulsa al relevo en cola) y no se entero nadie. Un `timed_out` a mitad
+      # del estelar es igual de grave. Ademas `always()` es lo unico que hace que
+      # el paso llegue a ejecutarse cuando el job se cancela o agota su
+      # `timeout-minutes`: un `if: failure()` seco se salta en esos dos casos.
+      #
+      # ULTIMO PASO A PROPOSITO, misma logica que live-watchdog.yml:109: la
+      # consolidacion y el refresco de records de arriba se intentan ANTES de
+      # avisar. Primero se salva lo que se pueda, luego se molesta al dueno.
+      - name: Avisar si el bucle no ha terminado bien
+        if: ${{ always() && job.status != 'success' }}
+        # NUNCA convierte un fallo en dos. Si el aviso no sale, se pierde el
+        # correo; si ademas tumbara el paso, ensuciaria el diagnostico del fallo
+        # de verdad, que es lo que hay que leer esa noche.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          # `github.workflow` rinde EXACTAMENTE el `name:` de arriba
+          # ("Live event loop (ESPN)"), que es la misma cadena que
+          # notify-on-failure saca de `github.event.workflow_run.name`. Si
+          # alguien cambia el `name:`, el titulo le sigue solo.
+          WF_NAME: ${{ github.workflow }}
+          WF_ESTADO: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          STAMP=$(date -u +'%Y-%m-%d %H:%M UTC')
+          TITULO="🔴 Cron fallando — $WF_NAME"
+          BODY=$(printf '⛔ **%s** — el workflow **%s** ha terminado en `%s`.\n\n[Ver el run](%s)\n\n_(Alerta automática. Revisa el run, arréglalo y cierra este Issue: mientras siga abierto, los siguientes fallos de ESTE workflow serán comentarios y no te llegará un email nuevo.)_' "$STAMP" "$WF_NAME" "${WF_ESTADO:-failure}" "$RUN_URL")
+          # jq externo y comparacion EXACTA por titulo, calcado de
+          # notify-on-failure.yml:133: `--search` hace busqueda difusa y casaria
+          # el hilo de OTRO workflow (el nombre lleva parentesis).
+          ISSUE=$(gh issue list --repo "$REPO" --label cron-failure --state open \
+            --limit 100 --json number,title \
+            | jq -r --arg t "$TITULO" '[.[] | select(.title == $t)] | .[0].number // empty')
+          if [ -n "$ISSUE" ]; then
+            gh issue comment "$ISSUE" --repo "$REPO" --body "$BODY"
+          else
+            gh label create cron-failure --repo "$REPO" --color D73A4A --description "Un cron de datos ha fallado" --force
+            gh issue create --repo "$REPO" --title "$TITULO" --label cron-failure --body "$BODY"
+          fi
+
+      # EL RELEVO, TAMBIEN AQUI DENTRO, y por el mismo motivo que el aviso.
+      #
+      # El job `cerrar` de notify-on-failure.yml:161 NO puede cerrar este Issue:
+      # se dispara con el mismo `workflow_run` que tampoco llega hasta aqui.
+      # Sin este paso, el primer fallo dejaria un Issue abierto PARA SIEMPRE y el
+      # siguiente fallo seria un comentario mudo — que es literalmente la averia
+      # del Issue 16 (1-ago-2026): GitHub manda correo al ABRIR, no al comentar.
+      # Abrir avisos sin cerrarlos es peor que no avisar, porque parece que
+      # funciona.
+      #
+      # Respeta `no-cerrar-solo` igual que notify-on-failure.yml:198, para que
+      # los dos cierres se comporten IGUAL y no haya que recordar cual es cual.
+      #
+      # SOBRE EL RELEVO A+B: el centinela lanza dos runs, A en curso y B en cola.
+      # Si A muere y B arranca despues y va bien, B cerrara el Issue que abrio A.
+      # Es lo correcto y esta pensado: el correo ya se mando al abrirlo, el dueno
+      # ya se entero, y dejarlo abierto amordazaria el aviso de la semana que
+      # viene. Si un aviso concreto no debe cerrarse, se le pone la etiqueta.
+      - name: Cerrar el aviso si el bucle ha ido bien
+        if: ${{ success() }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          WF_NAME: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          TITULO="🔴 Cron fallando — $WF_NAME"
+          ISSUE=$(gh issue list --repo "$REPO" --label cron-failure --state open \
+            --limit 100 --json number,title,labels \
+            | jq -r --arg t "$TITULO" '[.[] | select(.title == $t)] | .[0] | select(.) | @json')
+
+          if [ -z "$ISSUE" ]; then
+            echo "No hay Issue abierto para '$WF_NAME'. Nada que cerrar."
+            exit 0
+          fi
+
+          NUM=$(echo "$ISSUE" | jq -r '.number')
+
+          if echo "$ISSUE" | jq -e '.labels[]? | select(.name == "no-cerrar-solo")' >/dev/null; then
+            echo "::notice title=Relevo::El Issue #$NUM lleva 'no-cerrar-solo'. Se deja abierto a proposito."
+            exit 0
+          fi
+
+          STAMP=$(date -u +'%Y-%m-%d %H:%M UTC')
+          gh issue close "$NUM" --repo "$REPO" --reason completed --comment "$(printf '✅ **%s** — **%s** ha vuelto a terminar en `success`, así que este aviso se cierra solo.\n\n[Ver el run](%s)\n\n_Se cierra para que el PRÓXIMO fallo de este workflow vuelva a abrir un Issue nuevo y te llegue un email. Mientras un aviso sigue abierto, los fallos siguientes son comentarios mudos._\n\n_Si este Issue no debe cerrarse aunque su cron pase, ponle la etiqueta `no-cerrar-solo`._' "$STAMP" "$WF_NAME" "$RUN_URL")"
+          echo "Issue #$NUM cerrado."

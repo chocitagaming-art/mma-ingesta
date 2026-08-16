@@ -31,6 +31,17 @@ on:
         required: false
         default: ""
 
+# Para que la propia captura pueda abrir su aviso (ver los dos ultimos pasos).
+# El permiso por defecto del repo es `read` (comprobado el 16-ago-2026 con
+# `gh api repos/.../actions/permissions/workflow`), asi que sin este bloque el
+# `gh issue create` responde 403. `contents: read` explicito porque al nombrar un
+# permiso los demas pasan a "none", y este job hace `actions/checkout`.
+# `upload-artifact` no necesita nada de aqui: usa el token de runtime, no el
+# GITHUB_TOKEN.
+permissions:
+  contents: read
+  issues: write
+
 concurrency:
   group: capture-live-samples
   cancel-in-progress: false
@@ -68,3 +79,131 @@ jobs:
           path: samples/
           retention-days: 7
           if-no-files-found: warn
+
+      # -----------------------------------------------------------------------
+      # EL AVISO VIVE AQUI DENTRO. Anadido el 16-ago-2026.
+      #
+      # ESTE FICHERO ES LA PRUEBA DEL AGUJERO, no una precaucion teorica. Ha
+      # fallado DE VERDAD tres veces —runs 31277648004 y 31277649060 (8-ago) y
+      # 31908917812 (16-ago, "The hosted runner lost communication with the
+      # server", en plena UFC 330)— y no abrio ni un Issue ni genero ni un run de
+      # notify-on-failure, pese a estar en su lista de vigilados desde el
+      # 1-ago (notify-on-failure.yml:69).
+      #
+      # EL MOTIVO: `workflow_run` no se emite cuando el run lo lanzo un
+      # `workflow_dispatch` hecho con el GITHUB_TOKEN (actor
+      # `github-actions[bot]`), y esta captura SOLO se lanza asi, desde
+      # live-sentinel.yml:145-148 y live-watchdog.yml:96-97. Contraprueba: el
+      # canario alert-selftest.yml es tambien `workflow_dispatch` puro pero lo
+      # lanza una persona, y su run 30174577725 abrio el Issue #13 en 17
+      # segundos.
+      #
+      # Y DUELE MAS QUE EN EL BUCLE: live-watchdog.yml vigila el DATO, asi que se
+      # entera si el bucle deja de escribir. Esta captura es READ-ONLY (sin
+      # DATABASE_URL, solo artifacts), asi que el watchdog no puede verla morir
+      # NUNCA. Sin este paso, el "unico plan B real" del directo
+      # (live-sentinel.yml:143) se cae en silencio absoluto.
+      #
+      # VA DESPUES DEL `upload-artifact`, a proposito: primero se salva lo poco
+      # que se haya capturado, luego se avisa.
+      #
+      # Mismo titulo y misma etiqueta que notify-on-failure.yml:127 para que
+      # haya UN solo hilo por workflow, y `always() && job.status != 'success'`
+      # en vez de `failure()` para cazar tambien `cancelled` y `timed_out`.
+      - name: Avisar si la captura no ha terminado bien
+        if: ${{ always() && job.status != 'success' }}
+        # Un fallo del aviso no puede convertir un fallo en dos.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          WF_NAME: ${{ github.workflow }}
+          WF_ESTADO: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          STAMP=$(date -u +'%Y-%m-%d %H:%M UTC')
+          TITULO="🔴 Cron fallando — $WF_NAME"
+          BODY=$(printf '⛔ **%s** — el workflow **%s** ha terminado en `%s`.\n\n[Ver el run](%s)\n\n_(Alerta automática. Revisa el run, arréglalo y cierra este Issue: mientras siga abierto, los siguientes fallos de ESTE workflow serán comentarios y no te llegará un email nuevo.)_' "$STAMP" "$WF_NAME" "${WF_ESTADO:-failure}" "$RUN_URL")
+          ISSUE=$(gh issue list --repo "$REPO" --label cron-failure --state open \
+            --limit 100 --json number,title \
+            | jq -r --arg t "$TITULO" '[.[] | select(.title == $t)] | .[0].number // empty')
+          if [ -n "$ISSUE" ]; then
+            gh issue comment "$ISSUE" --repo "$REPO" --body "$BODY"
+          else
+            gh label create cron-failure --repo "$REPO" --color D73A4A --description "Un cron de datos ha fallado" --force
+            gh issue create --repo "$REPO" --title "$TITULO" --label cron-failure --body "$BODY"
+          fi
+
+      # EL RELEVO. El job `cerrar` de notify-on-failure.yml:161 tampoco llega
+      # hasta aqui (mismo evento ausente), asi que si este fichero abre el aviso,
+      # este fichero tiene que cerrarlo. Un Issue abierto y olvidado degrada el
+      # aviso siguiente a comentario mudo: la averia del Issue 16 (1-ago-2026).
+      # Respeta `no-cerrar-solo` igual que notify-on-failure.yml:198.
+      #
+      # PERO UN VERDE NO ES SIEMPRE UN EXITO, y en ESTE workflow eso no es
+      # teoria: esta MEDIDO. `scripts/capture_live_samples.py:144` hace
+      # `dates = args.dates or datetime.now(timezone.utc)`, y el centinela
+      # dispara siempre la captura con `dates=""` (live-sentinel.yml:158-161).
+      # La captura B nace a la vez que la A pero ARRANCA cuando la A muere, o
+      # sea despues de medianoche UTC, y entonces pide el scoreboard del dia
+      # SIGUIENTE. La noche del UFC 330 quedo por escrito en el log del run
+      # 31908919300: arranco a las 00:41:22Z, pidio `dates=20260816` (el card
+      # era el 20260815), imprimio {"skipped": "no events today"} y salio VERDE
+      # a las 00:41:38Z. Dieciseis segundos sin capturar un solo fichero.
+      #
+      # Y esa misma noche la captura A (run 31908917812) habia fallado a las
+      # 21:15. Sin este guard, el aviso que abre la A lo cerraria la B con un
+      # "ha vuelto a terminar en success" que es falso: el dueno se levanta el
+      # domingo, ve el Issue cerrado solo, y da por bueno que el plan B grabo la
+      # velada cuando no grabo nada. Un aviso que se borra a si mismo es peor
+      # que no avisar.
+      #
+      # Por eso el cierre exige PRUEBA MATERIAL: al menos un fichero en
+      # `samples/`, que es lo mismo que sube el artifact de arriba. Si no hay
+      # ficheros, el Issue se queda abierto y el dueno lo cierra a mano cuando
+      # haya mirado. En la duda, no apagar la alarma.
+      # (El arreglo de fondo —que `--dates` caiga en la fecha US Eastern, como
+      # hace el bucle con `default_dates_window()`— vive en el script y NO se
+      # toca a seis dias de la velada.)
+      - name: Cerrar el aviso si la captura ha ido bien
+        if: ${{ success() }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          WF_NAME: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+
+          FICHEROS=0
+          if [ -d samples ]; then
+            FICHEROS=$(find samples -type f | wc -l)
+          fi
+          if [ "$FICHEROS" -eq 0 ]; then
+            echo "::warning title=Relevo::Run verde pero SIN muestras capturadas (0 ficheros en samples/). NO se cierra ningun aviso: un verde vacio no prueba que el plan B funcione."
+            exit 0
+          fi
+          echo "$FICHEROS fichero(s) capturado(s): el verde es de verdad."
+
+          TITULO="🔴 Cron fallando — $WF_NAME"
+          ISSUE=$(gh issue list --repo "$REPO" --label cron-failure --state open \
+            --limit 100 --json number,title,labels \
+            | jq -r --arg t "$TITULO" '[.[] | select(.title == $t)] | .[0] | select(.) | @json')
+
+          if [ -z "$ISSUE" ]; then
+            echo "No hay Issue abierto para '$WF_NAME'. Nada que cerrar."
+            exit 0
+          fi
+
+          NUM=$(echo "$ISSUE" | jq -r '.number')
+
+          if echo "$ISSUE" | jq -e '.labels[]? | select(.name == "no-cerrar-solo")' >/dev/null; then
+            echo "::notice title=Relevo::El Issue #$NUM lleva 'no-cerrar-solo'. Se deja abierto a proposito."
+            exit 0
+          fi
+
+          STAMP=$(date -u +'%Y-%m-%d %H:%M UTC')
+          gh issue close "$NUM" --repo "$REPO" --reason completed --comment "$(printf '✅ **%s** — **%s** ha vuelto a terminar en `success`, así que este aviso se cierra solo.\n\n[Ver el run](%s)\n\n_Se cierra para que el PRÓXIMO fallo de este workflow vuelva a abrir un Issue nuevo y te llegue un email. Mientras un aviso sigue abierto, los fallos siguientes son comentarios mudos._\n\n_Si este Issue no debe cerrarse aunque su cron pase, ponle la etiqueta `no-cerrar-solo`._' "$STAMP" "$WF_NAME" "$RUN_URL")"
+          echo "Issue #$NUM cerrado."

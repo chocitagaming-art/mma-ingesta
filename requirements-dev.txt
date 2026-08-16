@@ -5,6 +5,15 @@ ruff==0.14.0
 # Required by Starlette/FastAPI TestClient (prediction-service tests); declared
 # explicitly so CI doesn't rely on it arriving transitively via anthropic.
 httpx==0.28.1
+# Lo usa tests/test_workflow_guards.py, que lee los `.github/workflows/*.yml`
+# para comprobar los guards anti-duplicado del directo. MISMO MOTIVO que httpx:
+# hoy llega de rebote por el extra `standard` de `uvicorn[standard]`
+# (requirements-service.txt), y de nada mas -- `pip show pyyaml` da
+# "Required-by:" VACIO. El dia que uvicorn suelte ese extra, o que alguien
+# adelgace requirements-service.txt, `import yaml` revienta en la RECOLECCION de
+# pytest y se cae la suite ENTERA (836 tests), no solo ese fichero: el CI se
+# queda sin red justo donde vive la logica de la noche de velada.
+pyyaml
 # Cobertura bajo demanda (NO en el CI: un umbral arbitrario da falsa seguridad y
 # ralentiza cada push). Uso: pytest tests/ --cov=src --cov-report=term
 pytest-cov

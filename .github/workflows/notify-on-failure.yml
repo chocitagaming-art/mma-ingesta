@@ -42,6 +42,16 @@ on:
       # noche perdida no se recupera (el siguiente evento puede ser semanas
       # después). "Monitor web" NO va aquí: se autogestiona con su propio Issue
       # de etiqueta 'monitor', que además cierra solo al recuperarse.
+      #
+      # ⚠️ ESTA ENTRADA NO SIRVE DE NADA, y conviene saberlo antes de confiar en
+      # ella (medido el 16-ago-2026, auditoría post-UFC 330). GitHub NO emite
+      # `workflow_run` cuando el run lo lanzó un `workflow_dispatch` hecho con el
+      # GITHUB_TOKEN, y el bucle SOLO se lanza así, desde live-sentinel.yml y
+      # live-watchdog.yml. Se deja escrita a propósito, no es un descuido: el día
+      # que alguien lo lance a mano (actor humano) o le devuelva un cron, la
+      # entrada empieza a valer sola. El aviso de verdad lo da ahora un paso
+      # `if: always() && job.status != 'success'` DENTRO de live-event-loop.yml,
+      # que usa este mismo título para que el job `cerrar` de abajo lo recoja.
       - "Live event loop (ESPN)"
       - "Live results (ESPN)"
       - "QA data coverage"
@@ -66,6 +76,15 @@ on:
       # run sale en rojo y no lo lee nadie hasta el lunes.
       - "Live sentinel (arranca el directo solo)"
       # El plan B de la pelicula del combate.
+      #
+      # ⚠️ MISMO CASO QUE "Live event loop (ESPN)": letra muerta, y aqui esta
+      # DEMOSTRADO con fallos reales. Esta captura fallo tres veces (runs
+      # 31277648004 y 31277649060 el 8-ago, y 31908917812 el 16-ago con "The
+      # hosted runner lost communication with the server") y no se abrio ni un
+      # Issue ni corrio ni un run de este workflow. Se lanza siempre por
+      # `workflow_dispatch` con el GITHUB_TOKEN desde el centinela y el
+      # watchdog, y ese dispatch no emite `workflow_run`. El aviso lo da ahora
+      # un paso dentro de capture-live-samples.yml.
       - "Capture live ESPN samples (recon)"
       # El que se entera de que la velada se esta perdiendo AHORA. Falla en rojo
       # A PROPOSITO cuando rescata, para que el fallo no vuelva a ser invisible.
@@ -73,9 +92,6 @@ on:
       # El que lee el panel de estado y falla en rojo cuando algo esta roto. Sin
       # vigilarlo, el unico que avisa seria el unico del que nadie se entera.
       - "Guardian del estado"
-      # El bucle: un 'timed_out' suyo a mitad del estelar es justo lo que hay
-      # que cazar, y hasta hoy no estaba en la lista.
-      - "Live event loop (ESPN)"
     types: [completed]
 
 permissions:

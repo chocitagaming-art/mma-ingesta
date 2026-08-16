@@ -30,6 +30,17 @@ on:
         description: "Diagnostica y enseña el plan, pero NO relanza nada"
         type: boolean
         default: false
+      simular_estado:
+        # SOLO SE OBEDECE CON dry_run=true (ver el paso `wd`). Sin esto un
+        # ensayo no prueba NADA de lo que importa: los guards y el rescate
+        # cuelgan de `estado == 'CAIDO'`, y fuera de la noche de velada el
+        # script devuelve SIN_VELADA, asi que todos los pasos se saltan y el
+        # run sale verde en 40 s sin haber ejecutado ni una vez el
+        # `gh run list`. Con esto, un martes cualquiera se recorre la rama
+        # entera — que es la unica prueba real que hay, porque el `if:` de un
+        # job `workflow_run` no se puede ensayar sin fusionar a main.
+        description: "SOLO con dry_run: finge el estado (CAIDO/OK/TERMINADA/SIN_VELADA)"
+        default: ""
 
 permissions:
   actions: write
@@ -60,10 +71,28 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           PYTHONUTF8: "1"
+          SIMULAR: ${{ inputs.simular_estado }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           DIAG=$(python -m scripts.live_watchdog --json)
           echo "$DIAG"
-          echo "estado=$(echo "$DIAG" | jq -r '.estado')" >> "$GITHUB_OUTPUT"
+          ESTADO=$(echo "$DIAG" | jq -r '.estado')
+
+          # El estado fingido SOLO vale en ensayo. Si alguien lanza
+          # simular_estado=CAIDO con dry_run=false, se ignora y manda el dato
+          # real: este workflow dispara runners, y un ensayo no puede
+          # convertirse en un rescate de verdad por un despiste al rellenar el
+          # formulario. Se lee por `env:` y no interpolado en el shell para que
+          # el valor del formulario no pueda ejecutar nada.
+          SIMULADO=false
+          if [ -n "$SIMULAR" ] && [ "$DRY_RUN" = "true" ]; then
+            echo "::notice title=Watchdog::ENSAYO — estado real $ESTADO sustituido por $SIMULAR"
+            ESTADO="$SIMULAR"
+            SIMULADO=true
+          fi
+
+          echo "estado=$ESTADO" >> "$GITHUB_OUTPUT"
+          echo "simulado=$SIMULADO" >> "$GITHUB_OUTPUT"
           echo "$DIAG" | jq -r '.veladas[] | "- **\(.nombre)** (id \(.event_id)): `\(.estado)` — \(.muestras_recientes) muestras en 45 min, \(.combates_resueltos)/\(.combates_activos) resueltos"' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Ya hay un bucle corriendo?
@@ -72,46 +101,203 @@ jobs:
         # dispatch de mas no se encola — CANCELA el relevo que esperaba. Es
         # exactamente el fallo del 11-jul-2026, y aqui el riesgo es mayor
         # porque el watchdog corre cada hora DURANTE la velada.
+        #
+        # `.status != "completed"` Y NO `== "in_progress" or == "queued"`, que
+        # es lo que ponia hasta el 16-ago-2026. El relevo que la concurrency
+        # deja esperando NO se reporta como 'queued': GitHub lo reporta como
+        # 'pending'. Los seis valores posibles son queued, completed,
+        # in_progress, requested, waiting y pending, y 'completed' es el UNICO
+        # terminal — asi que preguntar por lo terminal es lo unico que no se
+        # deja fuera un estado nuevo.
+        # PRUEBA, la noche del UFC 330: el run 31909928211 imprimio a las
+        # 21:37:19Z "runs del bucle vivos: 1" habiendo DOS runs sin terminar —
+        # A=31908915442 en curso y B=31908916644, que estuvo 3h36 en 'pending'
+        # (creado 21:15:06Z, arranco 00:51:28Z). Se salvo por contar 1 y no 0.
+        # Si el watchdog llega cuando A ya ha muerto y B sigue pendiente,
+        # cuenta cero, rescata, y ese disparo de mas EXPULSA a B: el 11-jul
+        # otra vez, con la velada ya empezada.
+        # Los cancelled/skipped no cuelan como vivos: llevan status
+        # 'completed' y la palabra en `.conclusion` (comprobado con los tres
+        # runs cancelados del 11-jul: 29168815058, 29168817072, 29166590537).
+        #
+        # SIN filtro de antiguedad (`--created`) A PROPOSITO, y esto es
+        # deliberado, no un olvido: la EDAD de un run vivo es cola + ejecucion,
+        # no solo ejecucion. El bucle B nacio a las 21:15:06Z y no termino
+        # hasta las 04:47:58Z: 7h32 de edad estando perfectamente vivo. Un
+        # `--created '>=6 hours ago'` lo habria borrado de la lista desde las
+        # 03:15Z — o sea que los watchdogs de 03:20 y 04:20 habrian contado
+        # cero y disparado un rescate con B corriendo. Seria reintroducir por
+        # la puerta de atras justo la ceguera que este guard viene a quitar.
+        # Y no protege de nada a cambio: un run solo esta 'pending' mientras el
+        # grupo de concurrency lo ocupa otro, y ese otro muere si o si por el
+        # `timeout-minutes: 300` de live-event-loop.yml. Nada se queda
+        # encolado para siempre; quien mata a un run atascado es su timeout, no
+        # este filtro.
+        #
+        # --limit 20 basta: live-event-loop.yml lleva 18 runs en toda su vida y
+        # `gh run list` va de mas nuevo a mas viejo, asi que para perder de
+        # vista un run sin terminar harian falta 20 dispatches mas nuevos la
+        # misma noche. El centinela hace 2 y el watchdog 1 por hora como mucho.
         id: guard
-        if: steps.wd.outputs.estado == 'CAIDO'
+        # `|| dry_run` para que un ENSAYO ejecute el recuento de verdad y se
+        # vea que el jq compila y que el token puede listar. Es un `gh run
+        # list` de solo lectura: no dispara nada y cuesta una llamada. Por cron
+        # no cambia nada, porque en un evento `schedule` el contexto `inputs`
+        # viene vacio y `null == true` es falso.
+        if: steps.wd.outputs.estado == 'CAIDO' || inputs.dry_run == true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VIVOS=$(gh run list -R "${{ github.repository }}" \
             -w live-event-loop.yml --limit 20 \
-            --json status --jq '[.[] | select(.status == "in_progress" or .status == "queued")] | length')
+            --json status --jq '[.[] | select(.status != "completed")] | length')
           echo "runs del bucle vivos: $VIVOS"
           echo "vivos=$VIVOS" >> "$GITHUB_OUTPUT"
 
-      - name: Rescatar el directo
+      - name: Ya hay una captura corriendo?
+        # EL RESCATE TAMBIEN DISPARA LA CAPTURA, asi que tambien tiene que
+        # mirar antes. Hasta el 16-ago-2026 no lo hacia: comprobaba los bucles
+        # y disparaba las dos cosas a ciegas. Y `capture-live-samples.yml`
+        # tiene su PROPIO grupo de concurrency (lineas 34-36 de ese fichero,
+        # `cancel-in-progress: false`), con la misma regla del unico pendiente.
+        # El centinela deja siempre captura A en curso + captura B en cola
+        # (live-sentinel.yml:145-148), asi que el disparo extra del rescate
+        # EXPULSA a la B. La noche del UFC 330 esas dos eran A=31908917812 y
+        # B=31908919300, que estuvo 3h26 en 'pending' (creada 21:15:10Z,
+        # arranco 00:41:22Z).
+        # Duele mas que con el bucle: la captura cruda es el unico plan B real.
+        # Si el bucle falla y ella tampoco esta, la serie de la velada se
+        # pierde para siempre y no hay de donde reconstruirla.
+        #
+        # Mismo jq y mismo --limit que el guard del bucle, por los mismos
+        # motivos (capture-live-samples.yml lleva 10 runs en total).
+        id: guard_cap
+        if: steps.wd.outputs.estado == 'CAIDO' || inputs.dry_run == true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VIVAS=$(gh run list -R "${{ github.repository }}" \
+            -w capture-live-samples.yml --limit 20 \
+            --json status --jq '[.[] | select(.status != "completed")] | length')
+          echo "capturas vivas: $VIVAS"
+          echo "vivas=$VIVAS" >> "$GITHUB_OUTPUT"
+
+      - name: Rescatar el bucle
+        # DOS PASOS SEPARADOS PARA BUCLE Y CAPTURA, no un paso con dos `if` de
+        # shell dentro. Cada uno cuelga de un recuento distinto, y ademas:
+        #  - el resumen no puede mentir, porque la linea de "relanzado" vive
+        #    dentro del mismo `run` que hace el dispatch. Antes del 16-ago un
+        #    unico paso escribia "bucle + captura relanzados" pasara lo que
+        #    pasara; ese descuadre es justo el bug que se arregla aqui;
+        #  - a las 3 de la manana se lee desde el movil sin abrir un log: la
+        #    pagina del run pinta "Rescatar el bucle: verde" y "Rescatar la
+        #    captura: skipped".
+        #
         # 120 min: lo que queda de una velada tipica cuando se detecta el hueco.
         # No se calcula fino a proposito — si el bucle se queda corto, el
         # watchdog vuelve a mirar dentro de una hora y lo relanza otra vez.
-        if: steps.wd.outputs.estado == 'CAIDO' && steps.guard.outputs.vivos == '0' && inputs.dry_run != true
+        #
+        # `!cancelled()` en vez del `success()` implicito: el guard de la
+        # captura es nuevo, y sin esto un fallo suyo (un 500 de la API de
+        # Actions) dejaria este paso en skipped y la velada sin rescate — una
+        # regresion contra el fichero de antes, donde ningun guard de la
+        # captura podia estropear el rescate del bucle. No abre la puerta a un
+        # disparo de mas: `vivos == '0'` sigue mandando, y si el guard del
+        # bucle se salta o revienta su output es cadena vacia, o sea distinta
+        # de '0', o sea que NO se dispara nada. En la duda, no disparar.
+        if: ${{ !cancelled() && steps.wd.outputs.estado == 'CAIDO' && steps.guard.outputs.vivos == '0' && inputs.dry_run != true }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh workflow run live-event-loop.yml -R "${{ github.repository }}" \
             -f duration_minutes=120 -f interval_seconds=20 -f dates=""
-          gh workflow run capture-live-samples.yml -R "${{ github.repository }}" \
-            -f duration_minutes=120 -f interval_seconds=120 -f dates=""
-          echo "::warning title=Watchdog::Velada en marcha SIN dato entrando. Bucle relanzado."
+          echo "::warning title=Watchdog::Velada en marcha SIN dato entrando. Bucle relanzado 120 min."
           {
-            echo "### Rescate lanzado"
-            echo "- El directo estaba caido: bucle + captura relanzados 120 min."
+            echo "### Rescate — bucle relanzado"
+            echo "- 120 min cada 20 s. No quedaba ningun run del bucle sin terminar."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: No se relanza (ya habia un bucle vivo)
-        if: steps.wd.outputs.estado == 'CAIDO' && steps.guard.outputs.vivos != '0'
+      - name: Rescatar la captura cruda (plan B)
+        # `!cancelled()` tambien aqui, y por el motivo mas fuerte de los dos:
+        # si el dispatch del bucle de arriba falla, la captura cruda es MAS
+        # necesaria, no menos. Con el `success()` implicito de Actions ese
+        # fallo se llevaria por delante el unico plan B que hay.
+        # Ojo con la sintaxis: un `if:` que empieza por `!` hay que envolverlo
+        # en `${{ }}` o YAML lo lee como etiqueta.
+        if: ${{ !cancelled() && steps.wd.outputs.estado == 'CAIDO' && steps.guard_cap.outputs.vivas == '0' && inputs.dry_run != true }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "::warning title=Watchdog::Sin muestras, pero ya hay ${{ steps.guard.outputs.vivos }} run(s) del bucle vivos. NO se dispara nada."
+          gh workflow run capture-live-samples.yml -R "${{ github.repository }}" \
+            -f duration_minutes=120 -f interval_seconds=120 -f dates=""
+          echo "::warning title=Watchdog::Captura cruda relanzada 120 min."
+          {
+            echo "### Rescate — captura cruda relanzada"
+            echo "- 120 min cada 120 s. No quedaba ninguna captura sin terminar."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Que NO se ha relanzado, y por que
+        # El resumen tiene que poder decir "no he hecho nada", y decir de CUAL
+        # de los dos. El paso de antes solo hablaba del bucle, asi que despues
+        # de partir el rescate se habria quedado mintiendo a medias.
+        # `!= '0'` es tambien cierto cuando el guard se salto (output vacio),
+        # por eso hace falta el `estado == 'CAIDO'` delante: sin el, este paso
+        # gritaria en cada run tranquilo sin velada.
+        if: steps.wd.outputs.estado == 'CAIDO' && (steps.guard.outputs.vivos != '0' || steps.guard_cap.outputs.vivas != '0')
+        env:
+          VIVOS: ${{ steps.guard.outputs.vivos }}
+          VIVAS: ${{ steps.guard_cap.outputs.vivas }}
+        run: |
+          echo "### Rescate — lo que NO se ha relanzado" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$VIVOS" != "0" ]; then
+            echo "::warning title=Watchdog::Sin muestras, pero ya hay $VIVOS run(s) del bucle sin terminar. NO se dispara el bucle."
+            echo "- bucle NO relanzado: $VIVOS run(s) sin terminar (en curso o esperando en la cola)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ "$VIVAS" != "0" ]; then
+            echo "::warning title=Watchdog::Ya hay $VIVAS captura(s) sin terminar. NO se dispara la captura."
+            echo "- captura NO relanzada: $VIVAS run(s) sin terminar (en curso o esperando en la cola)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Ensayo — que habria hecho
+        # Lo unico que se veia en un ensayo antes del 16-ago era el JSON del
+        # diagnostico: ni un recuento, ni una decision. Con esto, un
+        # `dry_run=true` + `simular_estado=CAIDO` un martes cualquiera recorre
+        # la rama entera e imprime los dos recuentos REALES y las dos
+        # decisiones. Es lo mas cerca del directo que se puede llegar sin
+        # velada.
+        if: inputs.dry_run == true
+        env:
+          ESTADO: ${{ steps.wd.outputs.estado }}
+          SIMULADO: ${{ steps.wd.outputs.simulado }}
+          VIVOS: ${{ steps.guard.outputs.vivos }}
+          VIVAS: ${{ steps.guard_cap.outputs.vivas }}
+        run: |
+          echo "ENSAYO — no se ha disparado nada."
+          echo "  estado          : $ESTADO (fingido: $SIMULADO)"
+          echo "  bucles vivos    : $VIVOS"
+          echo "  capturas vivas  : $VIVAS"
+          if [ "$ESTADO" = "CAIDO" ] && [ "$VIVOS" = "0" ]; then
+            echo "  -> habria relanzado el BUCLE 120 min"
+          else
+            echo "  -> NO habria relanzado el bucle"
+          fi
+          if [ "$ESTADO" = "CAIDO" ] && [ "$VIVAS" = "0" ]; then
+            echo "  -> habria relanzado la CAPTURA 120 min"
+          else
+            echo "  -> NO habria relanzado la captura"
+          fi
 
       - name: Falla en rojo si la velada se esta perdiendo
         # ULTIMO PASO A PROPOSITO: el rescate ya se ha lanzado antes de fallar.
         # Falla en rojo para que `notify-on-failure` mande el email — el dueno
         # tiene que enterarse de que su directo se cayo AUNQUE se haya
         # rescatado solo, o el fallo se vuelve invisible otra vez.
-        if: steps.wd.outputs.estado == 'CAIDO'
+        #
+        # Un CAIDO FINGIDO no manda email: seria un simulacro indistinguible de
+        # una alarma real a las 3 de la manana. Un CAIDO de verdad si lo manda
+        # aunque el run se haya lanzado como ensayo — el `simulado` solo tapa
+        # el simulacro, nunca la alarma real.
+        if: steps.wd.outputs.estado == 'CAIDO' && steps.wd.outputs.simulado != 'true'
         run: |
           echo "Velada en marcha sin muestras en los ultimos 45 min."
           exit 1
