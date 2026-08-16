@@ -7,8 +7,10 @@ Este script NO toca la base de datos ni comparte nada con live-results: solo
 hace GETs y guarda los JSON tal cual, con timestamp, para analizarlos en frío.
 
 Qué guarda en cada pasada (poll):
-  - El scoreboard del día (la misma URL que usa espn_live_results).
-  - El "fightcenter" de cada evento del día (la vista que usa espn.com).
+  - El scoreboard de la ventana (la misma URL y la misma ventana de fechas
+    que usa espn_live_results: ayer+hoy en US Eastern).
+  - El "fightcenter" de CADA evento que traiga esa respuesta (la vista que
+    usa espn.com). Si la ventana pilla dos veladas, se guardan las dos.
   - Para la pelea EN CURSO (state == 'in'): status, situation y las
     statistics de ambos atletas vía la core API (el gran interrogante:
     ¿se rellenan en vivo o solo al acabar?).
@@ -32,6 +34,7 @@ from pathlib import Path
 import requests
 
 from src.scrapers.espn import build_espn_session
+from src.scrapers.espn_live_results import default_dates_window
 
 SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard"
 FIGHTCENTER_URL = "https://site.web.api.espn.com/apis/common/v3/sports/mma/ufc/fightcenter/{event_id}"
@@ -86,7 +89,20 @@ def _save(out_dir: Path, label: str, payload: dict, counts: Counter) -> None:
 
 
 def poll_once(session: requests.Session, out_dir: Path, dates: str, counts: Counter) -> int:
-    """Una pasada completa. Devuelve el nº de eventos con competiciones hoy."""
+    """Una pasada completa. Devuelve el nº de eventos con competiciones en `dates`.
+
+    `dates` puede ser un día suelto (`YYYYMMDD`) o una VENTANA de dos
+    (`YYYYMMDD-YYYYMMDD`), que es lo que manda `main` por defecto. Con ventana
+    la respuesta puede traer DOS veladas (un DWCS del martes y el UFC del
+    sábado, p. ej.): se guardan LAS DOS y no se pisan. Cada payload lleva su id
+    en la etiqueta —`fightcenter-{event_id}`, `comp-{comp_id}-...`— y `_save`
+    nombra el fichero `{timestamp}-{etiqueta}.json`, así que dos eventos dan dos
+    juegos de ficheros disjuntos. El evento YA TERMINADO cuesta 1 GET y ~150 KB
+    por pasada y nada más: no entra en el bucle caro de abajo, que exige
+    `state == "in"`. Y quien reproduce la captura después ya recorre todos los
+    eventos de cada scoreboard (`backfill_live_samples_from_capture`), así que
+    el evento de más no ensucia nada aguas abajo.
+    """
     scoreboard = _fetch_json(session, SCOREBOARD_URL, params={"dates": dates})
     if scoreboard is None:
         counts["scoreboard_error"] += 1
@@ -136,12 +152,30 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Capture raw ESPN live-event payloads (read-only recon).")
     parser.add_argument("--duration-minutes", type=int, default=235)
     parser.add_argument("--interval-seconds", type=int, default=120)
-    parser.add_argument("--dates", default=None, help="YYYYMMDD (default: hoy en UTC)")
+    parser.add_argument(
+        "--dates", default=None,
+        help="YYYYMMDD o YYYYMMDD-YYYYMMDD (default: ayer+hoy en US Eastern)",
+    )
     parser.add_argument("--out", default="samples")
     parser.add_argument("--once", action="store_true", help="Una sola pasada (QA).")
     args = parser.parse_args()
 
-    dates = args.dates or datetime.now(timezone.utc).strftime("%Y%m%d")
+    # 🪤 FECHA US EASTERN, NO UTC. El scoreboard de ESPN se indexa por fecha
+    # LOCAL DE EE.UU., así que una velada del sábado sigue viviendo bajo el
+    # sábado aunque en UTC ya sea domingo. Aquí había
+    # `datetime.now(timezone.utc).strftime("%Y%m%d")`, y la captura B arranca
+    # SIEMPRE pasada la medianoche UTC (nace con la A y espera a que la A
+    # muera), así que pedía el día SIGUIENTE: la noche del UFC 330, el run
+    # 31908919300 arrancó a las 00:41:35Z del 16-ago, pidió `dates=20260816`
+    # cuando el card entero vivía bajo `20260815`, imprimió
+    # {"skipped": "no events today"} y salió VERDE en 16 segundos con un
+    # artifact de 1846 bytes: cero ficheros del main card, y esta captura es
+    # "el único plan B real" del directo (live-sentinel.yml).
+    # `default_dates_window()` devuelve ayer+hoy en US Eastern
+    # ('20260814-20260815' para ese instante) y es lo que ya usaba el bucle en
+    # `refresh_live_results` desde julio. El orden del `or` no se toca:
+    # `args.dates` manda, que es el `-f dates=` para recapturar a mano.
+    dates = args.dates or default_dates_window()
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     # Sin User-Agent propio: este script pide SCOREBOARD_URL, y
@@ -151,16 +185,26 @@ def main() -> None:
     session = build_espn_session()
     counts: Counter = Counter()
 
-    events_today = poll_once(session, out_dir, dates, counts)
-    if events_today < 0:
+    events_in_window = poll_once(session, out_dir, dates, counts)
+    if events_in_window < 0:
         # El scoreboard no contestó en la PRIMERA pasada. No es mala suerte: es
         # la fuente cerrada (así se veía el 403 del 8-ago). Salir YA y en ROJO,
         # en vez de ocupar el runner 235 minutos capturando el mismo error.
         print(json.dumps({"aborted": "scoreboard unreachable on first poll", "dates": dates}))
         raise SystemExit(EXIT_NOTHING_CAPTURED)
-    if events_today == 0:
-        # Guard del cron: sábado sin cartelera -> salir barato y en verde.
-        print(json.dumps({"skipped": "no events today", "dates": dates}))
+    if events_in_window == 0:
+        # Guard del cron: fin de semana sin cartelera -> salir barato y en
+        # verde. Desde que `dates` es una ventana de dos días, este guard mira
+        # DOS días, no uno: el día después de una velada ya no salta (el card
+        # de ayer sigue en la ventana) y la captura entra al bucle a guardar un
+        # evento muerto. Es a propósito y es el lado bueno en el que
+        # equivocarse: el modo de fallo de la ventana es capturar DE MÁS; el de
+        # la fecha UTC era no capturar NADA la noche de la velada. Un filtro
+        # por estado (contar solo eventos con alguna competición en `pre`/`in`,
+        # la versión inversa de `events_worth_processing`) es el siguiente
+        # paso, pero toca la rama que decide si se entra al bucle y no se hace
+        # a seis días de la velada.
+        print(json.dumps({"skipped": "no events in window", "dates": dates}))
         return
     counts["polls"] += 1
 

@@ -57,6 +57,7 @@ WORKFLOWS = RAIZ / ".github" / "workflows"
 WATCHDOG = WORKFLOWS / "live-watchdog.yml"
 SENTINEL = WORKFLOWS / "live-sentinel.yml"
 NOTIFY = WORKFLOWS / "notify-on-failure.yml"
+CAPTURA = WORKFLOWS / "capture-live-samples.yml"
 
 # Los dos ficheros que deciden si se dispara un run del directo.
 CON_GUARD = [WATCHDOG, SENTINEL]
@@ -466,6 +467,97 @@ def test_el_cierre_comprueba_que_el_gh_ha_funcionado():
     assert "::error title=Relevo::" in guion, (
         "el cierre ya no deja constancia cuando falla. Con el "
         "`continue-on-error: true` del job, sin el `::error` no queda ni rastro."
+    )
+
+
+# ------------- 6. la prueba material del cierre de la captura cruda
+#
+# EL VOLCADO DEL SCOREBOARD NO ES PRUEBA DE NADA (revision del 16-ago-2026).
+#
+# `capture-live-samples.yml` cierra su propio Issue de fallo cuando un run sale
+# en verde, pero solo si ademas hay PRUEBA MATERIAL de que se ha grabado algo:
+# el que cierra no es el que abrio (el Issue es compartido), asi que un verde
+# vacio podria apagar la alarma de una captura anterior que murio de verdad.
+#
+# El umbral era "al menos un fichero en samples/", y ese umbral lo cumple
+# TAMBIEN el run que no captura nada: `poll_once` guarda el scoreboard ANTES de
+# contar cuantos eventos trae, asi que la salida
+# {"skipped": "no events in window"} deja UN fichero en samples/, no cero. Es
+# medible en el propio incidente que motivo el guard: el run 31908919300 pidio
+# una fecha vacia, no capturo ni un combate y aun asi subio un artifact de 1846
+# bytes — el volcado del scoreboard. Con el umbral viejo, ese run habria cerrado
+# el aviso de la captura A.
+#
+# Estos dos tests atan las dos mitades: que el guion excluye el scoreboard, y
+# que la premisa (un run sin cartelera deja SOLO el scoreboard) sigue siendo
+# cierta en el Python.
+
+
+def _guion_del_cierre() -> str:
+    for paso in _pasos(CAPTURA):
+        if paso.get("name") == "Cerrar el aviso si la captura ha ido bien":
+            return paso["run"]
+    raise AssertionError("no esta el paso `Cerrar el aviso si la captura ha ido bien`")
+
+
+def test_la_prueba_material_no_cuenta_el_volcado_del_scoreboard():
+    """Contar `find samples -type f` a secas es contar siempre >= 1."""
+    guion = _guion_del_cierre()
+
+    assert "! -name '*-scoreboard.json'" in guion, (
+        "el cierre de la captura ha vuelto a contar TODOS los ficheros de "
+        "samples/. El volcado del scoreboard se guarda tambien cuando la "
+        "ventana viene vacia, asi que ese recuento nunca da 0 y el guard deja "
+        "de guardar: un run que no grabo la velada cierra el aviso de uno que "
+        "murio de verdad. Cuenta solo los ficheros de evento."
+    )
+    assert "DE_CARTELERA" in guion and '"$DE_CARTELERA" -eq 0' in guion, (
+        "la decision de cerrar tiene que colgar del recuento de ficheros de "
+        "EVENTO, no del recuento total."
+    )
+
+
+def test_la_premisa_del_umbral_sigue_siendo_cierta(tmp_path, monkeypatch):
+    """Un poll sin cartelera deja el scoreboard y NADA MAS; con cartelera deja
+    ademas un `fightcenter-*` por evento, y lo deja SIN exigir combate en curso.
+
+    Las dos mitades importan. Si algun dia `poll_once` dejara de guardar el
+    scoreboard en el caso vacio, el umbral viejo volveria a valer y este test
+    sobraria. Y si el `fightcenter` pasara a pedirse solo con `state == "in"`,
+    el umbral nuevo dejaria el Issue abierto cada vez que la captura corriese
+    entre combates: eso desgasta la alarma y hay que enterarse aqui."""
+    from collections import Counter
+
+    from scripts import capture_live_samples as captura
+
+    def poll(scoreboard: dict, destino) -> list[str]:
+        monkeypatch.setattr(
+            captura, "_fetch_json",
+            lambda sesion, url, params=None: (
+                scoreboard if url == captura.SCOREBOARD_URL else {"ok": True}
+            ),
+        )
+        destino.mkdir()
+        captura.poll_once(None, destino, "20260821-20260822", Counter())
+        return sorted(p.name for p in destino.iterdir())
+
+    vacio = poll({"events": []}, tmp_path / "sin_cartelera")
+    assert len(vacio) == 1 and vacio[0].endswith("-scoreboard.json"), (
+        f"un poll sin cartelera tenia que dejar solo el scoreboard y dejo {vacio}"
+    )
+
+    # Card entero ya TERMINADO: ni una competicion en 'in'. Es el caso que el
+    # umbral nuevo tiene que seguir dando por bueno.
+    con_card = poll(
+        {"events": [{"id": "600059185", "competitions": [
+            {"id": "1", "status": {"type": {"state": "post"}}},
+        ]}]},
+        tmp_path / "con_cartelera",
+    )
+    de_evento = [n for n in con_card if not n.endswith("-scoreboard.json")]
+    assert any("fightcenter-600059185" in n for n in de_evento), (
+        "con una velada en la ventana tiene que quedar su `fightcenter-*` "
+        f"aunque no haya ningun combate en curso, y quedo {con_card}"
     )
 
 

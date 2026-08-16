@@ -27,7 +27,7 @@ on:
         required: false
         default: "120"
       dates:
-        description: "YYYYMMDD (vacío = hoy UTC)"
+        description: "YYYYMMDD o YYYYMMDD-YYYYMMDD (vacío = ayer+hoy US Eastern)"
         required: false
         default: ""
 
@@ -145,30 +145,65 @@ jobs:
       # notify-on-failure.yml.
       #
       # PERO UN VERDE NO ES SIEMPRE UN EXITO, y en ESTE workflow eso no es
-      # teoria: esta MEDIDO. `scripts/capture_live_samples.py:144` hace
-      # `dates = args.dates or datetime.now(timezone.utc)`, y el centinela
-      # dispara siempre la captura con `dates=""` (live-sentinel.yml:158-161).
-      # La captura B nace a la vez que la A pero ARRANCA cuando la A muere, o
-      # sea despues de medianoche UTC, y entonces pide el scoreboard del dia
-      # SIGUIENTE. La noche del UFC 330 quedo por escrito en el log del run
-      # 31908919300: arranco a las 00:41:22Z, pidio `dates=20260816` (el card
-      # era el 20260815), imprimio {"skipped": "no events today"} y salio VERDE
-      # a las 00:41:38Z. Dieciseis segundos sin capturar un solo fichero.
+      # teoria: esta MEDIDO. Hasta el 16-ago-2026 la funcion `main` de
+      # `scripts/capture_live_samples.py` calculaba la fecha por defecto con
+      # `datetime.now(timezone.utc)`, y el centinela dispara siempre la captura
+      # con `dates=""` (paso `Lanzar el directo` de live-sentinel.yml). La
+      # captura B nace a la vez que la A pero ARRANCA cuando la A muere, o sea
+      # despues de medianoche UTC, asi que pedia el scoreboard del dia
+      # SIGUIENTE —el de ESPN se indexa por fecha LOCAL DE EE.UU.—. La noche
+      # del UFC 330 quedo por escrito en el log del run 31908919300: arranco a
+      # las 00:41:22Z, pidio `dates=20260816` (el card era el 20260815),
+      # imprimio {"skipped": "no events today"} y salio VERDE a las 00:41:38Z.
+      # Dieciseis segundos y un artifact de 1846 bytes sin un solo fichero del
+      # main card. ESO YA ESTA ARREGLADO: `main` usa ahora
+      # `default_dates_window()` (ayer+hoy en US Eastern), la misma ventana que
+      # el bucle, y lo fija
+      # `tests/test_capture_live_samples_fecha_por_defecto.py`.
       #
-      # Y esa misma noche la captura A (run 31908917812) habia fallado a las
-      # 21:15. Sin este guard, el aviso que abre la A lo cerraria la B con un
-      # "ha vuelto a terminar en success" que es falso: el dueno se levanta el
-      # domingo, ve el Issue cerrado solo, y da por bueno que el plan B grabo la
-      # velada cuando no grabo nada. Un aviso que se borra a si mismo es peor
-      # que no avisar.
+      # EL GUARD SE QUEDA IGUAL, porque sus dos motivos sobreviven al arreglo:
       #
-      # Por eso el cierre exige PRUEBA MATERIAL: al menos un fichero en
-      # `samples/`, que es lo mismo que sube el artifact de arriba. Si no hay
-      # ficheros, el Issue se queda abierto y el dueno lo cierra a mano cuando
-      # haya mirado. En la duda, no apagar la alarma.
-      # (El arreglo de fondo —que `--dates` caiga en la fecha US Eastern, como
-      # hace el bucle con `default_dates_window()`— vive en el script y NO se
-      # toca a seis dias de la velada.)
+      #   1) Aquella fecha no era la unica via a un verde sin captura. El script
+      #      sale en VERDE por diseno cuando no hay cartelera en la ventana
+      #      ({"skipped": "no events in window"}), y tiene que poder hacerlo: es
+      #      el guard barato del cron, y tambien el de un dispatch a mano con
+      #      `-f dates=` de un dia sin evento. Mientras exista una salida verde
+      #      que no ha grabado la velada, un cierre sin prueba material puede
+      #      apagar una alarma legitima. El arreglo quita UNA causa, no la clase.
+      #
+      #   2) El que cierra no es el que abrio. Este paso cierra el Issue
+      #      COMPARTIDO del workflow, que pudo abrir un run ANTERIOR. Es
+      #      literalmente lo que paso esa noche: la captura A (run 31908917812)
+      #      murio a las 21:15 con "the hosted runner lost communication with
+      #      the server" —nada que ver con las fechas, o sea que puede repetirse
+      #      igual— y la B, verde y vacia, habria cerrado su aviso. El dueno se
+      #      levanta el domingo, ve el Issue cerrado solo, y da por bueno que el
+      #      plan B grabo la velada cuando no grabo nada. Un aviso que se borra
+      #      a si mismo es peor que no avisar.
+      #
+      # Por eso el cierre exige PRUEBA MATERIAL de que se ha grabado una
+      # cartelera. Si no la hay, el Issue se queda abierto y el dueno lo cierra
+      # a mano cuando haya mirado. En la duda, no apagar la alarma.
+      #
+      # 🪤 EL UMBRAL NO PUEDE SER "al menos un fichero en samples/", que es lo
+      # que habia hasta el 16-ago-2026 (revision). Ese umbral lo cumple SOLO el
+      # run que no ha capturado nada: `poll_once` guarda el volcado del
+      # scoreboard ANTES de mirar cuantos eventos trae, asi que la salida
+      # {"skipped": "no events in window"} deja samples/ con UN fichero, no con
+      # cero. Medido: el run 31908919300 —el verde vacio de esta misma
+      # historia— subio un artifact de 1846 bytes, que es exactamente ese
+      # volcado. O sea que el guard escrito para impedir que aquel run cerrase
+      # el aviso de la captura A lo habria dejado cerrarlo igual.
+      #
+      # El umbral es: al menos un fichero QUE NO SEA el scoreboard. `poll_once`
+      # pide el fightcenter de CADA evento de la ventana y lo guarda pase lo que
+      # pase —no exige `state == "in"`—, asi que hay `fightcenter-*` siempre que
+      # la ventana traiga una velada, incluso si la captura corre entre combates
+      # o con el card ya terminado. Por eso no vale subirlo a "algun fichero
+      # `comp-*`": eso si exige un combate en curso y dejaria el Issue abierto
+      # sin averia real, desgastando la alarma. `fightcenter-*` separa
+      # justamente las dos cosas: "he visto una cartelera" de "he llamado a
+      # ESPN y no habia nada".
       - name: Cerrar el aviso si la captura ha ido bien
         if: ${{ success() }}
         continue-on-error: true
@@ -180,15 +215,19 @@ jobs:
         run: |
           set -uo pipefail
 
+          # Ver el bloque de arriba: el volcado del scoreboard NO cuenta como
+          # prueba, porque se guarda tambien cuando la ventana viene vacia.
           FICHEROS=0
+          DE_CARTELERA=0
           if [ -d samples ]; then
             FICHEROS=$(find samples -type f | wc -l)
+            DE_CARTELERA=$(find samples -type f ! -name '*-scoreboard.json' | wc -l)
           fi
-          if [ "$FICHEROS" -eq 0 ]; then
-            echo "::warning title=Relevo::Run verde pero SIN muestras capturadas (0 ficheros en samples/). NO se cierra ningun aviso: un verde vacio no prueba que el plan B funcione."
+          if [ "$DE_CARTELERA" -eq 0 ]; then
+            echo "::warning title=Relevo::Run verde pero SIN cartelera capturada ($FICHEROS fichero(s) en samples/, todos volcados del scoreboard, 0 de evento). NO se cierra ningun aviso: un verde asi no prueba que el plan B funcione."
             exit 0
           fi
-          echo "$FICHEROS fichero(s) capturado(s): el verde es de verdad."
+          echo "$DE_CARTELERA fichero(s) de evento capturado(s) de $FICHEROS: el verde es de verdad."
 
           TITULO="🔴 Cron fallando — $WF_NAME"
           ISSUE=$(gh issue list --repo "$REPO" --label cron-failure --state open \
