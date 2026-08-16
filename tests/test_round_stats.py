@@ -326,6 +326,40 @@ def test_fill_event_upgrades_provisional_espn_method(fakedb):
     assert counts["bouts_filled"] == 1
 
 
+def test_fill_event_reprocesa_un_combate_con_el_desglose_a_medias(fakedb):
+    """El bout 14895 (UFC 330): 3 asaltos disputados, solo el R1 guardado.
+
+    Tiene resultado de ufcstats, sus 2 filas de totales, árbitro y tarjetas: los
+    tres gates viejos dicen "hecho" y el combate caía en el `continue`. Lo único
+    que lo delata es que `has_round_stats` ahora significa COMPLETO. Y hay que
+    reescribir también los TOTALES, no solo los asaltos que faltan: los guardados
+    son los del R1 (46/69) haciéndose pasar por los del combate (155/229).
+    """
+    conn = fakedb.Connection(lambda sql, params=None: [(1,)])
+    client = _FakeClient({EVENT_URL: EVENT_HTML, FIGHT_URL: FIGHT_HTML})
+    counts: Counter = Counter()
+    consolidado = dict(has_stats=True, referee="Keith Peterson", has_scorecards=True)
+    _fill_event(conn, client, None, 5, [_bout(has_round_stats=False, **consolidado)],
+                EVENT_URL, counts, False)
+    statements = [
+        " ".join(sql.split()) for cur in conn.cursors for sql, _p in cur.executed
+    ]
+    assert any(s.startswith("INSERT INTO fight_stats ") for s in statements)
+    assert any(s.startswith("INSERT INTO fight_stats_rounds") for s in statements)
+    assert counts["stats_rows"] == 2 and counts["round_stats_rows"] == 4
+    # El resultado y los oficiales ya estaban bien: no se tocan.
+    assert not any(s.startswith("UPDATE fights") for s in statements)
+
+    # Y el mismo combate CON su desglose completo se salta entero: ni un fetch
+    # de la página del combate, que es lo que evita el churn diario.
+    client = _FakeClient({EVENT_URL: EVENT_HTML, FIGHT_URL: FIGHT_HTML})
+    conn = fakedb.Connection(lambda sql, params=None: [(1,)])
+    _fill_event(conn, client, None, 5, [_bout(has_round_stats=True, **consolidado)],
+                EVENT_URL, Counter(), False)
+    assert client.fetched == [EVENT_URL]
+    assert fakedb.mutating_statements(conn) == []
+
+
 # ------------------------------------------- backfill histórico (batch, dispatch)
 
 

@@ -20,8 +20,10 @@ QUE COMPRUEBA
      sin ganador y sin marcar 'cancelled'. Es el caso de arriba, y el único que
      de verdad exige una decisión humana: solo una persona puede decidir si esa
      pelea se cayó o si es nuestro pipeline el que la perdió.
-  B. FALTA EL DATO. Peleas ya resueltas sin árbitro o sin stats pasado el plazo
-     en el que la consolidación ya ha tenido todas sus oportunidades.
+  B. FALTA EL DATO. Peleas ya resueltas sin árbitro, sin stats, o con el
+     desglose por asaltos A MEDIAS --que además publica unos totales falsos--,
+     pasado el plazo en el que la consolidación ya ha tenido todas sus
+     oportunidades.
   C. EVENTO SIN CERRAR. Fecha pasada pero `status` todavía 'upcoming'.
   D. METODO PROVISIONAL. Sigue el genérico de ESPN ('Submission' a secas) en vez
      del que afina ufcstats ('SUB - Heel Hook').
@@ -101,6 +103,29 @@ MAIN_EVENT_RESOLVED = """
   )
 """
 
+# Un desglose por asaltos A MEDIAS no es "falta el dato": es dato FALSO, y es el
+# agujero por el que se coló el 16-ago-2026. Una pasada que lee la ficha de
+# ufcstats a medio publicar guarda los asaltos que hubiera Y unos totales que son
+# su suma: el 14895 (UFC 330, decisión a 3 asaltos) publicó 46/69 y 22/50 --los
+# del R1-- como totales del combate, cuando eran 155/229 y 74/164. Con árbitro y
+# con sus 2 filas de `fight_stats`, los dos filtros de arriba lo daban por bueno
+# y esta alerta salía en verde con la ficha mintiendo.
+#
+# Cuenta asaltos COMPLETOS (los dos rincones) contra `end_round`, el mismo
+# criterio que `events_needing_results_sql`, para que la alerta y la
+# consolidación nunca discrepen. El EXISTS lo acota a "tiene asaltos pero
+# incompletos": el "no tiene ninguno" ya lo cubre el filtro de `sin_stats`.
+DESGLOSE_INCOMPLETO = """
+  f.end_round IS NOT NULL
+  AND EXISTS (SELECT 1 FROM fight_stats_rounds fsr WHERE fsr.fight_id = f.id)
+  AND (SELECT count(*) FROM (
+         SELECT 1 FROM fight_stats_rounds fsr
+         WHERE fsr.fight_id = f.id
+         GROUP BY fsr.round
+         HAVING count(DISTINCT fsr.fighter_id) >= 2
+       ) completos) < f.end_round
+"""
+
 
 def _scope(event_id: int | None, days: int) -> tuple[str, list]:
     """Filtro de eventos y sus parámetros. Un --event-id explícito manda."""
@@ -165,7 +190,7 @@ def main() -> None:
             print(f"{OK} ninguna")
 
         # --- B. Falta el dato ---------------------------------------------
-        print("\nB. FALTA EL DATO (resueltas, pero sin árbitro o sin stats)")
+        print("\nB. FALTA EL DATO (resueltas, pero sin árbitro, sin stats o a medias)")
         cur.execute(
             f"""
             SELECT e.id, e.name, e.event_date,
@@ -174,7 +199,8 @@ def main() -> None:
                    count(*) FILTER (
                      WHERE NOT EXISTS (
                        SELECT 1 FROM fight_stats fs WHERE fs.fight_id = f.id)
-                   ) AS sin_stats
+                   ) AS sin_stats,
+                   count(*) FILTER (WHERE {DESGLOSE_INCOMPLETO}) AS a_medias
             FROM fights f JOIN events e ON e.id = f.event_id
             WHERE {where}
               AND f.status IS DISTINCT FROM 'cancelled'
@@ -182,6 +208,7 @@ def main() -> None:
               AND (
                 f.referee IS NULL
                 OR NOT EXISTS (SELECT 1 FROM fight_stats fs WHERE fs.fight_id = f.id)
+                OR ({DESGLOSE_INCOMPLETO})
               )
             GROUP BY e.id, e.name, e.event_date
             ORDER BY e.event_date DESC
@@ -191,9 +218,12 @@ def main() -> None:
         huecos = cur.fetchall()
         if not huecos:
             print(f"{OK} ninguno")
-        for ev_id, ev_name, ev_date, antiguedad, sin_arb, sin_stats in huecos:
+        for ev_id, ev_name, ev_date, antiguedad, sin_arb, sin_stats, a_medias in huecos:
             dias = int(antiguedad)
-            detalle = f"{ev_date} [{ev_id}] {ev_name}: {sin_arb} sin árbitro, {sin_stats} sin stats"
+            detalle = (
+                f"{ev_date} [{ev_id}] {ev_name}: {sin_arb} sin árbitro, "
+                f"{sin_stats} sin stats, {a_medias} con el desglose a medias"
+            )
             if dias < GRACE_DAYS:
                 print(f"{OK} {detalle} — solo {dias}d, la consolidación aún no ha terminado")
             elif dias > BACKFILL_WINDOW_DAYS:

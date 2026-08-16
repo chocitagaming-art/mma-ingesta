@@ -8,10 +8,12 @@ its own event rows (so re-importing would duplicate the event). This closes the
 gap onto the EXISTING ufc.com bout rows:
 
   1. Find past ufc.com events whose bouts still lack a result OR fight_stats
-     OR the per-round breakdown (fight_stats_rounds, migration 012 / BE4) OR —
-     with the result already filled — the referee (officials, migration 011 /
-     BE8: fight_officials only targets source='ufcstats' fights, so ufc.com
-     bouts would otherwise never get referee/scorecards).
+     OR the per-round breakdown (fight_stats_rounds, migration 012 / BE4) —
+     which means a COMPLETE breakdown, one round per round fought: a pass over
+     a half-rendered page leaves only R1 and totals that are the R1 ones —
+     OR — with the result already filled — the referee (officials, migration
+     011 / BE8: fight_officials only targets source='ufcstats' fights, so
+     ufc.com bouts would otherwise never get referee/scorecards).
   2. Match each to the corresponding ufcstats event by date (+ name tie-break).
   3. For each bout, open its ufcstats fight detail page once and fill the result
      (winner/method/round/time), the fight_stats (sig strikes + the #45
@@ -214,6 +216,19 @@ def events_needing_results_sql(historico: bool = False) -> tuple[str, list]:
       back catalogue: 761 of the 787 events have source NULL, and all 735
       events with refereeless bouts live in that group.
 
+    AND A FOURTH ONE, MEASURED ON 2026-08-16: a PARTIAL per-round breakdown
+    looked complete. The rounds branch only counted distinct fighter_ids, and a
+    bout holding nothing but R1 already has 2 — so bout 14895 (UFC 330, 3-round
+    unanimous decision) kept 1 of its 3 rounds AND totals that were really the
+    R1 numbers, published as if they were the fight's. Hence the extra branch
+    comparing complete rounds against fights.end_round. Measured over the whole
+    DB it selects exactly ONE extra event (1064): the invariant "distinct rounds
+    stored == end_round" holds 8.775 times out of 8.776. It leans on end_round
+    being right: an end_round inflated by the live updater (which COALESCEs, so
+    it never lowers it) would ask for rounds that don't exist and re-qualify its
+    event every day — bounded by the 60-day window in cron mode, unbounded in
+    ``historico``, which is run by hand in batches anyway.
+
     ``historico`` drops the source and window filters for a MANUAL batch rescue
     (see the CLI). The daily cron keeps both: the window exists so a bout that
     can never be matched can't re-qualify forever and grow the cron without
@@ -244,6 +259,22 @@ def events_needing_results_sql(historico: bool = False) -> tuple[str, list]:
                 -- ... and both fighters' per-round rows (migration 012 / BE4)
                 OR (SELECT COUNT(DISTINCT fsr.fighter_id)
                     FROM fight_stats_rounds fsr WHERE fsr.fight_id = fi.id) < 2
+                -- ... and ONE COMPLETE ROUND PER ROUND FOUGHT: counting distinct
+                -- fighter_ids is not enough, a bout holding only R1 already has 2
+                -- of them. A pass over a half-rendered ufcstats page writes just
+                -- R1 and marks the bout done forever (bout 14895, UFC 330: 1 of 3
+                -- rounds, and totals that are really the R1 ones). The EXISTS gate
+                -- keeps this branch on "has rounds but incomplete" — the "no rounds
+                -- at all" case is already the branch above.
+                OR (fi.end_round IS NOT NULL
+                    AND EXISTS (SELECT 1 FROM fight_stats_rounds fsr
+                                WHERE fsr.fight_id = fi.id)
+                    AND (SELECT COUNT(*) FROM (
+                           SELECT 1 FROM fight_stats_rounds fsr
+                           WHERE fsr.fight_id = fi.id
+                           GROUP BY fsr.round
+                           HAVING COUNT(DISTINCT fsr.fighter_id) >= 2
+                         ) complete_rounds) < fi.end_round)
                 -- result filled but the referee never was (migration 011 /
                 -- BE8): officials ride on the same fight page as the result
                 OR (fi.referee IS NULL
@@ -266,7 +297,17 @@ def _get_events_needing_results(
 
 
 def _get_bouts(connection, event_id: int) -> list[_Bout]:
-    """All bouts of an event with result/stats state, so we fill whichever is missing."""
+    """All bouts of an event with result/stats state, so we fill whichever is missing.
+
+    ``has_round_stats`` means the breakdown is COMPLETE, not merely present: one
+    round with BOTH fighters for each of the fights.end_round rounds fought.
+    Counting distinct fighter_ids is not enough — a bout holding only R1 already
+    has 2 of them, which is how bout 14895 (UFC 330) passed this gate with 1 of
+    its 3 rounds. Without this the event-level branch is useless: the event would
+    re-qualify and every one of its bouts would still be skipped in _fill_event.
+    COALESCE(end_round, 1) keeps the old behaviour for a bout with no result yet:
+    with 0 rows stored it is False, exactly as "< 2 fighters" was.
+    """
     with connection.cursor() as cursor:
         cursor.execute(
             """
@@ -275,8 +316,12 @@ def _get_bouts(connection, event_id: int) -> list[_Bout]:
                    COALESCE(blue.name, fi.fighter_blue_name) AS blue_name,
                    fi.method,
                    (SELECT COUNT(*) FROM fight_stats fs WHERE fs.fight_id = fi.id) >= 2 AS has_stats,
-                   (SELECT COUNT(DISTINCT fsr.fighter_id)
-                    FROM fight_stats_rounds fsr WHERE fsr.fight_id = fi.id) >= 2 AS has_round_stats,
+                   (SELECT COUNT(*) FROM (
+                      SELECT 1 FROM fight_stats_rounds fsr
+                      WHERE fsr.fight_id = fi.id
+                      GROUP BY fsr.round
+                      HAVING COUNT(DISTINCT fsr.fighter_id) >= 2
+                    ) complete_rounds) >= COALESCE(fi.end_round, 1) AS has_round_stats,
                    fi.referee,
                    EXISTS (SELECT 1 FROM fight_scorecards sc
                            WHERE sc.fight_id = fi.id) AS has_scorecards,
