@@ -73,7 +73,7 @@ from .espn import (
     _match_fighter,
     build_espn_session,
 )
-from .espn_live_stats import collect_fight_stats
+from .espn_live_stats import collect_fight_stats, fetch_competition_status
 from .logging_config import configure_logging
 from .models import EventRecord
 from .repositories.events import find_existing_event_id
@@ -108,6 +108,28 @@ METHOD_BY_DETAIL = {
     "unofficial winner kotko": "KO/TKO",
 }
 _UNOFFICIAL_WINNER_PREFIX = "unofficial winner"
+
+# result.name del leaf `status` -> el MISMO código provisional de arriba. ESPN
+# usa aquí otros tokens que en details[]: 'submission', 'kotko' y
+# 'decision---unanimous' son los tres que mandó en las 12 peleas del
+# 15-ago-2026. Se mapea por prefijo porque la decisión lleva el subtipo pegado
+# con tres guiones (y hay 'decision---split' / '---majority').
+#
+# DELIBERADAMENTE se tira el detalle: el leaf trae description='Twister' y con
+# él saldría 'SUB - Twister', mejor dato y tres horas antes. Pero ese literal NO
+# está en ESPN_PROVISIONAL_METHODS, y backfill_results solo corrige un método
+# que valga NULL o uno de esos tres (backfill_results.py:557). Escribir el
+# detalle CONGELARÍA el dato para siempre: ufcstats no podría tocarlo y
+# post_event_review no vería la diferencia entre un 'U-DEC' bueno y uno malo.
+# Para escribir el detalle hace falta antes una columna que diga quién puso el
+# método. Ver el test test_method_from_status_only_ever_writes_provisional_codes.
+_METHOD_BY_STATUS_PREFIX = (
+    ("decision", "Decision"),
+    ("submission", "Submission"),
+    ("kotko", "KO/TKO"),
+    ("ko", "KO/TKO"),
+    ("tko", "KO/TKO"),
+)
 
 # The provisional codes this module writes; backfill_results treats a stored
 # method equal to one of these as still-fillable from ufcstats.
@@ -353,6 +375,29 @@ def method_from_details(details: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def method_from_status(payload: dict[str, Any] | None) -> str | None:
+    """Método provisional desde el leaf `status` de la core API (plan B).
+
+    Antes de la campana ESPN manda `result` vacío o ausente (verificado contra
+    el 1086 en pre-evento: STATUS_SCHEDULED, 367 B, sin `result`), así que esto
+    no puede sellar nada antes de tiempo.
+
+    Lista blanca estricta: un token que no reconocemos devuelve None y lo
+    rellena ufcstats. Adivinar la familia sería peor que no escribir — una
+    descalificación mapeada a 'KO/TKO' además dejaría la pelea sin las tarjetas
+    de los jueces (backfill_results._is_decision decide si se piden).
+    """
+    result = (payload or {}).get("result") or {}
+    name = str(result.get("name") or "").strip().lower()
+    if not name:
+        return None
+    for prefix, method in _METHOD_BY_STATUS_PREFIX:
+        if name.startswith(prefix):
+            return method
+    LOGGER.warning("Unmapped ESPN status result %r; leaving method NULL", name)
+    return None
+
+
 def _competitor_id(competitor: dict[str, Any]) -> str | None:
     value = competitor.get("id")
     return str(value) if value not in (None, "") else None
@@ -469,7 +514,8 @@ def _resolve_bout(
 
 
 def _process_fight(
-    connection, event_id, fight: LiveFight, exact_index, normalized_index, counts, *, dry_run: bool
+    connection, event_id, fight: LiveFight, exact_index, normalized_index, counts, *, dry_run: bool,
+    status_session=None, event_espn_id: str | None = None,
 ) -> None:
     bout = _resolve_bout(connection, event_id, fight, exact_index, normalized_index, counts)
     if bout is None:
@@ -485,28 +531,50 @@ def _process_fight(
         counts["fights_no_winner"] += 1
         LOGGER.info("  no winner flagged for %s vs %s; skipping", fight.red_name, fight.blue_name)
         return
+    # PLAN B DEL MÉTODO. El scoreboard trae el método en details[], pero ese
+    # array viene topado a 10 entradas y la del "Unofficial Winner" se cae por
+    # abajo: el 15-ago-2026, 2 de las 12 peleas se sellaron con method NULL (la
+    # 401909737 del twister y la 401905373, una decisión). Cuando falta, un GET
+    # de ~476 B al leaf `status` lo recupera.
+    #
+    # Guard estricto a propósito: solo si NO hay método (las otras 10 de 12 no
+    # pagan ni un byte) y solo con sesión (las llamadas antiguas siguen igual).
+    # La pelea ya está completada aquí — el llamador se salta las pendientes.
+    method = fight.method
+    method_source = "details"
+    if method is None and status_session is not None and event_espn_id:
+        payload = fetch_competition_status(status_session, event_espn_id, fight.competition_id)
+        if payload is not None:
+            method = method_from_status(payload)
+            if method is not None:
+                method_source = "core-status"
     # El reloj de ESPN es una cuenta atrás y end_time es el transcurrido: sin
     # esta conversión el estelar del 1062 se guardó como 2:17 habiendo sido 2:41.
+    # El método entra aquí: una decisión agota el asalto, así que recuperarlo por
+    # el plan B también arregla su hora de fin en vez de dejarla a la heurística.
     end_time = elapsed_end_time(
         fight.end_time,
-        fight.method,
+        method,
         last_in_progress_clock(connection, fight_id),
     )
     LOGGER.info(
-        "  LIVE %s def. %s — %s R%s %s (reloj ESPN %s) (fight %s%s)",
+        "  LIVE %s def. %s — %s [%s] R%s %s (reloj ESPN %s) (fight %s%s)",
         winner_name,
         fight.blue_name if winner_id == red_id else fight.red_name,
-        fight.method or "method TBD",
+        method or "method TBD",
+        method_source if method else "sin fuente",
         fight.end_round,
         end_time,
         fight.end_time,
         fight_id,
         ", dry-run" if dry_run else "",
     )
+    if method_source == "core-status":
+        counts["methods_from_status_leaf"] += 1
     if dry_run:
         counts["fights_updated"] += 1
         return
-    if fill_fight_result(connection, fight_id, winner_id, fight.method, fight.end_round, end_time):
+    if fill_fight_result(connection, fight_id, winner_id, method, fight.end_round, end_time):
         counts["fights_updated"] += 1
     else:
         counts["fights_already_filled"] += 1
@@ -627,6 +695,9 @@ def process_events(
                 _process_fight(
                     connection, event_id, fight, exact_index, normalized_index, counts,
                     dry_run=dry_run,
+                    # La misma sesión de la core API que usan las stats: el plan
+                    # B del método solo la toca si el scoreboard no trajo método.
+                    status_session=stats_session, event_espn_id=event.espn_id,
                 )
             if stats_session is not None:
                 _process_live_stats(

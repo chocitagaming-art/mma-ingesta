@@ -122,6 +122,38 @@ def test_parse_stat_values_is_defensive():
     assert parse_stat_values(broken) is None
 
 
+def test_fetch_competition_status_never_raises(monkeypatch):
+    """El plan B del método solo puede añadir dato, nunca tumbar la pasada.
+
+    Corre DENTRO del bucle que graba la velada, así que cualquier tropiezo del
+    leaf tiene que devolver None y seguir. Los cuatro que se pueden dar: la red
+    se cae, ESPN devuelve un 4xx/5xx, el cuerpo no es JSON, y el cuerpo es JSON
+    pero no un objeto.
+    """
+    import requests
+
+    from src.scrapers.espn_live_stats import fetch_competition_status
+
+    class _Boom:
+        def get(self, url, timeout=None, params=None):
+            raise requests.RequestException("sin red")
+
+    class _Sirve:
+        def __init__(self, payload, ok=True):
+            self.payload, self.ok_flag = payload, ok
+
+        def get(self, url, timeout=None, params=None):
+            return _FakeResponse(self.payload, ok=self.ok_flag)
+
+    assert fetch_competition_status(_Boom(), "600060493", "401887543") is None
+    assert fetch_competition_status(_Sirve(None, ok=False), "600060493", "401887543") is None
+    assert fetch_competition_status(_Sirve(ValueError("no es json")), "6", "4") is None
+    assert fetch_competition_status(_Sirve(["lista"]), "6", "4") is None
+    # Y el camino bueno sí devuelve el objeto tal cual.
+    vivo = {"type": {"name": "STATUS_FINAL"}, "result": {"name": "submission"}}
+    assert fetch_competition_status(_Sirve(vivo), "6", "4") == vivo
+
+
 def test_stat_key_map_matches_the_app_contract():
     # Las claves compactas que la web mapea (mma-app live-stats): no renombrar
     # sin tocar ambos lados. Las derivadas hl/ha/bl/ba/ll/la salen de

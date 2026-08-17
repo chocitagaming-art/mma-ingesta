@@ -37,6 +37,16 @@ CORE_STATS_URL = (
     "events/{event_id}/competitions/{comp_id}/competitors/{athlete_id}/statistics"
 )
 
+# Estado fino de UNA pelea. Lo pedimos solo como plan B del método, cuando el
+# scoreboard no trae la entrada "Unofficial Winner" (su details[] viene topado
+# a 10 y la entrada del método se cae por abajo: 2 de las 12 peleas del
+# 15-ago-2026 se sellaron con method NULL por eso).
+# Pesa 444-476 bytes medidos, contra los 165 KB del fightcenter.
+CORE_STATUS_URL = (
+    "https://sports.core.api.espn.com/v2/sports/mma/leagues/ufc/"
+    "events/{event_id}/competitions/{comp_id}/status"
+)
+
 # Nombre ESPN -> clave compacta almacenada en live_fight_stats.stats.
 STAT_KEY_MAP = {
     "knockDowns": "kd",
@@ -114,6 +124,33 @@ def fetch_competitor_stats(
     except ValueError:
         return None
     return parse_stat_values(payload)
+
+
+def fetch_competition_status(
+    session: requests.Session,
+    event_espn_id: str,
+    competition_id: str,
+) -> dict[str, Any] | None:
+    """GET del leaf `status` de una pelea; None si falla algo.
+
+    Mismo patrón defensivo que fetch_competitor_stats: cualquier tropiezo
+    devuelve None y el llamador se queda como estaba. Este endpoint solo se
+    consulta para RELLENAR un método ausente, así que no contestar nunca puede
+    empeorar el dato, solo dejarlo igual.
+    """
+    url = CORE_STATUS_URL.format(event_id=event_espn_id, comp_id=competition_id)
+    try:
+        response = session.get(url, timeout=30)
+    except requests.RequestException:
+        LOGGER.info("  status fetch failed for competition %s (network)", competition_id)
+        return None
+    if not response.ok:
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def collect_fight_stats(

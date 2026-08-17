@@ -25,6 +25,7 @@ from src.scrapers.espn_live_results import (
     events_worth_processing,
     match_db_event,
     method_from_details,
+    method_from_status,
     parse_scoreboard,
     process_events,
 )
@@ -443,3 +444,220 @@ def test_run_bounded_loop_survives_iteration_errors(monkeypatch):
     # El fallo de la segunda pasada no tumba la ventana: se sigue iterando.
     assert len(calls) >= 3
     assert totals["scoreboard_events"] == len(calls) - 1
+
+
+# ------------------------------------- plan B del método: el leaf `status`
+#
+# details[] viene TOPADO A 10 entradas y la del "Unofficial Winner" se cae por
+# abajo: medido el 15-ago-2026 sobre el evento ESPN 600059185, las 12 peleas
+# traen exactamente 10 details y en 2 no hay entrada de método (401909737, el
+# twister, y 401905373, una decisión). Esas 2 se sellaron con method NULL.
+#
+# Los payloads de abajo son los `result` REALES de esas peleas, copiados del
+# leaf .../competitions/{id}/status (444-476 bytes contra los 165 KB del
+# fightcenter). Los tres tokens que ESPN usó en las 12: submission, kotko y
+# decision---unanimous.
+
+
+def test_method_from_status_maps_the_three_real_espn_tokens():
+    # Nombres tal cual los sirve ESPN, incluidos los tres guiones de la decisión.
+    assert method_from_status(
+        {"result": {"name": "submission", "displayName": "Submission", "description": "Twister"}}
+    ) == "Submission"
+    assert method_from_status(
+        {"result": {"name": "kotko", "displayName": "KO/TKO", "description": "Punches"}}
+    ) == "KO/TKO"
+    assert method_from_status(
+        {"result": {"name": "decision---unanimous", "displayName": "Decision - Unanimous"}}
+    ) == "Decision"
+
+
+def test_method_from_status_writes_nothing_before_the_fight():
+    # Pre-evento REAL del 1086 (comp 401887543, 367 B): STATUS_SCHEDULED y sin
+    # `result`. Es el guard que impide sellar un método antes de la campana.
+    assert method_from_status({"type": {"name": "STATUS_SCHEDULED"}, "clock": 0.0}) is None
+    assert method_from_status({"result": {}}) is None
+    assert method_from_status({}) is None
+    assert method_from_status(None) is None
+
+
+def test_method_from_status_ignores_tokens_it_does_not_know():
+    # Una descalificación NO es un KO/TKO. Ante un token que no está en la lista
+    # blanca se calla y lo deja para ufcstats, en vez de adivinar una familia.
+    assert method_from_status({"result": {"name": "dq"}}) is None
+    assert method_from_status({"result": {"name": "no-contest"}}) is None
+    assert method_from_status({"result": {"name": "draw"}}) is None
+
+
+def test_method_from_status_only_ever_writes_provisional_codes():
+    """El contrato que impide el fallo caro.
+
+    ufcstats solo puede corregir un método si vale NULL o uno de los tres
+    códigos de ESPN_PROVISIONAL_METHODS (backfill_results.py:557). Si este
+    camino escribiera el detalle ('SUB - Twister', 'U-DEC'), ese valor quedaría
+    CONGELADO para siempre: el UPDATE de consolidación no lo tocaría y
+    post_event_review tampoco lo vería. Este test es la valla.
+    """
+    tokens = [
+        "submission", "kotko", "ko", "tko",
+        "decision---unanimous", "decision---split", "decision---majority",
+    ]
+    for token in tokens:
+        method = method_from_status({"result": {"name": token, "description": "Twister"}})
+        assert method in ESPN_PROVISIONAL_METHODS, f"{token} -> {method!r} congelaría el dato"
+
+
+class _FakeStatusSession:
+    """Sirve el leaf `status` por competition_id y apunta lo que se le pide."""
+
+    def __init__(self, by_comp):
+        self.by_comp = by_comp
+        self.requested = []
+
+    def get(self, url, timeout=None, params=None):
+        self.requested.append(url)
+        for comp_id, payload in self.by_comp.items():
+            if f"/competitions/{comp_id}/status" in url:
+                return _FakeResponse(payload)
+        return _FakeResponse(None, ok=False)
+
+
+class _FakeResponse:
+    def __init__(self, payload, ok=True):
+        self._payload = payload
+        self.ok = ok
+
+    def json(self):
+        return self._payload
+
+
+def _completed_fight_without_method():
+    """La pelea del twister: completada, con ganador y con details[] vacío."""
+    scoreboard = {
+        "leagues": [{"slug": "ufc"}],
+        "events": [
+            {
+                "id": "600059185",
+                "name": "UFC 317: Topuria vs. Oliveira",
+                "date": "2025-06-28T23:00Z",
+                "competitions": [
+                    _competition(
+                        "401909737",
+                        _competitor("4350812", "Ilia Topuria", True),
+                        _competitor("2504169", "Charles Oliveira", False),
+                        None, 3, "1:36",  # sin detail_text -> details[] vacío
+                    )
+                ],
+            }
+        ],
+    }
+    return parse_scoreboard(scoreboard)[0].fights[0]
+
+
+def _process_one(fight, session, fakedb):
+    from src.scrapers.espn_live_results import _process_fight
+
+    conn = fakedb.Connection(_responder)
+    counts: Counter = Counter()
+    fighters = [FighterMatchRecord(*row) for row in FIGHTER_ROWS]
+    _process_fight(
+        conn, 5, fight,
+        _build_exact_name_index(fighters), _build_normalized_name_index(fighters),
+        counts, dry_run=False,
+        status_session=session, event_espn_id="600059185",
+    )
+    return conn, counts
+
+
+def test_completed_fight_without_details_falls_back_to_the_status_leaf(fakedb):
+    fight = _completed_fight_without_method()
+    assert fight.method is None, "el scoreboard no da método: es el caso que arreglamos"
+    session = _FakeStatusSession(
+        {"401909737": {"result": {"name": "submission", "description": "Twister"}}}
+    )
+    conn, counts = _process_one(fight, session, fakedb)
+
+    assert len(session.requested) == 1
+    updates = [
+        params for cur in conn.cursors for sql, params in cur.executed
+        if sql.strip().upper().startswith("UPDATE")
+    ]
+    assert len(updates) == 1
+    # Se escribe el código GENÉRICO, que ufcstats podrá sustituir esa misma
+    # noche por 'SUB - Twister'.
+    assert "Submission" in updates[0]
+    assert counts["fights_updated"] == 1
+
+
+def test_the_status_leaf_is_never_requested_when_details_already_gave_the_method(fakedb):
+    # El camino feliz: 10 de cada 12 peleas. Ni un byte de red de más.
+    fight = parse_scoreboard(SCOREBOARD)[0].fights[0]
+    assert fight.method == "KO/TKO"
+    session = _FakeStatusSession({})
+    _process_one(fight, session, fakedb)
+    assert session.requested == []
+
+
+def test_a_dead_status_leaf_leaves_the_fight_exactly_as_it_was(fakedb):
+    # Si el leaf no contesta, la pelea se sella con method NULL igual que hoy:
+    # el plan B solo puede añadir, nunca empeorar.
+    fight = _completed_fight_without_method()
+    conn, counts = _process_one(fight, _FakeStatusSession({}), fakedb)
+    updates = [
+        params for cur in conn.cursors for sql, params in cur.executed
+        if sql.strip().upper().startswith("UPDATE")
+    ]
+    assert len(updates) == 1
+    assert None in updates[0]
+    assert counts["fights_updated"] == 1
+
+
+def test_recovering_a_decision_also_recovers_its_exact_end_time(fakedb):
+    """Regalo del plan B: la decisión deja de pasar por la heurística del reloj.
+
+    elapsed_end_time devuelve 5:00 en cuanto el método empieza por 'decision'
+    (un asalto de decisión se agota por definición). Hoy la 401905373 llega sin
+    método, así que su hora sale de comparar hipótesis contra el último reloj
+    visto. Con el método recuperado, sale exacta.
+    """
+    scoreboard = {
+        "leagues": [{"slug": "ufc"}],
+        "events": [{
+            "id": "600059185", "name": "UFC 317: Topuria vs. Oliveira",
+            "date": "2025-06-28T23:00Z",
+            "competitions": [_competition(
+                "401905373",
+                _competitor("4350812", "Ilia Topuria", True),
+                _competitor("2504169", "Charles Oliveira", False),
+                None, 3, "0:00",  # reloj agotado y sin details[]
+            )],
+        }],
+    }
+    fight = parse_scoreboard(scoreboard)[0].fights[0]
+    session = _FakeStatusSession(
+        {"401905373": {"result": {"name": "decision---unanimous"}}}
+    )
+    conn, _ = _process_one(fight, session, fakedb)
+    params = [
+        p for cur in conn.cursors for sql, p in cur.executed
+        if sql.strip().upper().startswith("UPDATE")
+    ][0]
+    assert "Decision" in params
+    assert "5:00" in params
+
+
+def test_without_a_session_the_plan_b_is_a_no_op(fakedb):
+    # Las llamadas antiguas (tests, invocaciones sin stats) se comportan igual
+    # que antes: sin sesión no hay plan B y nada revienta.
+    from src.scrapers.espn_live_results import _process_fight
+
+    fight = _completed_fight_without_method()
+    conn = fakedb.Connection(_responder)
+    counts: Counter = Counter()
+    fighters = [FighterMatchRecord(*row) for row in FIGHTER_ROWS]
+    _process_fight(
+        conn, 5, fight,
+        _build_exact_name_index(fighters), _build_normalized_name_index(fighters),
+        counts, dry_run=False,
+    )
+    assert counts["fights_updated"] == 1
