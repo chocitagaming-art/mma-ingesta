@@ -93,7 +93,13 @@ jobs:
 
           echo "estado=$ESTADO" >> "$GITHUB_OUTPUT"
           echo "simulado=$SIMULADO" >> "$GITHUB_OUTPUT"
-          echo "$DIAG" | jq -r '.veladas[] | "- **\(.nombre)** (id \(.event_id)): `\(.estado)` — \(.muestras_recientes) muestras en 45 min, \(.combates_resueltos)/\(.combates_activos) resueltos"' >> "$GITHUB_STEP_SUMMARY"
+          # El latido va en el resumen a proposito, y es lo primero que hay que
+          # leer: desde el 17-ago-2026 es lo que DECIDE el estado (las muestras
+          # las escribe tambien el cron de respaldo, asi que no prueban que el
+          # bucle viva). Con los dos numeros juntos se distingue de un vistazo,
+          # a las 3 de la manana y desde el movil, "el bucle no late" de "late
+          # pero no entra dato" — que son dos averias distintas.
+          echo "$DIAG" | jq -r '.veladas[] | "- **\(.nombre)** (id \(.event_id)): `\(.estado)` — latido hace \(.latido_min // "nunca") min · \(.muestras_recientes) muestras en 45 min, \(.combates_resueltos)/\(.combates_activos) resueltos"' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Ya hay un bucle corriendo?
         # MISMO guard que live-sentinel.yml, y por el mismo motivo: GitHub solo
