@@ -95,3 +95,31 @@ def fakedb():
         executed_statements=_executed_statements,
         mutating_statements=_mutating_statements,
     )
+
+
+@pytest.fixture(autouse=True)
+def _sin_latidos_de_verdad(monkeypatch):
+    """Ningun test escribe el latido del bucle en la base de VERDAD.
+
+    ESTO NO ES PARANOIA, PASO. El latido del bucle (17-ago-2026) se escribe
+    dentro de `run_bounded_loop`, y los tres tests de esa funcion que ya
+    existian —test_run_bounded_loop_stops_at_deadline y sus dos hermanos— la
+    llaman con `refresh_live_results` parcheado para que la pasada SALGA BIEN.
+    O sea que empezaron a escribir en `service_heartbeats` de produccion cada
+    vez que alguien corriera la suite con un .env delante. Medido: la fila
+    'live-loop' saltaba de las 19:22 a las 20:15 con solo lanzar pytest.
+
+    Rompia ademas la invariante que declara la cabecera de este fichero: aqui
+    no se abre un socket a Neon. La red va en el fixture y no en cada test a
+    proposito: asi tambien cubre al test que se escriba el mes que viene.
+
+    Los tests que prueban el latido lo vuelven a parchear ellos mismos (el
+    ultimo `monkeypatch.setattr` manda), asi que este fixture no les estorba.
+    """
+    from src.scrapers import espn_live_results
+
+    intentos: list[str] = []
+    monkeypatch.setattr(
+        espn_live_results, "escribir_latido_del_bucle", lambda detalle: intentos.append(detalle)
+    )
+    return intentos

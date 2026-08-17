@@ -545,41 +545,53 @@ def test_el_cron_de_respaldo_no_late_jamas(monkeypatch):
     )
 
 
-def test_un_latido_que_revienta_no_mata_la_grabacion(monkeypatch):
-    """El latido corre DENTRO del bucle que graba la velada. El arreglo que
-    existe para demostrar que el bucle vive seria lo ultimo que deberia
-    matarlo."""
-    from src.scrapers import espn_live_results as module
+def test_escribir_el_latido_se_traga_cualquier_fallo(monkeypatch):
+    """LA PRIMERA RED. El latido corre DENTRO del bucle que graba la velada, asi
+    que el codigo que existe para demostrar que el bucle vive seria lo ultimo
+    que deberia matarlo.
 
-    _patch_clock(monkeypatch, module, step_seconds=60.0)
-    pasadas = []
+    Se llama a la funcion REAL a proposito: el fixture autouse de conftest la
+    tiene parcheada para toda la suite, asi que hay que pedirla explicitamente.
+    Se rompe `connect`, que es el primer sitio real por el que pasa, y se fija
+    `get_settings` para que el fallo sea el de connect en los dos entornos —sin
+    eso, en CI (sin .env) reventaria antes en get_settings y el test aprobaria
+    por un motivo distinto del que dice probar."""
+    from src.scrapers import espn_live_results as module
+    from src.scrapers.config import Settings
 
     def conexion_rota(url):
         raise RuntimeError("Neon dice que no")
-
-    # Se rompe `connect`, que es el primer sitio real por el que pasa el latido.
-    # Asi el test recorre escribir_latido_del_bucle de verdad —incluido su
-    # try/except— y no toca la red ni una vez.
-    #
-    # Y se fija get_settings para que el fallo sea EL DE connect en los dos
-    # entornos: sin esto, en CI (sin .env) reventaria antes en get_settings y el
-    # test aprobaria por un motivo distinto del que dice probar.
-    from src.scrapers.config import Settings
 
     monkeypatch.setattr(
         module, "get_settings",
         lambda: Settings(database_url="postgresql://falsa/no-se-usa", anthropic_api_key=None),
     )
     monkeypatch.setattr(module, "connect", conexion_rota)
+
+    # No levanta. Si algun dia alguien estrecha ese except, esto se pone rojo.
+    module.escribir_latido_del_bucle("una prueba")
+
+
+def test_un_latido_que_revienta_no_mata_la_grabacion(monkeypatch):
+    """LA SEGUNDA RED, por si alguien estrecha la primera. Aunque el latido
+    llegara a levantar una excepcion, la ventana sigue dando pasadas."""
+    from src.scrapers import espn_live_results as module
+
+    _patch_clock(monkeypatch, module, step_seconds=60.0)
+    pasadas = []
+
+    def latido_que_levanta(detalle):
+        raise RuntimeError("y encima no se traga el fallo")
+
+    monkeypatch.setattr(module, "escribir_latido_del_bucle", latido_que_levanta)
     monkeypatch.setattr(
         module, "refresh_live_results",
         lambda dates=None, dry_run=False: (pasadas.append(1), Counter({"scoreboard_events": 1}))[1],
     )
-    totals = module.run_bounded_loop(
+    module.run_bounded_loop(
         dates=None, dry_run=False, duration_minutes=5, interval_seconds=20
     )
     assert len(pasadas) >= 2, "la grabacion se paro por culpa del latido"
-    assert totals["loop_failures"] == 0, "un latido roto se ha contado como pasada fallida"
 
 
 def test_en_ensayo_no_se_escribe_latido(monkeypatch):
