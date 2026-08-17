@@ -85,6 +85,18 @@ jobs:
           echo "$PLAN"
           echo "plan=$PLAN" >> "$GITHUB_OUTPUT"
           echo "hay_evento=$(echo "$PLAN" | python -c 'import json,sys; print(str(json.load(sys.stdin)["hay_evento"]).lower())')" >> "$GITHUB_OUTPUT"
+          # minutos_a / minutos_b / nombre / event_id sueltos. Es lo que permite
+          # partir "Lanzar el directo" en dos pasos sin repetir el leer() en
+          # cada uno, y de paso saca el JSON del literal de shell `PLAN='...'`
+          # que usaba ese paso: un nombre con apostrofo (O'Malley) lo rompia.
+          # Sin velada el plan solo trae hay_evento, asi que los cuatro salen
+          # vacios — que es exactamente lo que debe pasar.
+          # El ' '.join(split()) colapsa cualquier salto de linea: un valor
+          # multilinea inyectaria claves falsas en GITHUB_OUTPUT.
+          for CLAVE in minutos_a minutos_b nombre event_id dormir_segundos arranque; do
+            VALOR=$(echo "$PLAN" | python -c "import json,sys; v=json.load(sys.stdin).get('$CLAVE'); print('' if v is None else ' '.join(str(v).split()))")
+            echo "$CLAVE=$VALOR" >> "$GITHUB_OUTPUT"
+          done
 
       - name: Sin velada — salir en verde
         if: steps.plan.outputs.hay_evento != 'true'
@@ -95,11 +107,21 @@ jobs:
         # cinco horas ocupando un runner para no disparar nada al final. Se
         # descubrio en la primera prueba real (run 30203744406, cancelado a
         # mano), que es exactamente para lo que sirve ensayar.
+        #
+        # `id` para que los dos pasos de lanzamiento puedan exigir que este
+        # sueno haya terminado BIEN. Con el `success()` implicito de antes eso
+        # salia gratis; desde que los lanzamientos llevan `!cancelled()` hay que
+        # pedirlo a mano, o un fallo aqui dispararia la velada hasta cinco horas
+        # antes de tiempo. Ver el `if` de "Lanzar el bucle".
+        id: dormir
         if: steps.plan.outputs.hay_evento == 'true' && inputs.dry_run != true
+        env:
+          SEG: ${{ steps.plan.outputs.dormir_segundos }}
+          ARR: ${{ steps.plan.outputs.arranque }}
         run: |
-          PLAN='${{ steps.plan.outputs.plan }}'
-          SEG=$(echo "$PLAN" | python -c 'import json,sys; print(json.load(sys.stdin)["dormir_segundos"])')
-          ARR=$(echo "$PLAN" | python -c 'import json,sys; print(json.load(sys.stdin)["arranque"])')
+          # Por env, y no metiendo el JSON del plan en un literal de shell entre
+          # comillas simples como hacia antes: un nombre de velada con apostrofo
+          # (O'Malley) rompia ese literal.
           echo "Durmiendo $((SEG / 60)) min, hasta $ARR"
           sleep "$SEG"
 
@@ -122,7 +144,12 @@ jobs:
         # no deja fuera un estado. Los cancelled no cuelan como vivos: son
         # status 'completed' con la palabra en `.conclusion`.
         id: guard
-        if: steps.plan.outputs.hay_evento == 'true'
+        # `|| dry_run` para que un ENSAYO ejecute el recuento de verdad y se vea
+        # que el jq compila y que el token puede listar. Es un `gh run list` de
+        # solo lectura: no dispara nada. Por cron no cambia nada, porque en un
+        # evento `schedule` el contexto `inputs` viene vacio y `null == true` es
+        # falso. Mismo patron que live-watchdog.yml.
+        if: steps.plan.outputs.hay_evento == 'true' || inputs.dry_run == true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -132,18 +159,75 @@ jobs:
           echo "runs del bucle vivos: $VIVOS"
           echo "vivos=$VIVOS" >> "$GITHUB_OUTPUT"
           if [ "$VIVOS" != "0" ]; then
-            echo "::warning title=Centinela::Ya hay $VIVOS run(s) del bucle vivos. NO se dispara nada."
+            echo "::warning title=Centinela::Ya hay $VIVOS run(s) del bucle vivos. NO se dispara el bucle."
           fi
 
-      - name: Lanzar el directo
-        if: steps.plan.outputs.hay_evento == 'true' && steps.guard.outputs.vivos == '0' && inputs.dry_run != true
+      - name: Ya hay una captura corriendo?
+        # EL MISMO AGUJERO QUE SE CERRO EN EL WATCHDOG EL 16-AGO (fallo 2), sin
+        # cerrar aqui hasta hoy: este fichero disparaba sus CUATRO dispatches
+        # —2 bucles y 2 capturas— bajo un unico `if` que solo miraba el recuento
+        # de BUCLES. La captura no se miraba nunca.
+        #
+        # `capture-live-samples.yml` tiene su PROPIO grupo de concurrency
+        # (:45-47, `cancel-in-progress: false`), con la misma regla del unico
+        # pendiente: con captura A en curso y captura B en cola, el primer
+        # dispatch de mas EXPULSA a la B y el segundo expulsa al primero. Se
+        # pierde la captura del estelar, que es el unico plan B real — y no es
+        # teorico: el 15-ago la captura A murio a las 3h26 con "the hosted
+        # runner lost communication", sin subir artifact.
+        #
+        # Y AQUI SE LLEGA POR UN CAMINO MAS ANCHO QUE EN EL WATCHDOG, sin
+        # necesitarlo para nada: `scripts/live_sentinel.py` mantiene
+        # hay_evento=true con dormir_segundos=0 durante TODA la velada, asi que
+        # cada cron horario atraviesa este guard mientras la velada corre. El
+        # 15-ago el run 31906263470 llego aqui 12 s despues de arrancar y se
+        # salvo solo porque conto un bucle vivo; con los bucles muertos y una
+        # captura viva habria disparado los cuatro.
+        #
+        # Mismo jq y mismo --limit que el guard del bucle, por los mismos
+        # motivos. Y DESPUES del sueno, como el otro: comprobar antes es TOCTOU.
+        id: guard_cap
+        if: steps.plan.outputs.hay_evento == 'true' || inputs.dry_run == true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PLAN='${{ steps.plan.outputs.plan }}'
-          leer() { echo "$PLAN" | python -c "import json,sys; print(json.load(sys.stdin)['$1'])"; }
-          A=$(leer minutos_a); B=$(leer minutos_b)
-          echo "Velada: $(leer nombre) — job A $A min, job B $B min"
+          VIVAS=$(gh run list -R "${{ github.repository }}" \
+            -w capture-live-samples.yml --limit 20 \
+            --json status --jq '[.[] | select(.status != "completed")] | length')
+          echo "capturas vivas: $VIVAS"
+          echo "vivas=$VIVAS" >> "$GITHUB_OUTPUT"
+          if [ "$VIVAS" != "0" ]; then
+            echo "::warning title=Centinela::Ya hay $VIVAS captura(s) viva(s). NO se dispara la captura."
+          fi
+
+      - name: Lanzar el bucle
+        # DOS PASOS SEPARADOS PARA BUCLE Y CAPTURA, no uno con dos `if` de shell
+        # dentro: cada uno cuelga de SU recuento, y un `if:` de paso no puede
+        # decidir por comando. Ademas el resumen deja de poder mentir, porque la
+        # linea de "lanzado" vive en el mismo `run` que hace el dispatch — antes
+        # un unico paso escribia "bucle + captura" pasara lo que pasara. Y a las
+        # 3 de la manana se lee desde el movil sin abrir un log: la pagina del
+        # run pinta "Lanzar el bucle: verde" y "Lanzar la captura: skipped".
+        #
+        # `!cancelled()` en vez del `success()` implicito, y aqui pesa MAS que
+        # en el watchdog: sin esto, un 500 de la API en el guard NUEVO de la
+        # captura dejaria este paso en skipped y se perderia la velada entera
+        # desde el minuto cero. Eso seria peor que el fichero de antes, donde
+        # ningun guard de la captura podia estropear el lanzamiento del bucle.
+        # No abre la puerta a un disparo de mas: `vivos == '0'` sigue mandando,
+        # y un guard que se salta o revienta deja su output en cadena vacia, que
+        # no es '0'. En la duda, no disparar.
+        # Ojo con la sintaxis: un `if:` que empieza por `!` hay que envolverlo
+        # en ${{ }} o YAML lo lee como etiqueta.
+        if: ${{ !cancelled() && steps.dormir.outcome == 'success' && steps.plan.outputs.hay_evento == 'true' && steps.guard.outputs.vivos == '0' && inputs.dry_run != true }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          A: ${{ steps.plan.outputs.minutos_a }}
+          B: ${{ steps.plan.outputs.minutos_b }}
+          NOMBRE: ${{ steps.plan.outputs.nombre }}
+          EVENT_ID: ${{ steps.plan.outputs.event_id }}
+        run: |
+          echo "Velada: $NOMBRE — job A $A min, job B $B min"
 
           # A y B al mismo grupo de concurrency: B queda EN COLA y arranca solo
           # cuando A muere. Son exactamente 1 en curso + 1 pendiente, que es el
@@ -153,6 +237,23 @@ jobs:
           gh workflow run live-event-loop.yml -R "${{ github.repository }}" \
             -f duration_minutes="$B" -f interval_seconds=20 -f dates=""
 
+          {
+            echo "### Directo lanzado — bucle"
+            echo "- **$NOMBRE** (id $EVENT_ID)"
+            echo "- bucle A ${A} min + relevo B ${B} min, cada 20 s"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Lanzar la captura cruda (plan B)
+        # `!cancelled()` tambien aqui, y por el motivo mas fuerte de los dos: si
+        # el dispatch del bucle de arriba falla, la captura cruda es MAS
+        # necesaria, no menos. Con el `success()` implicito de Actions ese fallo
+        # se llevaria por delante el unico plan B que hay.
+        if: ${{ !cancelled() && steps.dormir.outcome == 'success' && steps.plan.outputs.hay_evento == 'true' && steps.guard_cap.outputs.vivas == '0' && inputs.dry_run != true }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          A: ${{ steps.plan.outputs.minutos_a }}
+          B: ${{ steps.plan.outputs.minutos_b }}
+        run: |
           # La captura cruda es el unico plan B real: si el bucle fallara, sin
           # ella la serie de la velada se pierde para siempre.
           gh workflow run capture-live-samples.yml -R "${{ github.repository }}" \
@@ -160,13 +261,20 @@ jobs:
           gh workflow run capture-live-samples.yml -R "${{ github.repository }}" \
             -f duration_minutes="$B" -f interval_seconds=120 -f dates=""
 
-          echo "### Directo lanzado" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **$(leer nombre)** (id $(leer event_id))" >> "$GITHUB_STEP_SUMMARY"
-          echo "- bucle A ${A} min + relevo B ${B} min" >> "$GITHUB_STEP_SUMMARY"
-          echo "- captura cruda A + B" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Directo lanzado — captura cruda"
+            echo "- captura A ${A} min + B ${B} min, cada 120 s"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Ensayo — el plan, sin disparar
-        if: steps.plan.outputs.hay_evento == 'true' && inputs.dry_run == true
+      - name: Ensayo — el plan y los dos recuentos, sin disparar
+        # SIN el requisito de `hay_evento`, a diferencia de antes: un ensayo
+        # fuera de velada tambien tiene que decir que los dos `gh run list`
+        # corrieron y con que resultado. Si no, un error de comillas en el jq
+        # nuevo pasaria el ensayo tan campante.
+        if: inputs.dry_run == true
         run: |
-          echo 'ENSAYO — no se ha disparado nada. El plan era:'
-          echo '${{ steps.plan.outputs.plan }}'
+          echo 'ENSAYO — no se ha disparado nada.'
+          echo "hay velada: ${{ steps.plan.outputs.hay_evento }}"
+          echo "el plan era: ${{ steps.plan.outputs.plan }}"
+          echo "runs del bucle vivos: '${{ steps.guard.outputs.vivos }}' -> lanzaria el bucle:   ${{ steps.guard.outputs.vivos == '0' }}"
+          echo "capturas vivas:       '${{ steps.guard_cap.outputs.vivas }}' -> lanzaria la captura: ${{ steps.guard_cap.outputs.vivas == '0' }}"

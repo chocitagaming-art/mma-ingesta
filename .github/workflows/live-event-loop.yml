@@ -139,8 +139,9 @@ jobs:
       # `workflow_run`, y GitHub NO emite ese evento cuando el run lo lanzo un
       # `workflow_dispatch` hecho con el GITHUB_TOKEN (actor
       # `github-actions[bot]`): es el corta-recursion del token automatico. Este
-      # bucle SOLO se lanza asi, desde live-sentinel.yml:138-141 y
-      # live-watchdog.yml:94-95, de modo que su entrada en la lista de vigilados
+      # bucle SOLO se lanza asi, desde el paso "Lanzar el bucle" del centinela y
+      # el "Rescatar el bucle" del watchdog, de modo que su entrada en la lista
+      # de vigilados
       # ("Live event loop (ESPN)", en el `on:` de notify-on-failure.yml) era
       # LETRA MUERTA
       # desde el dia que se escribio. Escrita, leida y falsa.
@@ -175,7 +176,7 @@ jobs:
       # el paso llegue a ejecutarse cuando el job se cancela o agota su
       # `timeout-minutes`: un `if: failure()` seco se salta en esos dos casos.
       #
-      # ULTIMO PASO A PROPOSITO, misma logica que live-watchdog.yml:109: la
+      # ULTIMO PASO A PROPOSITO, misma logica que el ultimo paso del watchdog: la
       # consolidacion y el refresco de records de arriba se intentan ANTES de
       # avisar. Primero se salva lo que se pueda, luego se molesta al dueno.
       - name: Avisar si el bucle no ha terminado bien

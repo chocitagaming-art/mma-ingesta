@@ -124,10 +124,10 @@ jobs:
     #
     # LA EXCEPCION DEL CENTINELA (anadida el 16-ago-2026, auditoria post-UFC
     # 330). Un 'cancelled' del centinela NO es un fallo: es como esta disenado.
-    # El centinela duerme DENTRO del job hasta T-15min (live-sentinel.yml:93-104,
-    # hasta 5 h) mientras su cron horario (live-sentinel.yml:39-40) sigue
+    # El centinela duerme DENTRO del job hasta T-15min (su paso "Dormir hasta 15
+    # min antes del primer combate", hasta 5 h) mientras su cron horario sigue
     # encolando runs, y GitHub guarda UN solo run pendiente por grupo de
-    # concurrency (live-sentinel.yml:55-59): cada hora el nuevo EXPULSA al
+    # concurrency (su bloque `concurrency:`): cada hora el nuevo EXPULSA al
     # pendiente anterior. Ojo al matiz, que importa para entender que no se
     # pierde nada: con `cancel-in-progress: false` el dormilon NO se toca; el
     # cancelado es siempre el que esperaba en la cola sin haber ejecutado ni un
@@ -280,7 +280,7 @@ jobs:
             echo "- run creado a las \`$WF_CREATED\`, jobs arrancados: \`${JOBS:-?}\`"
             echo "- $VEREDICTO"
             echo "- [ver el run]($WF_URL)"
-            echo "- Por que no abre Issue: el cron horario de live-sentinel.yml:39-40 expulsa al run pendiente mientras otro duerme (concurrency en live-sentinel.yml:55-59), y ese ruido amordazo la alarma del centinela de 19:18 a 21:15 la noche del UFC 330 (Issue #32)."
+            echo "- Por que no abre Issue: el cron horario de live-sentinel.yml expulsa al run pendiente mientras otro duerme (su bloque concurrency), y ese ruido amordazo la alarma del centinela de 19:18 a 21:15 la noche del UFC 330 (Issue #32)."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------

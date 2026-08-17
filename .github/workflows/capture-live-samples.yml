@@ -94,7 +94,8 @@ jobs:
       # EL MOTIVO: `workflow_run` no se emite cuando el run lo lanzo un
       # `workflow_dispatch` hecho con el GITHUB_TOKEN (actor
       # `github-actions[bot]`), y esta captura SOLO se lanza asi, desde
-      # live-sentinel.yml:145-148 y live-watchdog.yml:96-97. Contraprueba: el
+      # el paso "Lanzar la captura cruda (plan B)" del centinela y el
+      # "Rescatar la captura cruda (plan B)" del watchdog. Contraprueba: el
       # canario alert-selftest.yml es tambien `workflow_dispatch` puro pero lo
       # lanza una persona, y su run 30174577725 abrio el Issue #13 en 17
       # segundos.
@@ -103,7 +104,8 @@ jobs:
       # entera si el bucle deja de escribir. Esta captura es READ-ONLY (sin
       # DATABASE_URL, solo artifacts), asi que el watchdog no puede verla morir
       # NUNCA. Sin este paso, el "unico plan B real" del directo
-      # (live-sentinel.yml:143) se cae en silencio absoluto.
+      # (el paso "Lanzar la captura cruda" del centinela) se cae en silencio
+      # absoluto.
       #
       # VA DESPUES DEL `upload-artifact`, a proposito: primero se salva lo poco
       # que se haya capturado, luego se avisa.

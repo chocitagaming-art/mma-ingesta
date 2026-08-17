@@ -159,21 +159,38 @@ def test_ningun_guard_filtra_por_antiguedad(fichero: Path):
 # ------------------------------- 2. bucle y captura, dos pasos y dos recuentos
 
 
-def test_el_watchdog_cuenta_las_capturas_vivas_antes_de_disparar():
+# LOS SEIS TESTS DE ESTA SECCION SE PARAMETRIZAN SOBRE LOS DOS FICHEROS
+# (17-ago-2026). Hasta hoy solo miraban el watchdog, y por eso el centinela
+# arrastraba el MISMO fallo 2 sin que nada se pusiera en rojo: disparaba sus
+# cuatro dispatches (2 bucles + 2 capturas) bajo un unico `if` que solo miraba
+# el recuento de bucles.
+#
+# El centinela llega ahi por un camino MAS ancho que el del watchdog y sin
+# necesitarlo para nada: `scripts/live_sentinel.py` mantiene hay_evento=true
+# con dormir_segundos=0 durante TODA la velada, asi que cada cron horario
+# atraviesa el guard mientras la velada corre. La noche del UFC 330 el run
+# 31906263470 llego al guard 12 s despues de arrancar y se salvo solo porque
+# conto un bucle vivo; con los bucles muertos y una captura viva habria hecho
+# los cuatro dispatches y expulsado a la captura B.
+
+
+@pytest.mark.parametrize("fichero", CON_GUARD, ids=lambda f: f.name)
+def test_todo_guard_cuenta_las_capturas_vivas_antes_de_disparar(fichero: Path):
     """Hasta el 16-ago-2026 el rescate disparaba la captura sin haberla mirado
     nunca, y expulsaba a la captura B en cola."""
-    guard_cap = _paso_con_id(WATCHDOG, "guard_cap")
+    guard_cap = _paso_con_id(fichero, "guard_cap")
     assert "capture-live-samples.yml" in guard_cap["run"]
     assert JQ_BUENO in guard_cap["run"]
 
 
-def test_bucle_y_captura_se_disparan_en_pasos_distintos():
+@pytest.mark.parametrize("fichero", CON_GUARD, ids=lambda f: f.name)
+def test_bucle_y_captura_se_disparan_en_pasos_distintos(fichero: Path):
     """EL NUCLEO DEL FALLO 4. Los dos dispatches vivian en un solo paso con un
     solo `if`, asi que la captura se lanzaba con el permiso del recuento del
     bucle. Cada uno necesita su propio guard, y un `if:` de paso no puede
     decidir por comando: tienen que ser dos pasos."""
-    bucle = _unico_paso_que_dispara(WATCHDOG, "live-event-loop.yml")
-    captura = _unico_paso_que_dispara(WATCHDOG, "capture-live-samples.yml")
+    bucle = _unico_paso_que_dispara(fichero, "live-event-loop.yml")
+    captura = _unico_paso_que_dispara(fichero, "capture-live-samples.yml")
 
     assert bucle["name"] != captura["name"], (
         "bucle y captura han vuelto al mismo paso: la captura se estaria "
@@ -181,11 +198,12 @@ def test_bucle_y_captura_se_disparan_en_pasos_distintos():
     )
 
 
-def test_cada_dispatch_cuelga_de_su_propio_recuento():
+@pytest.mark.parametrize("fichero", CON_GUARD, ids=lambda f: f.name)
+def test_cada_dispatch_cuelga_de_su_propio_recuento(fichero: Path):
     """El `if` de cada paso tiene que nombrar SU guard. Es lo que impide que
     dentro de seis meses alguien vuelva a mezclarlos."""
-    bucle = _unico_paso_que_dispara(WATCHDOG, "live-event-loop.yml")
-    captura = _unico_paso_que_dispara(WATCHDOG, "capture-live-samples.yml")
+    bucle = _unico_paso_que_dispara(fichero, "live-event-loop.yml")
+    captura = _unico_paso_que_dispara(fichero, "capture-live-samples.yml")
 
     assert "steps.guard.outputs.vivos == '0'" in bucle["if"]
     assert "steps.guard_cap.outputs.vivas" not in bucle["if"]
@@ -194,45 +212,95 @@ def test_cada_dispatch_cuelga_de_su_propio_recuento():
     assert "steps.guard.outputs.vivos" not in captura["if"]
 
 
-def test_los_dos_rescates_solo_disparan_si_el_recuento_dio_cero():
+@pytest.mark.parametrize("fichero", CON_GUARD, ids=lambda f: f.name)
+def test_los_dos_disparos_solo_ocurren_si_el_recuento_dio_cero(fichero: Path):
     """A prueba de fallos por construccion: si un guard se salta o revienta, su
     output es cadena vacia, que NO es '0', asi que no se dispara nada. La
     asimetria manda: no rescatar cuesta un email, rescatar de mas cuesta la
     velada entera y no se recupera."""
     for paso in (
-        _unico_paso_que_dispara(WATCHDOG, "live-event-loop.yml"),
-        _unico_paso_que_dispara(WATCHDOG, "capture-live-samples.yml"),
+        _unico_paso_que_dispara(fichero, "live-event-loop.yml"),
+        _unico_paso_que_dispara(fichero, "capture-live-samples.yml"),
     ):
         assert "== '0'" in paso["if"], paso["name"]
         assert "inputs.dry_run != true" in paso["if"], paso["name"]
 
 
-def test_el_rescate_del_plan_b_sobrevive_a_un_fallo_del_bucle():
+@pytest.mark.parametrize("fichero", CON_GUARD, ids=lambda f: f.name)
+def test_el_plan_b_sobrevive_a_un_fallo_del_paso_del_bucle(fichero: Path):
     """`!cancelled()` en vez del `success()` implicito de Actions. Si el
     dispatch del bucle falla, la captura cruda es MAS necesaria, no menos: es
     el unico plan B. Y en el paso del bucle, por simetria, para que un fallo
-    del guard nuevo de la captura no se lleve por delante el rescate que ya
-    funcionaba antes del 16-ago."""
+    del guard nuevo de la captura no se lleve por delante el disparo que ya
+    funcionaba antes.
+
+    En el centinela esto es MAS grave que en el watchdog: si un 500 de la API
+    en el guard nuevo dejara el lanzamiento del bucle en skipped, no se
+    perderia un rescate, se perderia la velada entera desde el minuto cero."""
     for paso in (
-        _unico_paso_que_dispara(WATCHDOG, "live-event-loop.yml"),
-        _unico_paso_que_dispara(WATCHDOG, "capture-live-samples.yml"),
+        _unico_paso_que_dispara(fichero, "live-event-loop.yml"),
+        _unico_paso_que_dispara(fichero, "capture-live-samples.yml"),
     ):
         assert "!cancelled()" in paso["if"], paso["name"]
+
+
+def test_el_centinela_no_lanza_nada_si_el_sueno_no_termino_bien():
+    """LO QUE EL WATCHDOG NO NECESITA Y EL CENTINELA SI. El watchdog no duerme;
+    este se pasa hasta 5 h dormido antes de disparar.
+
+    Mientras los pasos de lanzamiento llevaban el `success()` implicito de
+    Actions, un fallo del paso del sueno los dejaba en skipped y no pasaba nada.
+    Al ponerles `!cancelled()` —necesario para que un 500 en el guard nuevo no
+    se lleve la velada por delante— esa proteccion desaparece: un sueno que
+    revienta pasaria a lanzar la velada hasta CINCO HORAS antes de tiempo, con
+    un bucle A de 185 min que se habria muerto antes de la primera campana.
+
+    Por eso los dos pasos exigen a mano que el sueno haya salido bien."""
+    for workflow in ("live-event-loop.yml", "capture-live-samples.yml"):
+        condicion = _unico_paso_que_dispara(SENTINEL, workflow)["if"]
+        assert "steps.dormir.outcome == 'success'" in condicion, (
+            f"el paso que dispara {workflow} ya no comprueba el sueno: con "
+            "`!cancelled()` puesto, un fallo del sueno lanzaria la velada antes "
+            "de tiempo."
+        )
+    # Y el paso del sueno tiene que seguir teniendo ese id, o la condicion de
+    # arriba es una referencia a la nada — que actionlint SI caza, pero solo si
+    # nadie la borra junto con el id.
+    assert _paso_con_id(SENTINEL, "dormir")["run"].strip().endswith('sleep "$SEG"')
+
+
+def test_el_centinela_no_mete_el_plan_en_un_literal_de_shell():
+    """El JSON del plan lleva el `nombre` de la velada, sacado de la BD. Metido
+    en `PLAN='<json>'`, un nombre con apostrofo (O'Malley) parte el literal y el
+    paso revienta — o peor, inyecta. Los valores viajan por `env:` desde outputs
+    del paso `plan`, que es lo que ademas permitio partir el lanzamiento en dos.
+
+    Se ignoran los comentarios: el porque de esto vive en uno de ellos."""
+    codigo = "\n".join(
+        linea
+        for linea in SENTINEL.read_text(encoding="utf-8").splitlines()
+        if not linea.lstrip().startswith("#")
+    )
+    assert "PLAN='" not in codigo, (
+        "live-sentinel.yml vuelve a meter el JSON del plan en un literal de "
+        "shell entre comillas simples."
+    )
 
 
 # ------------------------------------------------- 3. que el ensayo pruebe algo
 
 
-def test_los_dos_recuentos_se_ejecutan_tambien_en_ensayo():
+@pytest.mark.parametrize("fichero", CON_GUARD, ids=lambda f: f.name)
+def test_los_dos_recuentos_se_ejecutan_tambien_en_ensayo(fichero: Path):
     """Un `dry_run` fuera de velada devolvia SIN_VELADA y se saltaba TODO: el
     `gh run list` no llegaba a ejecutarse ni una vez y el run salia verde en
     40 s sin haber probado nada. Un error de comillas en el jq habria pasado el
     ensayo tan campante."""
     for step_id in ("guard", "guard_cap"):
-        condicion = _paso_con_id(WATCHDOG, step_id)["if"]
+        condicion = _paso_con_id(fichero, step_id)["if"]
         assert "inputs.dry_run == true" in condicion, (
-            f"el paso '{step_id}' vuelve a saltarse en ensayo: el ensayo no "
-            "prueba el recuento."
+            f"{fichero.name}: el paso '{step_id}' vuelve a saltarse en ensayo, "
+            "asi que el ensayo no prueba el recuento."
         )
 
 
@@ -561,7 +629,15 @@ def test_la_premisa_del_umbral_sigue_siendo_cierta(tmp_path, monkeypatch):
     )
 
 
-CITA_POR_LINEA = re.compile(r"notify-on-failure\.?y?m?l?:\d+")
+# Los cinco ficheros del directo se citan entre si constantemente y se mueven
+# constantemente. Hasta el 17-ago-2026 esto solo vigilaba notify-on-failure, y
+# por eso habia SEIS citas al centinela y al watchdog caducadas a la vez sin que
+# nada se pusiera en rojo. Partir "Lanzar el directo" en dos las habria
+# descolocado otra vez.
+CITA_POR_LINEA = re.compile(
+    r"(notify-on-failure|live-sentinel|live-watchdog|live-event-loop"
+    r"|capture-live-samples)\.?y?m?l?:\d+"
+)
 
 
 def test_nadie_cita_notify_on_failure_por_numero_de_linea():

@@ -161,7 +161,7 @@ jobs:
         # tiene su PROPIO grupo de concurrency (lineas 34-36 de ese fichero,
         # `cancel-in-progress: false`), con la misma regla del unico pendiente.
         # El centinela deja siempre captura A en curso + captura B en cola
-        # (live-sentinel.yml:145-148), asi que el disparo extra del rescate
+        # (su paso "Lanzar la captura cruda"), asi que el disparo extra del rescate
         # EXPULSA a la B. La noche del UFC 330 esas dos eran A=31908917812 y
         # B=31908919300, que estuvo 3h26 en 'pending' (creada 21:15:10Z,
         # arranco 00:41:22Z).
