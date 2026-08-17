@@ -56,6 +56,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -79,6 +80,7 @@ from .models import EventRecord
 from .repositories.events import find_existing_event_id
 from .repositories.fighters import get_all_fighters, get_fighter_id_by_source
 from .repositories.fights import fill_fight_result, find_fight_id_by_fighters
+from .repositories.service_heartbeats import SERVICIO_BUCLE, upsert_service_heartbeat
 from .repositories.live_stats import (
     delete_live_fight_stat_samples,
     delete_live_fight_stats,
@@ -862,6 +864,36 @@ def loop_exit_code(totals: Counter) -> int:
     return 0
 
 
+# Cada cuánto, como poco, se anota el latido del bucle. A 20 s de intervalo,
+# 235 min de ventana serían 705 conexiones a Neon por noche solo para esto. Con
+# 60 s bastan ~235, y contra el umbral de 10 min del panel deja 10 escrituras de
+# margen: hacen falta diez seguidas fallidas para que el panel se ponga rojo.
+LATIDO_CADA_SEGUNDOS = 60
+
+
+def escribir_latido_del_bucle(detalle: str) -> None:
+    """Deja constancia de que el BUCLE (no el cron de respaldo) sigue vivo.
+
+    CONEXIÓN PROPIA Y CORTA, no la de la pasada: `refresh_live_results` tiene
+    una guarda barata que sale SIN abrir la BD cuando el scoreboard viene vacío,
+    así que muchas pasadas no dejan ninguna conexión que reutilizar. Y el latido
+    debe escribirse igual: «he hablado con ESPN y me ha contestado» es
+    exactamente lo que significa.
+
+    NO PUEDE TUMBAR LA VENTANA. Esto corre dentro del bucle que graba la velada:
+    un hipo de Neon escribiendo el latido no puede llevarse por delante la
+    grabación. De ahí el except ancho — el arreglo que existe para demostrar que
+    el bucle está vivo sería lo último que debería matarlo.
+    """
+    try:
+        settings = get_settings()
+        with connect(settings.database_url) as connection:
+            upsert_service_heartbeat(connection, SERVICIO_BUCLE, detalle)
+            connection.commit()
+    except Exception:  # noqa: BLE001 - el latido nunca mata la ventana
+        LOGGER.warning("No se pudo anotar el latido del bucle (%s)", detalle, exc_info=True)
+
+
 def run_bounded_loop(
     dates: str | None,
     dry_run: bool,
@@ -881,12 +913,30 @@ def run_bounded_loop(
     totals: Counter = Counter()
     iterations = 0
     failures = 0
+    ultimo_latido = 0.0
     while True:
         iterations += 1
         try:
             counts = refresh_live_results(dates=dates, dry_run=dry_run)
             totals.update(counts)
             print(json.dumps({key: counts.get(key, 0) for key in SUMMARY_KEYS}), flush=True)
+            # EL LATIDO VA AQUÍ, DENTRO DE run_bounded_loop, Y ESO ES LA MITAD
+            # DEL ARREGLO. El cron de respaldo (live-results.yml) ejecuta este
+            # MISMO módulo sin --duration-minutes, así que nunca entra en esta
+            # función. Puesto en refresh_live_results, que sí comparten, el
+            # respaldo también latiría y esto valdría cero pareciendo que
+            # funciona. Ver repositories/service_heartbeats.py.
+            #
+            # Después de la pasada y solo si NO lanzó excepción: el latido
+            # significa "he hablado y me han contestado", igual que el de
+            # keepalive-prediction.
+            ahora = time.monotonic()
+            if not dry_run and (ultimo_latido == 0.0 or ahora - ultimo_latido >= LATIDO_CADA_SEGUNDOS):
+                escribir_latido_del_bucle(
+                    f"live-event-loop run {os.environ.get('GITHUB_RUN_ID', 'local')} "
+                    f"pasada {iterations}"
+                )
+                ultimo_latido = ahora
             if iterations == 1 and counts.get("scoreboard_events", 0) == 0:
                 LOGGER.info("Bounded loop: scoreboard vacío en la 1ª pasada; sin evento en la ventana.")
                 break

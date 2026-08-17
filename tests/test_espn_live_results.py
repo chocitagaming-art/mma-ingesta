@@ -446,6 +446,130 @@ def test_run_bounded_loop_survives_iteration_errors(monkeypatch):
     assert totals["scoreboard_events"] == len(calls) - 1
 
 
+# --------------------------------------- el latido propio del bucle (026)
+#
+# EL PROBLEMA QUE RESUELVE: el bucle del directo y el cron de respaldo son EL
+# MISMO PROGRAMA. Lo unico que los distingue es `--duration-minutes`, que es lo
+# que hace entrar en run_bounded_loop. Los dos escriben en live_fight_stats, asi
+# que el "pulso" que mira el panel no puede demostrar cual de los dos vive: con
+# el bucle muerto y el respaldo escribiendo sus 2-6 muestras por hora, el panel
+# aguanta en verde hasta 60 min.
+#
+# Por eso el latido va DENTRO de run_bounded_loop y solo ahi. El tercer test de
+# este bloque es el que da todo el valor al arreglo: si alguien mueve la llamada
+# a refresh_live_results —la ruta que SI comparten— el respaldo tambien latiria
+# y esto valdria cero PARECIENDO que funciona.
+
+
+def _bucle_de_prueba(monkeypatch, *, pasadas_ok=True, paso_reloj=60.0):
+    from src.scrapers import espn_live_results as module
+
+    _patch_clock(monkeypatch, module, step_seconds=paso_reloj)
+    latidos = []
+    monkeypatch.setattr(module, "escribir_latido_del_bucle", lambda d: latidos.append(d))
+
+    def fake_refresh(dates=None, dry_run=False):
+        if not pasadas_ok:
+            raise RuntimeError("ESPN caido")
+        return Counter({"scoreboard_events": 1, "live_events": 1})
+
+    monkeypatch.setattr(module, "refresh_live_results", fake_refresh)
+    return module, latidos
+
+
+def test_el_bucle_deja_su_propio_latido_en_cada_pasada(monkeypatch):
+    module, latidos = _bucle_de_prueba(monkeypatch)
+    module.run_bounded_loop(dates=None, dry_run=False, duration_minutes=5, interval_seconds=20)
+    assert latidos, "el bucle no dejo ni un latido: el panel no puede demostrar que vive"
+    assert all("live-event-loop" in d for d in latidos)
+
+
+def test_el_latido_no_abre_una_conexion_por_pasada(monkeypatch):
+    """A 20 s de intervalo serian 705 conexiones a Neon por noche solo para
+    esto. El acelerador de 60 s las baja a ~235, y contra el umbral de 10 min
+    del panel deja 10 escrituras de margen.
+
+    El reloj falso avanza 1 s por consulta (dos consultas por vuelta), asi que
+    hacen falta ~30 pasadas para juntar los 60 s del acelerador. La cuenta que
+    importa es la relacion: sin acelerador saldria un latido POR PASADA."""
+    from src.scrapers import espn_live_results as module
+
+    _patch_clock(monkeypatch, module, step_seconds=1.0)
+    latidos, pasadas = [], []
+    monkeypatch.setattr(module, "escribir_latido_del_bucle", lambda d: latidos.append(d))
+    monkeypatch.setattr(
+        module, "refresh_live_results",
+        lambda dates=None, dry_run=False: (pasadas.append(1), Counter({"scoreboard_events": 1}))[1],
+    )
+    module.run_bounded_loop(dates=None, dry_run=False, duration_minutes=5, interval_seconds=20)
+
+    assert len(pasadas) > 30, f"solo {len(pasadas)} pasadas: el test no mide nada"
+    assert 0 < len(latidos) <= len(pasadas) / 10, (
+        f"{len(latidos)} latidos en {len(pasadas)} pasadas: el acelerador no frena. "
+        "Una noche entera serian ~705 conexiones a Neon solo para latir."
+    )
+
+
+def test_el_cron_de_respaldo_no_late_jamas(monkeypatch):
+    """EL TEST QUE DA TODO EL VALOR AL ARREGLO.
+
+    `live-results.yml` ejecuta este MISMO modulo sin --duration-minutes, o sea
+    por refresh_live_results directamente, sin pasar por run_bounded_loop. Si el
+    latido se moviera a la ruta compartida, el respaldo lo escribiria y "el
+    bucle esta vivo" volveria a ser indemostrable — pero el panel se veria
+    igual de verde, que es el peor final posible."""
+    from src.scrapers import espn_live_results as module
+
+    latidos = []
+    monkeypatch.setattr(module, "escribir_latido_del_bucle", lambda d: latidos.append(d))
+    monkeypatch.setattr(
+        module, "process_events", lambda *a, **k: Counter({"events_matched": 1})
+    )
+    monkeypatch.setattr(module, "fetch_scoreboard", lambda session, dates: {"events": []})
+    monkeypatch.setattr(module, "build_espn_session", lambda: object())
+
+    module.refresh_live_results(dates="20260815", dry_run=True)
+    assert latidos == [], (
+        "el cron de respaldo ha escrito el latido del BUCLE. El arreglo vale "
+        "cero y encima lo parece todo lo contrario."
+    )
+
+
+def test_un_latido_que_revienta_no_mata_la_grabacion(monkeypatch):
+    """El latido corre DENTRO del bucle que graba la velada. El arreglo que
+    existe para demostrar que el bucle vive seria lo ultimo que deberia
+    matarlo."""
+    from src.scrapers import espn_live_results as module
+
+    _patch_clock(monkeypatch, module, step_seconds=60.0)
+    pasadas = []
+
+    def conexion_rota(url):
+        raise RuntimeError("Neon dice que no")
+
+    # Se rompe `connect`, que es el primer sitio real por el que pasa el latido.
+    # Asi el test recorre escribir_latido_del_bucle de verdad —incluido su
+    # try/except— y no toca la red ni una vez.
+    monkeypatch.setattr(module, "connect", conexion_rota)
+    monkeypatch.setattr(
+        module, "refresh_live_results",
+        lambda dates=None, dry_run=False: (pasadas.append(1), Counter({"scoreboard_events": 1}))[1],
+    )
+    totals = module.run_bounded_loop(
+        dates=None, dry_run=False, duration_minutes=5, interval_seconds=20
+    )
+    assert len(pasadas) >= 2, "la grabacion se paro por culpa del latido"
+    assert totals["loop_failures"] == 0, "un latido roto se ha contado como pasada fallida"
+
+
+def test_en_ensayo_no_se_escribe_latido(monkeypatch):
+    # Un dry-run no graba nada, asi que tampoco puede afirmar que el bucle de
+    # verdad esta vivo.
+    module, latidos = _bucle_de_prueba(monkeypatch)
+    module.run_bounded_loop(dates=None, dry_run=True, duration_minutes=5, interval_seconds=20)
+    assert latidos == []
+
+
 # ------------------------------------- plan B del método: el leaf `status`
 #
 # details[] viene TOPADO A 10 entradas y la del "Unofficial Winner" se cae por
