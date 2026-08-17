@@ -170,12 +170,22 @@ def estado_de_velada(
     """
     if combates_activos > 0 and combates_resueltos >= combates_activos:
         return "TERMINADA"
-    if latido_min is None:
-        # Salvaguarda, no camino normal: hoy la fila existe. Cubre que alguien
-        # renombre el servicio o vacie la tabla, para no dar CAIDO ocho veces
-        # seguidas por un dato que falta.
-        return "OK" if muestras_recientes > 0 else "CAIDO"
-    return "OK" if latido_min <= UMBRAL_LATIDO_MINUTOS else "CAIDO"
+    # EL LATIDO SOLO PUEDE SUMAR ROJO, NUNCA COMPRAR UN VERDE. Es la misma regla
+    # que el panel aplica al pulso, y aqui costo aprenderla dos veces el mismo
+    # dia: la primera version dejaba que un latido fresco DECIDIERA, y con eso
+    # se perdia la deteccion de "el bucle vive pero no graba" — un bucle sano al
+    # que ESPN deja de listarle el evento late cada minuto con cero muestras, y
+    # hasta entonces eso era CAIDO. Cerrar un agujero abriendo otro no es
+    # arreglarlo.
+    #
+    # Asi, cada criterio tapa lo que el otro no ve:
+    #   latido rancio + muestras   -> CAIDO   (bucle muerto, escribe el respaldo)
+    #   latido fresco + 0 muestras -> CAIDO   (vive pero no graba)
+    #   latido fresco + muestras   -> OK
+    # Y sin fila de latido se decide como toda la vida.
+    if latido_min is not None and latido_min > UMBRAL_LATIDO_MINUTOS:
+        return "CAIDO"
+    return "OK" if muestras_recientes > 0 else "CAIDO"
 
 
 # El latido del bucle. Una fila por servicio, sin historial (migracion 026); si

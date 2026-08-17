@@ -121,14 +121,56 @@ def test_el_respaldo_ya_no_puede_fingir_que_el_bucle_vive():
     ) == "CAIDO"
 
 
-def test_los_paseillos_dejan_de_dar_un_caido_falso():
-    """EL UNICO CAIDO DE LA HISTORIA DEL WATCHDOG FUE ESTE, Y ERA FALSO. Run
-    31909928211, 15-ago 21:37:17Z, siete minutos despues del ancla:
-    combates_activos 12, combates_resueltos 0, muestras_recientes 0. No podia
-    haber muestras — el escritor tiene PROHIBIDO guardarlas hasta la campana del
-    asalto 1. Con el bucle latiendo, esto pasa a ser OK."""
+def test_un_bucle_vivo_que_no_graba_sigue_siendo_un_caido():
+    """EL LATIDO SOLO SUMA ROJO, NUNCA COMPRA UN VERDE. Y este test es el que lo
+    fija, porque la tentacion es justo la contraria.
+
+    La primera version de este arreglo dejaba que un latido fresco DECIDIERA, y
+    con eso ganaba un efecto secundario que parecia un regalo: el unico CAIDO de
+    la historia del watchdog (run 31909928211, siete minutos despues del ancla,
+    cuando el escritor tiene PROHIBIDO guardar muestras hasta la campana del
+    asalto 1) pasaba a OK.
+
+    El precio era perder la deteccion de "el bucle vive pero no graba": un bucle
+    sano al que ESPN deja de listarle el evento late cada minuto con cero
+    muestras, y hasta entonces eso era CAIDO. Se prefiere el falso positivo de
+    los paseillos —que cuesta UN correo, porque el guard bloquea el disparo con
+    el bucle vivo— antes que un agujero de deteccion la noche de la velada."""
     assert estado_de_velada(
         muestras_recientes=0, combates_activos=12, combates_resueltos=0, latido_min=0.7
+    ) == "CAIDO"
+    # Y a mitad de cartel, que es donde de verdad duele:
+    assert estado_de_velada(
+        muestras_recientes=0, combates_activos=13, combates_resueltos=6, latido_min=0.4
+    ) == "CAIDO"
+
+
+def test_el_nombre_del_servicio_es_el_mismo_en_los_tres_sitios():
+    """El literal 'live-loop' esta escrito a mano en TRES sitios de DOS repos:
+    aqui lo escribe el bucle, aqui lo lee el watchdog, y en mma-app lo lee el
+    panel. Si alguien lo renombra en uno solo, no falla nada: el watchdog vuelve
+    al criterio viejo en silencio y el panel recibe NULL, que no es rojo. Dos
+    comprobaciones apagadas sin una linea en rojo.
+
+    Mismo patron que test_stat_key_map_matches_the_app_contract."""
+    from pathlib import Path
+
+    from src.scrapers.repositories.service_heartbeats import SERVICIO_BUCLE
+    from scripts.live_watchdog import LATIDO_SQL  # noqa: F401 (se usa con SERVICIO_BUCLE)
+
+    assert SERVICIO_BUCLE == "live-loop"
+
+    consulta = Path(__file__).resolve().parents[2] / "mma-app" / "src" / "lib" / "estado" / "consulta.ts"
+    if consulta.is_file():  # el repo hermano no siempre esta al lado
+        assert f"'{SERVICIO_BUCLE}'" in consulta.read_text(encoding="utf-8"), (
+            f"mma-app ya no pregunta por el servicio '{SERVICIO_BUCLE}': el panel "
+            "se quedaria sin latido y eso NO es rojo, asi que no fallaria nada."
+        )
+
+
+def test_el_latido_fresco_con_dato_entrando_es_lo_unico_que_da_verde():
+    assert estado_de_velada(
+        muestras_recientes=37, combates_activos=13, combates_resueltos=6, latido_min=0.5
     ) == "OK"
 
 

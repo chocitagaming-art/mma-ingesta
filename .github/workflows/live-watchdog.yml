@@ -9,10 +9,19 @@ name: Watchdog del directo
 # falla, no termina y no emite ningun evento — era un punto ciego estructural,
 # no un descuido.
 #
-# Por eso este no vigila procesos, vigila el DATO: "¿hay velada empezada y no
-# entran muestras?". Esa pregunta se contesta igual si el bucle nunca se lanzo,
-# si murio por timeout a mitad del estelar o si un dispatch de mas lo cancelo,
-# que son los tres modos de fallo que han pasado de verdad.
+# Por eso este no vigila procesos, vigila que el BUCLE ESTE VIVO Y GRABANDO. La
+# pregunta se contesta igual si el bucle nunca se lanzo, si murio por timeout a
+# mitad del estelar o si un dispatch de mas lo cancelo, que son los tres modos
+# de fallo que han pasado de verdad.
+#
+# HASTA EL 17-AGO-2026 LA PREGUNTA ERA SOLO "¿entran muestras en 45 min?", Y ERA
+# INSUFICIENTE: las muestras las escribe tambien el cron de respaldo
+# (live-results.yml), que corre el mismo programa sin --duration-minutes. Los 8
+# runs de este watchdog la noche del UFC 330 tenian respaldo dentro de su
+# ventana: con el bucle muerto toda la noche, los ocho habrian dicho OK.
+# Ahora hacen falta LAS DOS cosas para dar verde — latido fresco Y dato
+# entrando—, porque cada una tapa lo que la otra no ve. El porque largo esta en
+# scripts/live_watchdog.py (UMBRAL_LATIDO_MINUTOS y estado_de_velada).
 #
 # Y si la respuesta es que si, no se limita a avisar: RELANZA el bucle. Un aviso
 # a las 15:00 de un sabado no sirve de nada si el dueno esta comiendo.
@@ -66,7 +75,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-scrapers.txt
 
-      - name: Esta entrando dato del directo?
+      - name: Esta vivo el bucle y entrando dato?
         id: wd
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
