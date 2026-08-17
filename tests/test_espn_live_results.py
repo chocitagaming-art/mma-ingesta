@@ -519,6 +519,7 @@ def test_el_cron_de_respaldo_no_late_jamas(monkeypatch):
     bucle esta vivo" volveria a ser indemostrable — pero el panel se veria
     igual de verde, que es el peor final posible."""
     from src.scrapers import espn_live_results as module
+    from src.scrapers.config import Settings
 
     latidos = []
     monkeypatch.setattr(module, "escribir_latido_del_bucle", lambda d: latidos.append(d))
@@ -527,6 +528,15 @@ def test_el_cron_de_respaldo_no_late_jamas(monkeypatch):
     )
     monkeypatch.setattr(module, "fetch_scoreboard", lambda session, dates: {"events": []})
     monkeypatch.setattr(module, "build_espn_session", lambda: object())
+    # 🪤 get_settings tambien, o este test solo pasa donde haya un .env con
+    # DATABASE_URL. En CI no lo hay y reventaba con RuntimeError — el megatest
+    # local NO caza esto, porque en local el .env existe. Con el scoreboard
+    # vacio la guarda barata de refresh_live_results sale antes de conectar,
+    # asi que la URL falsa no se usa nunca.
+    monkeypatch.setattr(
+        module, "get_settings",
+        lambda: Settings(database_url="postgresql://falsa/no-se-usa", anthropic_api_key=None),
+    )
 
     module.refresh_live_results(dates="20260815", dry_run=True)
     assert latidos == [], (
@@ -550,6 +560,16 @@ def test_un_latido_que_revienta_no_mata_la_grabacion(monkeypatch):
     # Se rompe `connect`, que es el primer sitio real por el que pasa el latido.
     # Asi el test recorre escribir_latido_del_bucle de verdad —incluido su
     # try/except— y no toca la red ni una vez.
+    #
+    # Y se fija get_settings para que el fallo sea EL DE connect en los dos
+    # entornos: sin esto, en CI (sin .env) reventaria antes en get_settings y el
+    # test aprobaria por un motivo distinto del que dice probar.
+    from src.scrapers.config import Settings
+
+    monkeypatch.setattr(
+        module, "get_settings",
+        lambda: Settings(database_url="postgresql://falsa/no-se-usa", anthropic_api_key=None),
+    )
     monkeypatch.setattr(module, "connect", conexion_rota)
     monkeypatch.setattr(
         module, "refresh_live_results",
