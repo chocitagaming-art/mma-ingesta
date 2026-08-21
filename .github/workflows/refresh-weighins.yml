@@ -5,14 +5,33 @@ name: Refresh weigh-ins
 # weigh_ins. Idempotent — INSERT ... ON CONFLICT (fight_id, fighter_id)
 # DO UPDATE with COALESCE (never overwrites with NULL) — so re-dispatching is
 # always safe.
-# Weekly cron (Fridays 20:00 UTC): official weigh-ins run Friday morning US
-# time and the article lands around noon ET (16:00 UTC), so 20:00 UTC catches
-# Saturday's card the evening before; the default window also re-covers the
-# previous weekend in case an article was published late.
+# DIARIO DOBLE desde el 21-ago-2026 (antes: un unico cron los viernes 20:00 UTC).
+# El pesaje oficial se celebra el viernes por la manana en EEUU y el articulo cae
+# sobre el mediodia ET (16:00 UTC), asi que las 20:00 del viernes lo cogian... si
+# todo salia bien a la primera. El problema era el "si": UNA sola pasada a la
+# semana, sin reintento. Si el articulo se publicaba tarde, si ufc.com titulaba la
+# cartelera de otra forma o si el run fallaba, la siguiente oportunidad caia el
+# viernes SIGUIENTE, seis dias DESPUES del combate — y la velada se quedaba sin
+# pesajes para siempre.
+#
+# Es el mismo fallo estructural que tenian enrich-photos.yml (arreglado el 21-ago
+# en 0442ed7) y que ya se le corrigio a enrich-fullbody el 1-ago: un pase semanal
+# no sirve para un dato que aparece entre semana y caduca el sabado.
+#
+# Repetirlo no cuesta ni puede romper nada: el upsert es idempotente
+# (ON CONFLICT ... DO UPDATE con COALESCE, nunca pisa con NULL), la ventana por
+# defecto ya recoge de HOY-7 a HOY+2 dias, y un pase son 2-3 peticiones HTTP por
+# evento: termina en segundos. Cuando no hay articulo nuevo no escribe nada.
+#
+# Las 23:00 son la red de la red, copiando el patron de refresh-faceoffs.yml: un
+# articulo publicado despues de las 20:00 entra esa misma noche en vez de esperar
+# al dia siguiente. Ojo, las horas REALES no son las nominales: GitHub encola los
+# crons y las 6 ultimas pasadas arrancaron entre 20:31 y 21:05 UTC.
 # REQUIRES migration db/migrations/011_fase5.sql applied first.
 on:
   schedule:
-    - cron: "0 20 * * 5"
+    - cron: "0 20 * * *"
+    - cron: "0 23 * * *"
   workflow_dispatch:
     inputs:
       lookback_days:

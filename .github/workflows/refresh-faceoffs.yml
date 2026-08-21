@@ -22,6 +22,21 @@ on:
     # Es idempotente (first-writer-wins) y el `concurrency` de abajo impide que
     # las dos pasadas se pisen, así que repetir no cuesta nada.
     - cron: "0 23 * * *"
+    # TERCERA Y CUARTA PASADA (21-ago-2026), para cerrar la ZONA MUERTA DE 21 h.
+    # Medido sobre los 30 ultimos runs: el cron de las 20:00 arranca de verdad
+    # entre 20:29 y 20:53 UTC, y el de las 23:00 entre 23:10 y 23:31. Entre la
+    # pasada del viernes noche y la del sabado por la tarde pasaban 21,3 HORAS
+    # REALES sin mirar — y esa franja es justo cuando la UFC publica el careo de
+    # una velada de sabado (viernes noche hora de EEUU = madrugada UTC).
+    # Ya costo un careo por diez minutos.
+    #
+    # 02:00 coge la publicacion de la noche del viernes en EEUU; 11:00 es la
+    # segunda oportunidad de la manana antes de que llegue la de las 20:00.
+    # Hueco maximo: ~9 h en vez de 21. Cuesta 16 unidades de cuota de YouTube por
+    # pasada sobre un tope diario de 10.000, o sea nada, y sigue siendo
+    # first-writer-wins: una pasada de mas no puede pisar un careo ya escrito.
+    - cron: "0 2 * * *"
+    - cron: "0 11 * * *"
   workflow_dispatch:
 
 concurrency:
