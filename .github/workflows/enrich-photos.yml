@@ -7,14 +7,29 @@ name: Enrich headshots (ufc.com)
 # the record is only written when the stored one is 0-0-0, so re-running is
 # always safe. Placeholder/silhouette images are rejected by the
 # _is_placeholder_image guard — the DB never stores ufc.com shadow images.
-# Weekly cron (Mondays 05:30 UTC, owner request 11-jul, staggered 30 min after
-# enrich-fullbody so ufc.com is not hit by both at once): newcomers whose
-# headshot ESPN could not provide (the daily refresh-upcoming path) now get
-# the official ufc.com one on their own as soon as it is published.
+# DIARIO desde el 21-ago-2026 (antes: solo los lunes). Mismo motivo y mismo
+# arreglo que se le hizo a enrich-fullbody el 1-ago, y por el mismo fallo:
+# un luchador dado de alta entre semana llegaba a su velada sin cara.
+# Paso el 18-ago con los CUATRO debutantes del 1086 (Wint, Kuse, Dorsainvil y
+# Chatman): sus fichas nacieron el martes, el pase semanal habia corrido el
+# lunes 17, y el siguiente caia el lunes 24 — DOS DIAS DESPUES de su combate.
+# Hubo que recortarles la foto a mano de Tapology. Con cadencia diaria, ufc.com
+# publico sus paginas entre el 19 y el 21 y las habriamos cogido solas.
+# Las carteleras se anuncian y se caen entre semana, asi que el hueco cambia a
+# diario y una foto que ufc.com publica el jueves no puede esperar al lunes.
+#
+# Repetirlo a diario no cuesta ni rompe nada: el pase por defecto solo mira
+# luchadores de carteleras PROXIMAS que aun tengan hueco (1-2 min), cada UPDATE
+# es aditivo (COALESCE, solo rellena NULLs) y el guard _is_placeholder_image
+# sigue rechazando las siluetas. Cuando no falta ninguna foto, el pase no
+# escribe nada y termina en segundos.
+#
+# El desfase de 30 min con enrich-fullbody (05:00) se mantiene a proposito: es
+# para no pedirle a ufc.com dos barridos a la vez, no por horario.
 # Manual dispatch remains for custom passes (--all sweeps the whole table).
 on:
   schedule:
-    - cron: "30 5 * * 1"     # Lunes 05:30 UTC: solo carteleras proximas
+    - cron: "30 5 * * *"     # Diario 05:30 UTC: solo carteleras proximas
     - cron: "0 4 1 * *"      # F5: dia 1 de cada mes 04:00 UTC -> barrido --all
   workflow_dispatch:
     inputs:
