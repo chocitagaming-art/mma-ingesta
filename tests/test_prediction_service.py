@@ -126,9 +126,30 @@ def test_predict_accepts_frontend_env_key_name(client, monkeypatch):
 def test_health_ok_when_model_and_db_ready(client, monkeypatch):
     monkeypatch.setattr(service, "_get_bundle", lambda: {"ready": True})
     monkeypatch.setattr(service, "_db_ping", lambda: None)
+    response = client.get("/health?deep=true")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "db": "up"}
+
+
+def test_shallow_health_never_touches_the_database(client, monkeypatch):
+    """El ping barato NO puede abrir conexion a Neon.
+
+    Es la guarda de regresion del apagon del 18-ago-2026: keepalive-prediction.yml
+    sondea /health cada 10 minutos las 24 h, y mientras ese sondeo tocaba la base,
+    el computo de Neon no se suspendia nunca y se comia la cuota del mes entera.
+    Si alguien vuelve a meter el _db_ping en el camino superficial, este test cae.
+    """
+    monkeypatch.setattr(service, "_get_bundle", lambda: {"ready": True})
+
+    def boom():  # pragma: no cover - debe ser inalcanzable
+        raise AssertionError("/health superficial no debe tocar la base de datos")
+
+    monkeypatch.setattr(service, "_db_ping", boom)
+
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    # "skipped" y no "up": el 200 superficial no afirma nada sobre Neon.
+    assert response.json() == {"status": "ok", "db": "skipped"}
 
 
 @pytest.fixture
@@ -172,6 +193,6 @@ def test_health_unhealthy_when_db_unreachable(client, monkeypatch):
         raise RuntimeError("db down")
 
     monkeypatch.setattr(service, "_db_ping", boom)
-    response = client.get("/health")
+    response = client.get("/health?deep=true")
     assert response.status_code == 503
     assert response.json() == {"status": "unhealthy"}

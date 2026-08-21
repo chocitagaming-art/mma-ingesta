@@ -8,9 +8,19 @@ name: Monitor web
 # comenta y cierra el Issue. Anti-spam: nunca hay más de un Issue abierto.
 # El dispatch manual acepta test_failure=true para probar el canal de alertas
 # end-to-end con un fallo forzado (una URL que no existe).
+# ⚠️ DOS CRONES A PROPOSITO (21-ago-2026).
+#   */15  -> ronda BARATA. Ninguna de sus comprobaciones despierta a Neon.
+#   10 * * -> una vez por hora, ademas, el chequeo PROFUNDO de la BD (?deep=1).
+# Antes la ronda de cada 15 min llamaba a /api/health, que hacia SELECT 1 contra
+# Neon. Cada llamada despertaba el computo, que seguia encendido otros 5 minutos
+# hasta el autosuspend: 20 minutos de cada 60 pagados por vigilar. Sumado al
+# keep-alive, la cuota del plan gratuito se agoto el 18-ago y la web se quedo
+# tres dias sin base de datos. El minuto 10 no cae en ningun multiplo de 15, asi
+# que los dos crones nunca coinciden.
 on:
   schedule:
     - cron: "*/15 * * * *"
+    - cron: "10 * * * *"
   workflow_dispatch:
     inputs:
       test_failure:
@@ -35,6 +45,9 @@ jobs:
       REPO: ${{ github.repository }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       BASE: https://mmastatus.app
+      # El chequeo profundo de la BD corre en el cron horario y en el dispatch
+      # manual; las rondas de cada 15 min se quedan en superficial.
+      PROFUNDO: ${{ github.event.schedule == '10 * * * *' || github.event_name == 'workflow_dispatch' }}
     steps:
       - name: Comprobar endpoints
         run: |
@@ -52,12 +65,22 @@ jobs:
             fi
           }
           check "Portada" "$BASE/" "MMA STATUS"
-          check "API health (BD Neon)" "$BASE/api/health" '"ok":true'
+          # Superficial (¿vive la app?) siempre; profundo (¿contesta Neon?) solo
+          # en el pase horario. Ver el aviso de los dos crones arriba.
+          if [ "$PROFUNDO" = "true" ]; then
+            check "API health (BD Neon)" "$BASE/api/health?deep=1" '"db":"up"'
+          else
+            check "API health (app viva)" "$BASE/api/health" '"ok":true'
+          fi
           check "Ficha de luchador" "$BASE/fighters/6493" "MMA STATUS"
           check "Eventos" "$BASE/eventos" "MMA STATUS"
           # Render duerme ~50s en frío si el keepalive fallara; margen amplio.
           check "Prediccion (Render)" "${{ secrets.PREDICTION_SERVICE_URL }}/health" "" 75
-          check "Busqueda" "$BASE/api/search?q=test" "" 30
+          # La busqueda consulta Neon (aunque ahora con cabecera de CDN de 5 min),
+          # asi que se comprueba en el pase horario, no cada 15 minutos.
+          if [ "$PROFUNDO" = "true" ]; then
+            check "Busqueda" "$BASE/api/search?q=test" "" 30
+          fi
           # F5: chequeo barato de imagen rota. Extrae el headshot real (CDN
           # externo) de una ficha y confirma que resuelve. 200 y 403 cuentan como
           # OK (403 = hotlink-protection de ufc.com; la imagen existe); solo

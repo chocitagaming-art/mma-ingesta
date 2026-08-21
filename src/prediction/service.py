@@ -98,9 +98,22 @@ async def _lifespan(_app: FastAPI):
     # Open the shared Neon pool once so bursts of /predict reuse a handful of
     # sockets instead of opening 3 connections per request (and exhausting the
     # free-tier connection slots). Pool size is overridable via env.
+    #
+    # minconn=0, NO 1, Y ESTO ES CRITICO. psycopg2 abre `minconn` conexiones en
+    # el CONSTRUCTOR del pool y no las cierra mientras viva el proceso. Como el
+    # keep-alive mantiene esta instancia de Render despierta 24/7, con minconn=1
+    # habia UNA sesion Postgres abierta contra Neon las 24 h del dia, todos los
+    # dias. Neon no suspende el computo mientras queden conexiones abiertas, asi
+    # que el scale-to-zero no llegaba NUNCA: 0,25 CU x 730 h = ~180 CU-hora al
+    # mes contra una cuota de 100. Eso fundio la cuota el 18-ago-2026 y dejo
+    # mmastatus.app sin base de datos tres dias.
+    #
+    # Con minconn=0 el pool nace vacio y solo abre socket cuando entra una
+    # peticion real de /predict. El coste es nulo: la primera prediccion tras un
+    # rato de calma paga un handshake, que es lo que ya pagaba de todas formas.
     init_pool(
         get_settings().database_url,
-        minconn=1,
+        minconn=0,
         maxconn=int(os.getenv("PREDICTION_DB_POOL_MAX", "5")),
     )
     # Load the model eagerly so a missing/corrupt model.joblib crashes startup
@@ -206,17 +219,33 @@ async def _on_validation_error(_request, _exc: RequestValidationError) -> JSONRe
 
 
 @app.get("/health")
-def health() -> JSONResponse:
-    # Real readiness probe: the service is healthy only if the model is loaded
-    # AND the database answers a trivial query through the pool.
+def health(deep: bool = False) -> JSONResponse:
+    """Readiness probe con DOS niveles, y la distincion importa.
+
+    GET /health            -> el modelo esta cargado. NO toca la base de datos.
+    GET /health?deep=true  -> ademas, Neon contesta a un SELECT 1.
+
+    Antes solo existia el nivel profundo, y `keepalive-prediction.yml` lo sondeaba
+    cada 10 minutos las 24 h para que Render no durmiera la instancia. Cada sonda
+    despertaba el computo de Neon, que seguia encendido otros 5 minutos hasta el
+    autosuspend: el keep-alive, el solo, mantenia la base viva el mes entero.
+    Ahora el ping barato mantiene Render despierto sin costar ni una conexion, y
+    el chequeo profundo va una vez por hora.
+    """
     try:
         if _get_bundle() is None:
             raise RuntimeError("model bundle is not loaded")
-        _db_ping()
+        if deep:
+            _db_ping()
     except Exception:  # noqa: BLE001 - any failure means "not ready"
         LOGGER.exception("Health check failed")
         return JSONResponse(status_code=503, content={"status": "unhealthy"})
-    return JSONResponse(status_code=200, content={"status": "ok"})
+    # `db` declara explicitamente que se ha comprobado, para que un 200 superficial
+    # no se lea nunca como "Neon va bien".
+    return JSONResponse(
+        status_code=200,
+        content={"status": "ok", "db": "up" if deep else "skipped"},
+    )
 
 
 @app.post("/predict")

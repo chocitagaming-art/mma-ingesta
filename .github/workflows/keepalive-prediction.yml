@@ -2,21 +2,39 @@ name: Keep-alive prediction service
 
 # Render free duerme el microservicio de predicción a los ~15 min sin tráfico
 # y el arranque en frío tarda ~50s (el dueño veía fallar la 1ª predicción).
-# Ping cada 12 min a /health (verifica modelo cargado + BD viva) para que la
-# instancia no llegue a dormirse. Repos públicos → minutos de Actions gratis;
-# una instancia siempre despierta cabe en las 750 h/mes del plan free de
-# Render. El endpoint /health hace un SELECT 1 a Neon (coste despreciable).
 # Cadencia 10 min (no 12): el schedule de Actions es best-effort y puede
 # retrasarse varios minutos; con 10 min de base hay margen frente al umbral
 # de sueño (~15 min) de Render.
+#
+# ⚠️ POR QUÉ HAY DOS CRONES, Y POR QUÉ NO SE PUEDEN JUNTAR OTRA VEZ.
+# Hasta el 21-ago-2026 había uno solo: cada 10 minutos pedía /health (que hacía
+# SELECT 1 contra Neon) y además escribía el latido con psql. Eran 288 conexiones
+# al día, una cada 10 minutos, las 24 h. Neon suspende el cómputo a los 5 minutos
+# de inactividad, así que ese ritmo lo mantenía despierto el mes entero: ~180
+# CU-hora contra una cuota de 100. El 18-ago la cuota se agotó y mmastatus.app se
+# quedó tres días sin base de datos.
+#
+#   */10  -> ping SUPERFICIAL. Mantiene Render despierto y NO toca Neon.
+#   5 * * -> una vez por hora: chequeo PROFUNDO (?deep=true) + latido en la BD.
+#
+# El minuto 5 no cae en ningún múltiplo de 10, así que los dos crones nunca
+# coinciden. El panel /estado da por bueno el latido hasta 6 h (ver
+# HORAS_PREDICCION en mma-app/src/lib/estado/veredicto.ts), o sea que una vez
+# por hora le sobra margen de sobra.
 on:
   schedule:
     - cron: "*/10 * * * *"
+    - cron: "5 * * * *"
   workflow_dispatch: {}
 
 concurrency:
   group: keepalive-prediction
   cancel-in-progress: true
+
+# El chequeo profundo (y por tanto el latido) corre en el cron horario y en el
+# dispatch manual; el ping de cada 10 min se queda en superficial.
+env:
+  PROFUNDO: ${{ github.event.schedule == '5 * * * *' || github.event_name == 'workflow_dispatch' }}
 
 jobs:
   ping:
@@ -29,19 +47,30 @@ jobs:
           # por debajo del timeout del job (4 min). --retry-all-errors cubre
           # también connection-refused mientras la instancia arranca. Si el
           # servicio estaba dormido, este mismo ping lo despierta.
-          curl -fsS --max-time 70 --retry 1 --retry-delay 5 --retry-all-errors \
-            "${{ secrets.PREDICTION_SERVICE_URL }}/health"
+          #
+          # Solo el pase horario pide ?deep=true. El de cada 10 minutos comprueba
+          # que el modelo está cargado y nada más: cuesta cero conexiones a Neon.
+          if [ "$PROFUNDO" = "true" ]; then
+            URL="${{ secrets.PREDICTION_SERVICE_URL }}/health?deep=true"
+          else
+            URL="${{ secrets.PREDICTION_SERVICE_URL }}/health"
+          fi
+          curl -fsS --max-time 70 --retry 1 --retry-delay 5 --retry-all-errors "$URL"
 
       # Deja constancia EN LA BASE de que el servicio contestó. Es lo único que
       # el panel /estado puede mirar sin sondear Render él mismo (una sonda con
       # presupuesto corto no distingue "dormido" de "muerto"; ver
       # db/migrations/026_service_heartbeats.sql).
       #
-      # Va DESPUÉS del curl y sin `if:`, así que solo corre cuando el ping ha
-      # salido bien: si el servicio está caído, el paso anterior falla, este no
-      # se ejecuta y el latido envejece — que es exactamente la señal que el
-      # panel necesita. El 1-ago ese envejecimiento habría delatado la caída.
+      # Va DESPUÉS del curl, así que solo corre cuando el ping ha salido bien: si
+      # el servicio está caído, el paso anterior falla, este no se ejecuta y el
+      # latido envejece — que es exactamente la señal que el panel necesita.
+      # El 1-ago ese envejecimiento habría delatado la caída.
+      #
+      # Y solo en el pase profundo: escribir el latido cada 10 minutos era la otra
+      # mitad del problema de cuota, porque cada psql abre su propia conexión.
       - name: Anotar el latido
+        if: env.PROFUNDO == 'true'
         run: |
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c \
             "INSERT INTO service_heartbeats (service, last_ok_at, detail)
