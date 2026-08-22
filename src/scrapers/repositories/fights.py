@@ -228,8 +228,28 @@ def upsert_fight(connection: PgConnection, fight: FightRecord) -> int:
             ON CONFLICT (source, source_id)
             DO UPDATE SET
                 event_id = EXCLUDED.event_id,
-                fighter_red_id = EXCLUDED.fighter_red_id,
-                fighter_blue_id = EXCLUDED.fighter_blue_id,
+                -- CORNERS: ufcstats does not publish them. It lists the winner
+                -- first, so anything derived from its row order is a result leak
+                -- (that is how all 232 bouts of 2026 ended up as red-corner wins).
+                -- The real corner comes from ufc.com, and once a corner is stored
+                -- it is not this pass's business to change it -- the same spirit as
+                -- the #20 no-NULL-overwrite policy below, applied to an ordering
+                -- instead of a value. A genuinely different pairing (a corrected
+                -- bout) DOES update; the same two fighters in the other order do not.
+                -- NOTE: no per-cent sign in this comment on purpose -- psycopg2
+                -- reads it as a parameter marker even inside SQL comments.
+                fighter_red_id = CASE
+                    WHEN EXCLUDED.fighter_red_id = fights.fighter_blue_id
+                     AND EXCLUDED.fighter_blue_id = fights.fighter_red_id
+                    THEN fights.fighter_red_id
+                    ELSE EXCLUDED.fighter_red_id
+                END,
+                fighter_blue_id = CASE
+                    WHEN EXCLUDED.fighter_red_id = fights.fighter_blue_id
+                     AND EXCLUDED.fighter_blue_id = fights.fighter_red_id
+                    THEN fights.fighter_blue_id
+                    ELSE EXCLUDED.fighter_blue_id
+                END,
                 -- weight_class/scheduled_rounds come from markup that can drift
                 -- (weight cell unparsed -> NULL) or from inference: the #20
                 -- no-NULL-overwrite policy applies to them too, so a re-scrape
@@ -533,6 +553,23 @@ def get_fight_corner_assignment(connection: PgConnection, fight_id: int) -> tupl
 
 
 def swap_fight_corners(connection: PgConnection, fight_id: int) -> None:
+    """Swap one bout's corners. NO CALLER, AND THAT IS DELIBERATE -- read this first.
+
+    `repair_fight_winners` used to call this to make the stored row agree with the
+    ufcstats detail page. But ufcstats renders the WINNER first, so every such swap
+    dragged the result into the corner assignment: all 232 bouts of 2026 imported that
+    way came out as red-corner wins, against a 44.7-52.3 per cent range in every other
+    year, and the target leaked straight into the red-minus-blue features. Repaired by
+    hand on 2026-08-22 (103 rows plus 147 judge scorecards).
+
+    THE RULE: no ufcstats code path may set or change a corner. The real corner comes
+    from ufc.com, the only source that publishes it; historical backfill orders corners
+    by ascending fighter source_id, which is blind to the result. The winner is resolved
+    by fighter identity, so nothing needs to swap.
+
+    Kept for a deliberate one-off repair against a source that DOES know the corner.
+    If you are about to call it from a ufcstats path, you are re-opening the bug.
+    """
     with connection.cursor() as cursor:
         cursor.execute(
             """

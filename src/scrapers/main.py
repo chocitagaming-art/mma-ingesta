@@ -19,7 +19,6 @@ from .repositories.fighters import get_fighter_id_by_source, upsert_fighter
 from .repositories.fights import (
     get_fight_corner_assignment,
     list_fights_for_winner_repair,
-    swap_fight_corners,
     update_fight_winner,
     upsert_fight,
     upsert_fight_stats,
@@ -102,12 +101,16 @@ def repair_fight_winners() -> Counter:
                         winner_corner = "blue"
                 page_red_id = _resolve_fighter_id(connection, {}, settings.source_name, page_red_source_id)
                 page_blue_id = _resolve_fighter_id(connection, {}, settings.source_name, page_blue_source_id)
+                # THE WINNER IS A FIGHTER, NOT A CORNER. This used to map the page's
+                # corner onto the stored corner, swapping the row when they disagreed
+                # -- and since the ufcstats detail page lists the WINNER first, that
+                # swap dragged the result into the corner assignment. It is what left
+                # the 232 bouts of 2026 at 100% red-wins (repaired 2026-08-22).
+                # Reading the winner straight off the page's own corner makes the
+                # stored assignment irrelevant here: whichever corner Doe sits in, if
+                # the page says Doe won, Doe's id is the winner.
                 stored_red_id, stored_blue_id = get_fight_corner_assignment(connection, fight_id)
-                if stored_red_id == page_blue_id and stored_blue_id == page_red_id:
-                    swap_fight_corners(connection, fight_id)
-                    counts["repair_swapped_corners"] += 1
-                    stored_red_id, stored_blue_id = get_fight_corner_assignment(connection, fight_id)
-                elif stored_red_id != page_red_id or stored_blue_id != page_blue_id:
+                if {stored_red_id, stored_blue_id} != {page_red_id, page_blue_id}:
                     counts["repair_skipped_mismatch"] += 1
                     connection.rollback()
                     continue
@@ -115,11 +118,10 @@ def repair_fight_winners() -> Counter:
                     # Statuses were empty / non-parseable / a draw: there is no
                     # confirmed winner. Calling update_fight_winner with None here
                     # would NULL an already-stored victory, so skip the update.
-                    # (Any corner swap above is legitimate and is kept.)
                     counts["repair_skipped_no_winner"] += 1
                     connection.commit()
                     continue
-                winner_id = stored_red_id if winner_corner == "red" else stored_blue_id
+                winner_id = page_red_id if winner_corner == "red" else page_blue_id
                 update_fight_winner(connection, fight_id, winner_id)
                 connection.commit()
                 counts["repair_updated"] += 1

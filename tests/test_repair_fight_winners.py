@@ -53,7 +53,6 @@ def _wire(monkeypatch, page) -> list[tuple[int, int | None]]:
     monkeypatch.setattr(main, "connect", lambda _url: _FakeConn())
     monkeypatch.setattr(main, "list_fights_for_winner_repair", lambda _c: [(1, "/fight-details/abc")])
     monkeypatch.setattr(main, "get_fight_corner_assignment", lambda _c, _fid: (10, 20))
-    monkeypatch.setattr(main, "swap_fight_corners", lambda _c, _fid: None)
     id_by_src = {"/fighter-details/RED": 10, "/fighter-details/BLUE": 20}
     monkeypatch.setattr(
         main,
@@ -100,3 +99,43 @@ def test_decided_status_still_sets_winner(monkeypatch):
     assert winner_updates == [(1, 10)]  # red won -> stored red id, guard intact
     assert counts["repair_updated"] == 1
     assert counts["repair_skipped_no_winner"] == 0
+
+
+def test_the_stored_corner_no_longer_gets_dragged_by_the_result(monkeypatch):
+    """The winner is a FIGHTER, not a corner.
+
+    This path used to swap the stored row whenever it disagreed with the detail page --
+    and ufcstats renders the winner first, so the swap pulled the result into the corner
+    assignment. That is what left 232 bouts of 2026 at 100% red-wins. Now the winner is
+    read off the page's own corner and the stored assignment is simply not consulted.
+    """
+    page = _page(
+        '<i class="b-fight-details__person-status">W</i>'
+        '<i class="b-fight-details__person-status">L</i>'
+    )
+    winner_updates = _wire(monkeypatch, page)
+    # The stored row holds the SAME two fighters in the OPPOSITE corners to the page.
+    monkeypatch.setattr(main, "get_fight_corner_assignment", lambda _c, _fid: (20, 10))
+
+    counts = main.repair_fight_winners()
+
+    # Fighter 10 won on the page, so fighter 10 wins -- whichever corner they sit in.
+    assert winner_updates == [(1, 10)]
+    assert counts["repair_updated"] == 1
+    assert counts["repair_skipped_mismatch"] == 0
+
+
+def test_a_genuinely_different_pairing_is_still_refused(monkeypatch):
+    """The identity guard has to survive: a row about other fighters is not this bout."""
+    page = _page(
+        '<i class="b-fight-details__person-status">W</i>'
+        '<i class="b-fight-details__person-status">L</i>'
+    )
+    winner_updates = _wire(monkeypatch, page)
+    monkeypatch.setattr(main, "get_fight_corner_assignment", lambda _c, _fid: (10, 999))
+
+    counts = main.repair_fight_winners()
+
+    assert winner_updates == []
+    assert counts["repair_skipped_mismatch"] == 1
+    assert counts["repair_updated"] == 0

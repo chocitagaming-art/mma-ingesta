@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
@@ -88,7 +88,43 @@ def parse_event_fights(soup: BeautifulSoup, settings: Settings) -> list[FightPag
                 is_title_fight=_row_has_title_belt(weight_cell),
             )
         )
-    return fights
+    return [_assign_corners(fight) for fight in fights]
+
+
+def _assign_corners(fight: FightPageRecord) -> FightPageRecord:
+    """Order the corners by a key that CANNOT see who won.
+
+    ufcstats has no corner column. Its event table lists the WINNER first, so the
+    "red = first fighter link" above makes red == winner on every decided bout. That
+    is a straight result leak into `reach`-style features: the 232 fights of 2026
+    imported through this parser came out 100% red-wins, against 44.7-52.3% in every
+    other year, and it had to be repaired by hand on 2026-08-22.
+
+    The REAL red/blue corner only exists on ufc.com (`c-listing-fight__corner-name--red`
+    / `--blue`), and that is where every card imported since June 2026 gets it. For the
+    historical backfill there is no such source, so corners are assigned by ascending
+    fighter source_id: arbitrary, but stable and blind to the result. 8283 of the 8306
+    decided pre-2026 ufcstats bouts already follow it (99.7%), and their red-win rate is
+    50.3% -- exactly the balance a result-blind rule must produce.
+
+    The two rules never fight, because `upsert_fight` refuses to overwrite a corner that
+    is already stored (see repositories/fights.py): this one only ever decides brand-new
+    rows. `winner_corner` is flipped with the pair so main.py keeps reading the winner
+    correctly.
+    """
+    if not fight.red_source_id or not fight.blue_source_id:
+        return fight
+    if fight.red_source_id <= fight.blue_source_id:
+        return fight
+    mirrored = {"red": "blue", "blue": "red"}
+    return replace(
+        fight,
+        red_name=fight.blue_name,
+        blue_name=fight.red_name,
+        red_source_id=fight.blue_source_id,
+        blue_source_id=fight.red_source_id,
+        winner_corner=mirrored.get(fight.winner_corner, fight.winner_corner),
+    )
 
 
 def _row_has_title_belt(weight_cell) -> bool:
