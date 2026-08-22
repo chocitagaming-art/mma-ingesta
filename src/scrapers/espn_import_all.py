@@ -215,15 +215,28 @@ def _parse_birth_date(value: str | None) -> date | None:
 
 
 def _inches_to_cm(value: Any) -> float | None:
+    """Literal copy of espn.py::_inches_to_cm -- see the reasoning there.
+
+    ESPN sends 0 for "unknown"; a stored 0.0 enters FEATURE_COLUMNS as a real reach and
+    sticks, because the enrichment UPDATE uses COALESCE and 0.0 is not NULL. Note that
+    `consolidate_fighters.py` imports these two converters from HERE, so this file covers
+    that module too: fixing one copy and forgetting the other is exactly how this returns."""
     if value in (None, ""):
         return None
-    return round(float(value) * 2.54, 2)
+    inches = float(value)
+    if inches <= 0:
+        return None
+    return round(inches * 2.54, 2)
 
 
 def _pounds_to_grams(value: Any) -> int | None:
+    """Same hole as _inches_to_cm: 0 lb is not a weight, it is "no data"."""
     if value in (None, ""):
         return None
-    return int(round(float(value) * 453.592))
+    pounds = float(value)
+    if pounds <= 0:
+        return None
+    return int(round(pounds * 453.592))
 
 
 def _nested_text(value: Any) -> str | None:

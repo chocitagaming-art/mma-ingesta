@@ -289,15 +289,30 @@ def _parse_birth_date(value: str | None) -> date | None:
 
 
 def _inches_to_cm(value: Any) -> float | None:
+    """ESPN sends 0 when it does not KNOW the measurement: that is a hole, not a datum.
+
+    A stored 0.0 reaches the model as a real reach -- `reach_cm_diff` is the 2nd of the
+    20 FEATURE_COLUMNS and `features/metrics.py::diff()` only nulls on None/NaN, so a
+    0.0 sails through and injects a ~180 cm difference that never happened. Worse, it
+    sticks: `update_fighter_enrichment` writes `reach_cm = COALESCE(reach_cm, %s)`, and
+    0.0 is not NULL, so no later pass ever overwrites it. Cleaned by hand on 2026-08-22
+    (33 reach_cm + 2 height_cm set to NULL)."""
     if value in (None, ""):
         return None
-    return round(float(value) * 2.54, 2)
+    inches = float(value)
+    if inches <= 0:
+        return None
+    return round(inches * 2.54, 2)
 
 
 def _pounds_to_grams(value: Any) -> int | None:
+    """Same hole as _inches_to_cm: 0 lb is not a weight, it is "no data"."""
     if value in (None, ""):
         return None
-    return int(round(float(value) * 453.592))
+    pounds = float(value)
+    if pounds <= 0:
+        return None
+    return int(round(pounds * 453.592))
 
 
 def _nested_text(value: Any) -> str | None:
