@@ -193,7 +193,34 @@ def _search_for_weigh_in_article(fetch_html: FetchHtml, query: str, event_name: 
     return None
 
 
-def find_weigh_in_article(fetch_html: FetchHtml, event_name: str) -> str | None:
+# Words that name the venue, not the town. Stripped when the city has to be
+# recovered from the venue itself ("Belgrade Arena, BG, Serbia" -> "Belgrade").
+_VENUE_WORDS = re.compile(
+    r"\b(arena|center|centre|stadium|apex|hall|coliseum|park|dome|garden|forum|pavilion)\b",
+    re.IGNORECASE,
+)
+
+
+def _event_city(location: str | None) -> str:
+    """Best guess at the host city from an `events.location` string.
+
+    The eight real shapes in the DB on 2026-08-23 put the city in the SECOND
+    comma-part ("Golden 1 Center, Sacramento, CA, United States"). The one that
+    breaks the rule is "Belgrade Arena, BG, Serbia", where the second part is a
+    two-letter code and the venue name carries the city — hence the length
+    guard and the venue-word strip.
+    """
+    parts = [part.strip() for part in (location or "").split(",") if part.strip()]
+    if not parts:
+        return ""
+    if len(parts) >= 2 and len(parts[1]) > 3:
+        return parts[1]
+    return _VENUE_WORDS.sub("", parts[0]).strip()
+
+
+def find_weigh_in_article(
+    fetch_html: FetchHtml, event_name: str, location: str | None = None
+) -> str | None:
     """Absolute URL of the event's weigh-in results article, or None.
 
     ufc.com's /search is server-rendered (Solr behind Drupal): the result list
@@ -201,24 +228,49 @@ def find_weigh_in_article(fetch_html: FetchHtml, event_name: str) -> str | None:
     in its slug and share >=2 significant tokens (headliner surnames / card
     number, after dropping ufc/fight/night/... stopwords) with the event name.
 
-    TWO queries, because the search is an AND over the article title and the two
-    sites do not always name the same card alike: on 2026-07-25 our events row
-    said "UFC Fight Night: Ankalaev vs. Guskov" while ufc.com titled it "UFC Abu
-    Dhabi: Ankalaev vs Guskov", so the name-qualified query returned "No
-    results" and the cron reported success having written nothing. The
-    unqualified retry lists the most recent weigh-in articles instead, which is
-    exactly the pool a Friday cron needs for Saturday's card.
+    THREE queries, because the search is an AND over the article TITLE and the
+    two sites do not always name the same card alike: on 2026-07-25 our events
+    row said "UFC Fight Night: Ankalaev vs. Guskov" while ufc.com titled it
+    "UFC Abu Dhabi", so the name-qualified query returned "No results" and the
+    cron reported success having written nothing.
 
-    The retry widens WHICH articles are considered, never the acceptance rule:
+    1. BY NAME. The precise one when it works, and it is tried first.
+    2. BY CITY, added 2026-08-23. ufc.com titles many cards by host city
+       ("Official Weigh-In Results | UFC Sacramento"), so the city is the term
+       its title actually contains. Measured that day: the name query fails on
+       FIVE of the ten most recent cards (1086 Sacramento, 1063 Belgrade, 1062
+       Abu Dhabi, 1061 Oklahoma City, 1059 Baku) and searching by city recovers
+       all five.
+    3. UNQUALIFIED. Lists the most recent weigh-in articles. It is a narrow net
+       and getting narrower: measured 2026-08-23 it returns only ~4 anchors and
+       `page` is ignored, so an article drops out of reach within days. That is
+       why the city step exists rather than leaning on this one.
+
+    Each step widens WHICH articles are considered, never the acceptance rule:
     the same >=2-shared-token guard decides, so a neighbouring card's weights
-    still cannot be welded onto this event.
+    still cannot be welded onto this event. That matters most for the city
+    query, since a city hosts many cards over the years.
     """
     qualified = _search_for_weigh_in_article(
         fetch_html, f"official weigh-in results {event_name}", event_name
     )
     if qualified is not None:
         return qualified
-    LOGGER.info("No weigh-in article for %r by name; retrying unqualified search", event_name)
+
+    city = _event_city(location)
+    if city:
+        by_city = _search_for_weigh_in_article(
+            fetch_html, f"official weigh-in results ufc {city}", event_name
+        )
+        if by_city is not None:
+            LOGGER.info("Weigh-in article for %r found by city %r", event_name, city)
+            return by_city
+
+    LOGGER.info(
+        "No weigh-in article for %r by name%s; retrying unqualified search",
+        event_name,
+        f" nor by city {city!r}" if city else "",
+    )
     return _search_for_weigh_in_article(fetch_html, "official weigh-in results", event_name)
 
 
@@ -322,12 +374,17 @@ def match_bout(fights: list[EventFight], entry: ParsedWeighIn) -> tuple[EventFig
 # ------------------------------------------------------------------------ db
 
 
-def _get_target_events(connection, lookback_days: int) -> list[tuple[int, str]]:
-    """(id, name) of events in the window (past lookback + the next card)."""
+def _get_target_events(connection, lookback_days: int) -> list[tuple[int, str, str | None]]:
+    """(id, name, location) of events in the window (past lookback + next card).
+
+    `location` rides along for the by-city article search in
+    `find_weigh_in_article`; it is nullable, and a missing one simply skips
+    that step.
+    """
     with connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT e.id, e.name
+            SELECT e.id, e.name, e.location
             FROM events e
             WHERE e.event_date IS NOT NULL
               AND e.event_date >= CURRENT_DATE - %s
@@ -337,14 +394,19 @@ def _get_target_events(connection, lookback_days: int) -> list[tuple[int, str]]:
             """,
             (lookback_days, LOOKAHEAD_DAYS),
         )
-        return [(int(row[0]), str(row[1])) for row in cursor.fetchall()]
+        return [
+            (int(row[0]), str(row[1]), str(row[2]) if row[2] is not None else None)
+            for row in cursor.fetchall()
+        ]
 
 
-def _get_event_by_id(connection, event_id: int) -> tuple[int, str] | None:
+def _get_event_by_id(connection, event_id: int) -> tuple[int, str, str | None] | None:
     with connection.cursor() as cursor:
-        cursor.execute("SELECT id, name FROM events WHERE id = %s", (event_id,))
+        cursor.execute("SELECT id, name, location FROM events WHERE id = %s", (event_id,))
         row = cursor.fetchone()
-        return (int(row[0]), str(row[1])) if row else None
+        if not row:
+            return None
+        return (int(row[0]), str(row[1]), str(row[2]) if row[2] is not None else None)
 
 
 def _get_event_fights(connection, event_id: int) -> list[EventFight]:
@@ -429,10 +491,11 @@ def _process_event(
     counts: Counter,
     event_id: int,
     event_name: str,
+    location: str | None = None,
     *,
     dry_run: bool,
 ) -> None:
-    article_url = find_weigh_in_article(fetch_html, event_name)
+    article_url = find_weigh_in_article(fetch_html, event_name, location)
     if article_url is None:
         counts["article_not_found"] += 1
         LOGGER.info("No weigh-in article found for event %d (%s)", event_id, event_name)
@@ -485,9 +548,11 @@ def backfill(
     counts["events_targeted"] = len(targets)
     LOGGER.info("Events to check for weigh-ins: %d", len(targets))
 
-    for target_id, name in targets:
+    for target_id, name, location in targets:
         try:
-            _process_event(connection, fetch_html, counts, target_id, name, dry_run=dry_run)
+            _process_event(
+                connection, fetch_html, counts, target_id, name, location, dry_run=dry_run
+            )
             if not dry_run:
                 connection.commit()
         except Exception:

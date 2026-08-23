@@ -19,6 +19,7 @@ from bs4 import BeautifulSoup
 from src.scrapers.weigh_ins import (
     EventFight,
     ParsedWeighIn,
+    _event_city,
     _process_event,
     find_weigh_in_article,
     match_bout,
@@ -93,6 +94,35 @@ GENERIC_SEARCH_HTML = """
     <li><a href="/news/official-weigh-results-ufc-329-mcgregor-vs-holloway-2">
       Official Weigh-In Results | UFC 329</a></li>
     <li><a href="/news/official-weigh-results-ufc-abu-dhabi-ankalaev-guskov">
+      Official Weigh-In Results | UFC Abu Dhabi</a></li>
+  </ul>
+</div>
+</body></html>
+"""
+
+# Searching by CITY finds the card the name query cannot: ufc.com titles it
+# "UFC Sacramento", but the SLUG still carries both surnames, which is what the
+# token guard reads. Real article for the 1086 (2026-08-22).
+CITY_SEARCH_HTML = """
+<html><body>
+<div class="solr-search__result-item">
+  <ul>
+    <li><a href="/news/official-weigh-results-ufc-sacramento-fight-night-hernandez-rodrigues">
+      Official Weigh-In Results | UFC Sacramento</a></li>
+  </ul>
+</div>
+</body></html>
+"""
+
+# A city hosts more than one card over time: "ufc abu dhabi" really returns two
+# weigh-in articles (measured 2026-08-23). Only the token guard tells them apart.
+TWO_CITY_ARTICLES_HTML = """
+<html><body>
+<div class="solr-search__result-item">
+  <ul>
+    <li><a href="/news/official-weigh-results-ufc-abu-dhabi-ankalaev-guskov">
+      Official Weigh-In Results | UFC Abu Dhabi</a></li>
+    <li><a href="/news/official-weigh-results-ufc-abu-dhabi-whittaker-de-ridder">
       Official Weigh-In Results | UFC Abu Dhabi</a></li>
   </ul>
 </div>
@@ -181,6 +211,133 @@ def test_find_weigh_in_article_does_not_search_twice_when_the_first_query_hits()
     )
     assert find_weigh_in_article(fetch, "UFC Fight Night: Fiziev vs. Torres") is not None
     assert len(calls) == 1
+
+
+# ------------------------------------------------- discovery by city (2026-08-23)
+
+
+def test_event_city_reads_the_city_from_real_locations():
+    """The eight real `events.location` shapes in the DB on 2026-08-23.
+
+    The city is the SECOND comma-part in every normal case. `Belgrade Arena,
+    BG, Serbia` is the one that breaks it: the second part is a two-letter
+    country-ish code, so the venue name carries the city instead.
+    """
+    assert _event_city("Golden 1 Center, Sacramento, CA, United States") == "Sacramento"
+    assert _event_city("Etihad Arena, Abu Dhabi, United Arab Emirates") == "Abu Dhabi"
+    assert _event_city("Paycom Center, Oklahoma City, OK, United States") == "Oklahoma City"
+    assert _event_city("National Gymnastics Arena, Baku, Azerbaijan") == "Baku"
+    assert _event_city("Meta APEX, Las Vegas, NV, United States") == "Las Vegas"
+    assert _event_city("Xfinity Mobile Arena, Philadelphia, PA, United States") == "Philadelphia"
+    # The awkward one: falls back to the venue with the venue-word stripped.
+    assert _event_city("Belgrade Arena, BG, Serbia") == "Belgrade"
+
+
+def test_event_city_is_safe_on_junk():
+    assert _event_city(None) == ""
+    assert _event_city("") == ""
+    assert _event_city("   ") == ""
+    assert _event_city("Arena") == ""
+
+
+def test_find_weigh_in_article_falls_back_to_the_city():
+    """Name query dies, city query hits. Regression for the 1086 (2026-08-22).
+
+    ufc.com titled the card "Official Weigh-In Results | UFC Sacramento" — no
+    surnames, no "Fight Night" — while our events row says "UFC Fight Night:
+    Hernandez vs. Rodrigues". The search is an AND over the TITLE, so the
+    name-qualified query returns "No results". Measured 2026-08-23: this hits
+    5 of the 10 most recent cards, and the unqualified retry only lists ~4
+    articles and ignores `page`, so it stops working within days.
+    """
+    calls: list[str] = []
+    fetch = _fetch_by_query(
+        {
+            "official weigh-in results UFC Fight Night: Hernandez vs. Rodrigues": NO_RESULTS_HTML,
+            "official weigh-in results ufc Sacramento": CITY_SEARCH_HTML,
+        },
+        calls,
+    )
+    url = find_weigh_in_article(
+        fetch,
+        "UFC Fight Night: Hernandez vs. Rodrigues",
+        "Golden 1 Center, Sacramento, CA, United States",
+    )
+    assert url == (
+        "https://www.ufc.com/news/"
+        "official-weigh-results-ufc-sacramento-fight-night-hernandez-rodrigues"
+    )
+    # Name first (it is the precise one), then city. The generic never runs.
+    assert calls == [
+        "official weigh-in results UFC Fight Night: Hernandez vs. Rodrigues",
+        "official weigh-in results ufc Sacramento",
+    ]
+
+
+def test_find_weigh_in_article_city_query_keeps_the_token_guard():
+    """A city hosts many cards; the >=2-token guard is what stops the wrong one.
+
+    Real case measured on 2026-08-23: searching "ufc abu dhabi" returns TWO
+    weigh-in articles (Ankalaev/Guskov and Whittaker/De Ridder). Only the one
+    sharing two significant tokens with the event may pass.
+    """
+    fetch = _fetch_by_query(
+        {
+            "official weigh-in results UFC Fight Night: Whittaker vs. De Ridder": NO_RESULTS_HTML,
+            "official weigh-in results ufc Abu Dhabi": TWO_CITY_ARTICLES_HTML,
+            "official weigh-in results": NO_RESULTS_HTML,
+        }
+    )
+    url = find_weigh_in_article(
+        fetch,
+        "UFC Fight Night: Whittaker vs. De Ridder",
+        "Etihad Arena, Abu Dhabi, United Arab Emirates",
+    )
+    assert url == (
+        "https://www.ufc.com/news/official-weigh-results-ufc-abu-dhabi-whittaker-de-ridder"
+    )
+
+
+def test_find_weigh_in_article_falls_through_city_to_the_generic_retry():
+    """City is tried BETWEEN name and generic, and never swallows the generic."""
+    calls: list[str] = []
+    fetch = _fetch_by_query(
+        {
+            "official weigh-in results UFC Fight Night: Ankalaev vs. Guskov": NO_RESULTS_HTML,
+            "official weigh-in results ufc Abu Dhabi": NO_RESULTS_HTML,
+            "official weigh-in results": GENERIC_SEARCH_HTML,
+        },
+        calls,
+    )
+    url = find_weigh_in_article(
+        fetch,
+        "UFC Fight Night: Ankalaev vs. Guskov",
+        "Etihad Arena, Abu Dhabi, United Arab Emirates",
+    )
+    assert url == "https://www.ufc.com/news/official-weigh-results-ufc-abu-dhabi-ankalaev-guskov"
+    assert calls == [
+        "official weigh-in results UFC Fight Night: Ankalaev vs. Guskov",
+        "official weigh-in results ufc Abu Dhabi",
+        "official weigh-in results",
+    ]
+
+
+def test_find_weigh_in_article_without_location_behaves_exactly_as_before():
+    """`location` is optional: no city query is attempted when it is missing.
+
+    Keeps every existing caller and the five older discovery tests valid.
+    """
+    calls: list[str] = []
+    fetch = _fetch_by_query(
+        {
+            "official weigh-in results UFC Fight Night: Ankalaev vs. Guskov": NO_RESULTS_HTML,
+            "official weigh-in results": GENERIC_SEARCH_HTML,
+        },
+        calls,
+    )
+    url = find_weigh_in_article(fetch, "UFC Fight Night: Ankalaev vs. Guskov")
+    assert url == "https://www.ufc.com/news/official-weigh-results-ufc-abu-dhabi-ankalaev-guskov"
+    assert len(calls) == 2  # name, generic. No city in between.
 
 
 # ------------------------------------------------------------------- parsing
