@@ -6,8 +6,8 @@ deleting them, translate headline + summary to Spanish via Claude and fill
 ``image_url`` from each article's ``og:image``.
 
 Targets every row whose source is not 'ESPN Deportes'. Translating already-
-Spanish text is a no-op at temperature 0, so re-running is safe (it just re-spends
-a few tokens). The source label is left untouched so the badge stays clean.
+Spanish text is effectively a no-op, so re-running is safe (it just re-spends a
+few tokens). The source label is left untouched so the badge stays clean.
 
 Run (writes to the DB):
     python -m src.scrapers.translate_news            # translate everything pending
@@ -57,7 +57,8 @@ def _translate(client: Anthropic, headline: str, summary: str | None) -> tuple[s
     response = client.messages.create(
         model=TRANSLATE_MODEL,
         max_tokens=1000,
-        temperature=0,
+        # Sin `temperature`: el SDK 1.x de anthropic lo elimino y la llamada
+        # revienta con TypeError. Ver el comentario largo en enrich_facts.py.
         messages=[{"role": "user", "content": prompt}],
     )
     text = "".join(b.text for b in response.content if getattr(b, "type", "") == "text")

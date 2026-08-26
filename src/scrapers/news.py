@@ -154,7 +154,8 @@ class NewsClassifier:
             # calidad aqui, y con el fallback por palabras clave de red de seguridad.
             model="claude-haiku-4-5",
             max_tokens=200,
-            temperature=0,
+            # Sin `temperature`: el SDK 1.x de anthropic lo elimino y la llamada
+            # revienta con TypeError. Ver el comentario largo en enrich_facts.py.
             messages=[{"role": "user", "content": prompt}],
         )
         text = "".join(block.text for block in response.content if getattr(block, "type", "") == "text").strip()

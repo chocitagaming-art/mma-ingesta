@@ -251,7 +251,11 @@ def build_translator(client: Anthropic) -> Translator:
         response = client.messages.create(
             model=TRANSLATE_MODEL,
             max_tokens=TRANSLATE_MAX_TOKENS,
-            temperature=0,
+            # Sin `temperature`: el SDK 1.x de anthropic lo elimino y la llamada
+            # revienta con TypeError. Se lo llevo por delante el 24-ago-2026 (las
+            # 5 traducciones de ese pase fallaron) porque requirements.txt no
+            # fijaba version y Actions instala siempre la ultima. El determinismo
+            # que daba temperature=0 se compensa con lo estricto del prompt.
             messages=[{"role": "user", "content": prompt}],
         )
         text = "".join(b.text for b in response.content if getattr(b, "type", "") == "text")

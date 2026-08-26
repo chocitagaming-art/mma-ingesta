@@ -52,6 +52,19 @@ def test_listing_parses_upcoming_events(listing_soup):
     )
 
 
+# Cuantos eventos del listado se prueban antes de rendirse. No es un capricho:
+# el 26-ago-2026 este smoke se puso ROJO sin que el parser tuviera nada malo.
+# Cogia events[0] a ciegas y ese dia el primero era el "Road To UFC" (un torneo
+# de cantera del que ufc.com solo publica 2 combates), asi que fallaba contra un
+# umbral de 4 pensado para una cartelera UFC normal.
+#
+# El test pregunta "¿sigue funcionando el parser?", y para eso basta con que UNO
+# de los primeros eventos parsee bien. Si el markup se rompe de verdad, fallan
+# los tres y la alarma salta igual. Lo que ya no hace es gritar porque el evento
+# mas cercano sea pequeno -- y una alarma que grita en falso deja de leerse.
+EVENTOS_A_PROBAR = 3
+
+
 @pytest.fixture(scope="module")
 def first_event_detail(listing_soup, ufc_session, smoke_settings, retry_fetch):
     events = _parse_listing(listing_soup)
@@ -59,12 +72,18 @@ def first_event_detail(listing_soup, ufc_session, smoke_settings, retry_fetch):
         pytest.skip(
             "listing parsed 0 events; test_listing_parses_upcoming_events reports it"
         )
-    event = events[0]
-    soup = retry_fetch(
-        f"GET {event.detail_url}",
-        lambda: _get_soup(ufc_session, event.detail_url, smoke_settings),
-    )
-    return event, soup
+    intentos = []
+    for event in events[:EVENTOS_A_PROBAR]:
+        soup = retry_fetch(
+            f"GET {event.detail_url}",
+            lambda ev=event: _get_soup(ufc_session, ev.detail_url, smoke_settings),
+        )
+        intentos.append((event, soup))
+        if len(_parse_bouts(soup, event.source_id)) >= MIN_DETAIL_BOUTS:
+            return event, soup
+    # Ninguno llego al umbral: se devuelve el primero para que el assert del test
+    # falle con su mensaje de "PARSER BREAK", que es lo que hay que leer.
+    return intentos[0]
 
 
 def test_event_detail_parses_bouts(first_event_detail):
