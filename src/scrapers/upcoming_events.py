@@ -63,6 +63,26 @@ SOURCE = "ufc.com"
 EVENTS_URL = "https://www.ufc.com/events"
 HOME_URL = "https://www.ufc.com/"
 
+# ufc.com pagina el listado de 8 en 8 y hay que recorrerlo entero.
+#
+# EL FALLO QUE ESTO TAPA, medido el 26-ago-2026: pediamos SOLO /events, o sea la
+# primera pagina, y la UFC tenia 12 eventos anunciados. Cuatro nos eran
+# invisibles: ufc-333 (que ya estaba en la base y por eso dejo de refrescarse en
+# cuanto un evento nuevo lo empujo fuera), y ufc-fight-night-november-07-2026,
+# ufc-334 y ufc-335, que NUNCA habian entrado. Es una averia que empeora sola:
+# cada evento nuevo que anuncia la UFC expulsa a otro del listado que miramos.
+#
+# 🪤 EL BOTON "LOAD MORE" DE ufc.com NO SIRVE COMO CRITERIO DE PARADA. La misma
+# pagina arrastra ademas la lista de eventos PASADOS, asi que ?page=2 devuelve 0
+# proximos pero sigue trayendo 8 pasados y sigue ofreciendo ?page=3, hacia atras
+# hasta 1993. Un bucle que siga ese boton se descarga el archivo historico
+# entero. Se para por "0 tarjetas dentro de #events-list-upcoming", que es lo
+# unico que significa "no hay mas eventos futuros".
+#
+# El tope no es decorativo: ufc.com responde a ?page=lo-que-sea con la pagina 0,
+# asi que una URL mal construida no veria nunca una pagina vacia.
+MAX_LISTING_PAGES = 6
+
 # ufc.com event detail pages come in two templates: near-term events wrap segments in
 # div.main-card / div.fight-card-prelims / div.fight-card-early-prelims; far-out events
 # list every bout in a single undifferentiated "Fight Card" list (UFC hasn't split the
@@ -180,6 +200,55 @@ def _parse_listing(soup: BeautifulSoup) -> list[ParsedEvent]:
             )
         )
     return events
+
+
+def _parse_all_listing_pages(session, settings, counts: Counter) -> list[ParsedEvent]:
+    """Recorre el listado de ufc.com pagina a pagina hasta agotar los futuros.
+
+    Envuelve a `_parse_listing`, que no se toca: esta funcion solo decide QUE
+    paginas se le dan de comer. Ver el comentario de MAX_LISTING_PAGES arriba
+    para el porque y para la trampa del boton "Load More".
+
+    Deja tres contadores en `counts`, y no son adorno: si el dia de manana la UFC
+    cambia la paginacion, `listing_pages_fetched: 1` en el log del cron lo delata
+    al instante en vez de que esto falle en silencio, que es como empezo todo.
+    """
+    vistos: set[str] = set()
+    eventos: list[ParsedEvent] = []
+    for numero in range(MAX_LISTING_PAGES):
+        url = EVENTS_URL if numero == 0 else f"{EVENTS_URL}?page={numero}"
+        try:
+            soup = _get_soup(session, url, settings)
+        except Exception as exc:
+            # Una pagina caida NO puede parecer "ya no hay mas eventos": eso
+            # marcaria como desaparecidos los que vinieran detras. Se corta el
+            # bucle y se deja constancia; quien decide que hacer es el guard de
+            # `_complete_dropped_upcoming`.
+            counts["listing_pages_failed"] += 1
+            LOGGER.warning("Listing page %s failed: %s", url, exc)
+            break
+
+        # Se exige el contenedor de PROXIMOS. Si no esta, no se parsea: la misma
+        # pagina trae tambien los eventos pasados, y `_parse_listing` cae a
+        # `or soup` cuando falta el contenedor -- se colarian como futuros.
+        if soup.select_one("#events-list-upcoming") is None:
+            break
+
+        pagina = _parse_listing(soup)
+        counts["listing_pages_fetched"] += 1
+        if not pagina:
+            break
+        for evento in pagina:
+            if evento.source_id in vistos:
+                continue
+            vistos.add(evento.source_id)
+            eventos.append(evento)
+    else:
+        # Se agoto el tope sin encontrar una pagina vacia: no sabemos si falta
+        # algo detras, asi que tampoco se puede dar nada por desaparecido.
+        counts["listing_cap_hit"] = 1
+        LOGGER.warning("Listing cap de %s paginas alcanzado", MAX_LISTING_PAGES)
+    return eventos
 
 
 def _parse_card_datetime(card) -> tuple[datetime | None, date | None]:
@@ -588,8 +657,7 @@ def scrape_upcoming_events(dry_run: bool = False) -> Counter:
     session = _new_session()
     session.get(HOME_URL, timeout=settings.request_timeout_seconds)
 
-    listing = _get_soup(session, EVENTS_URL, settings)
-    events = _parse_listing(listing)
+    events = _parse_all_listing_pages(session, settings, counts)
     counts["events_found"] = len(events)
 
     for event in events:
@@ -619,8 +687,23 @@ def scrape_upcoming_events(dry_run: bool = False) -> Counter:
             _log_preview(events)
             return counts
 
-        current_ids = {e.source_id for e in events}
-        counts["stale_completed"] = _complete_dropped_upcoming(connection, current_ids)
+        # ⚠️ LA LINEA MAS DELICADA DE LA PAGINACION. `_complete_dropped_upcoming`
+        # da por terminado todo evento 'upcoming' que ya NO salga en el listado.
+        # Con una sola pagina eso era una lista completa; con varias, una pagina
+        # caida a medio recorrido deja fuera eventos que existen perfectamente, y
+        # los marcaria como desaparecidos. Ante la duda no se cierra nada: un
+        # evento de mas en "Proximos" durante un dia es barato; darlo por
+        # terminado cuando no lo esta se ve en la portada.
+        if counts["listing_pages_failed"] or counts["listing_cap_hit"]:
+            counts["stale_skipped"] = 1
+            LOGGER.warning(
+                "Listado incompleto (failed=%s cap=%s): no se cierra ningun evento",
+                counts["listing_pages_failed"],
+                counts["listing_cap_hit"],
+            )
+        else:
+            current_ids = {e.source_id for e in events}
+            counts["stale_completed"] = _complete_dropped_upcoming(connection, current_ids)
         connection.commit()
 
         for event in events:
@@ -665,10 +748,15 @@ def _log_preview(events: list[ParsedEvent]) -> None:
 
 def _build_summary(counts: Counter) -> str:
     keys = [
+        # Las tres de paginacion van las primeras a proposito: son la unica
+        # senal de que el listado se esta leyendo entero. Un
+        # `listing_pages_fetched: 1` en el log del cron significa que la
+        # paginacion se rompio -- y esa averia es silenciosa, no da error.
+        "listing_pages_fetched", "listing_pages_failed", "listing_cap_hit",
         "events_found", "details_fetched", "detail_errors", "bouts_parsed",
         "fighters_in_db", "bouts_red_matched", "bouts_blue_matched",
-        "stale_completed", "events_written", "bouts_written", "bouts_cancelled",
-        "standing_photos_updated", "write_errors",
+        "stale_completed", "stale_skipped", "events_written", "bouts_written",
+        "bouts_cancelled", "standing_photos_updated", "write_errors",
     ]
     return json.dumps({key: counts.get(key, 0) for key in keys}, indent=2)
 
