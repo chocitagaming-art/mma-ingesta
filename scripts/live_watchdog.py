@@ -63,6 +63,7 @@ import psycopg2
 # La fuente de verdad del nombre del servicio, no una cadena repetida aqui: si
 # alguien lo renombra alli, este SELECT dejaria de encontrar la fila y el
 # watchdog volveria al criterio viejo SIN QUE NADA FALLE.
+from src.scrapers.event_tier import evento_principal_sql
 from src.scrapers.repositories.service_heartbeats import SERVICIO_BUCLE
 
 try:
@@ -126,6 +127,11 @@ VELADAS_SQL = f"""
                    e.start_time - interval '4 hours') <= now()
       AND COALESCE(e.start_time, e.prelims_time, e.early_prelims_time)
           + interval '{HORAS_TRAS_EL_ESTELAR} hours' >= now()
+      -- Migracion 028, y va en el MISMO commit que el filtro del centinela: si
+      -- solo se filtrara alli, este vigilante veria "velada en marcha" el
+      -- viernes 28-ago sin una sola muestra y daria la velada por CAIDA cada
+      -- hora, de 05:20Z a 13:20Z. Cambiar un fallo por otro no es arreglarlo.
+      AND {evento_principal_sql('e')}
     GROUP BY e.id, e.name, e.early_prelims_time, e.prelims_time, e.start_time
     ORDER BY ancla
 """

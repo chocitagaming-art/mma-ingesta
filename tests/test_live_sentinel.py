@@ -27,6 +27,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from scripts.live_sentinel import (
+    EVENTOS_SQL,
+    HORAS_DE_GRACIA_TRAS_EL_ESTELAR,
     ancla_de_evento,
     hay_algo_que_grabar,
     plan_de_arranque,
@@ -229,4 +231,46 @@ def test_un_no_contest_no_deja_la_velada_viva_para_siempre():
     (Aspinall-Gane), 13 combates, 12 con ganador y uno anulado (method 'CNC').
     """
     assert hay_algo_que_grabar(combates_activos=13, combates_resueltos=13) is False
+
+
+# ------------------------------------ sobre QUE velada se despierta el centinela
+
+
+def test_el_centinela_no_puede_disparar_sobre_un_road_to_ufc():
+    """EL FALLO DEL 26-AGO-2026, por el lado que mas caro sale.
+
+    La consulta pedia los proximos 'upcoming' por hora y nada mas, y el "Road To
+    UFC" del viernes 28 (id 1094, 2 combates que ESPN ni siquiera lista) iba
+    ANTES que la velada del sabado (id 1065, 13 combates). Y `_proximo_evento`
+    devuelve la PRIMERA fila que le da un plan, no todas: el viernes el
+    centinela habria disparado 285 + 235 min de bucle sobre una cartelera que el
+    scraper no ve, con el vigilante gritando por las muestras que no llegan.
+
+    El filtro es la columna generada `events.tier` de la migracion 028.
+    """
+    assert "tier NOT IN" in EVENTOS_SQL
+
+
+def test_la_plantilla_de_porcentaje_sigue_entera():
+    """LA TRAMPA DEL %, y es de las que revientan en produccion y no en la suite.
+
+    Al meter el predicado, EVENTOS_SQL dejo de ser un string normal y paso a ser
+    un f-string — pero SIGUE usandose como plantilla de `%`:
+    `EVENTOS_SQL % HORAS_DE_GRACIA_TRAS_EL_ESTELAR` en `_leer_eventos`. Los dos
+    mecanismos conviven mientras nadie meta un `%` literal en lo que se
+    interpola; en cuanto alguien lo haga, el `%` de aqui abajo lanza ValueError
+    y el centinela muere ANTES de mirar si hay velada. Un `%s` de mas tampoco
+    perdona: `not enough arguments for format string`.
+
+    Que el test consiga formatear ya es media prueba. Lo demas es comprobar que
+    el hueco se ha rellenado de verdad y que no ha quedado ninguno suelto.
+    """
+    sql = EVENTOS_SQL % HORAS_DE_GRACIA_TRAS_EL_ESTELAR
+
+    assert "%s" not in sql, "ha quedado un hueco de plantilla sin rellenar"
+    assert "%" not in sql, f"queda un % suelto en la consulta:\n{sql}"
+    assert f"interval '{HORAS_DE_GRACIA_TRAS_EL_ESTELAR} hours'" in sql
+    # Y el predicado tiene que sobrevivir al formateo, no solo estar en la
+    # plantilla: si alguien lo escribiera con un `%` dentro, aqui se veria.
+    assert "tier NOT IN" in sql
 

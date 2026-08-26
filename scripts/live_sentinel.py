@@ -43,6 +43,8 @@ from datetime import datetime, timedelta, timezone
 
 import psycopg2
 
+from src.scrapers.event_tier import evento_principal_sql
+
 try:
     from dotenv import load_dotenv
 
@@ -81,7 +83,17 @@ HORAS_DE_GRACIA_TRAS_EL_ESTELAR = 4
 # solo no basta (ver hay_algo_que_grabar). Se filtra `status IS DISTINCT FROM
 # 'cancelled'` porque el valor 'active' NO EXISTE — los combates vivos tienen
 # status NULL, y un `= 'active'` devolveria cero siempre.
-EVENTOS_SQL = """
+# El `AND ... tier NOT IN (...)` es de la migracion 028: sin el, el viernes
+# 28-ago-2026 este centinela habria disparado 520 minutos de bucle sobre el
+# "Road To UFC" (2 combates, que ESPN ni siquiera lista) en vez de sobre la
+# velada del sabado. Va en el MISMO commit que el de live_watchdog.py: filtrar
+# uno solo cambia un fallo por otro -- el vigilante veria "velada en marcha" sin
+# una sola muestra y gritaria CAIDO cada hora.
+#
+# ⚠️ Sigue siendo una plantilla de `%`: se usa como `EVENTOS_SQL % HORAS...` en
+# `_leer_eventos`. El f-string no toca el `%s` de `interval '%s hours'`, y el
+# predicado que se inyecta no lleva ningun `%`. Hay un test que lo fija.
+EVENTOS_SQL = f"""
     SELECT e.id, e.name, e.early_prelims_time, e.prelims_time, e.start_time,
            count(f.id) FILTER (WHERE f.status IS DISTINCT FROM 'cancelled')
                AS combates_activos,
@@ -95,6 +107,7 @@ EVENTOS_SQL = """
       AND COALESCE(e.start_time, e.prelims_time, e.early_prelims_time) IS NOT NULL
       AND COALESCE(e.start_time, e.prelims_time, e.early_prelims_time)
           > now() - interval '%s hours'
+      AND {evento_principal_sql('e')}
     GROUP BY e.id, e.name, e.early_prelims_time, e.prelims_time, e.start_time
     ORDER BY COALESCE(e.early_prelims_time, e.prelims_time, e.start_time)
     LIMIT 5

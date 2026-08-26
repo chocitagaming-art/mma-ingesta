@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 
 from src.scrapers.config import get_settings
 from src.scrapers.db import connect
+from src.scrapers.event_tier import evento_principal_sql
 
 # La consola de Windows abre en cp1252 y parte los nombres acentuados
 # ("Benoit", "Loneier"...). Este panel se lee a toda prisa en mitad de una
@@ -68,10 +69,18 @@ def _resolve_event_id(cur, event_id: int | None) -> tuple[int | None, str, objec
         cur.execute("SELECT id, name, event_date FROM events WHERE id = %s", (event_id,))
     else:
         # El evento en curso o el siguiente: el que menos dista de hoy.
+        #
+        # El filtro por `tier` (migracion 028) es lo que evita la trampa que este
+        # panel tenia el 26-ago-2026: la ventana empieza en CURRENT_DATE - 1, asi
+        # que el sabado 29 el "Road To UFC" del viernes 28 seguia entrando y salia
+        # el PRIMERO. Sin --event-id, este panel -- que OPERACIONES.md llama "la
+        # comprobacion que no admite discusion" -- habria dicho "0 muestras" con
+        # la velada grabando perfectamente.
         cur.execute(
-            """
+            f"""
             SELECT id, name, event_date FROM events
             WHERE event_date BETWEEN CURRENT_DATE - 1 AND CURRENT_DATE + 7
+              AND {evento_principal_sql('')}
             ORDER BY event_date LIMIT 1
             """
         )

@@ -240,3 +240,40 @@ def test_el_latido_no_cambia_el_criterio_de_disparo():
                 f"{linea.strip()}"
             )
 
+
+# --------------------------------- que veladas se vigilan (migracion 028)
+
+
+def test_el_centinela_y_el_vigilante_filtran_LOS_DOS():
+    """EL FILTRO VA EN LOS DOS SITIOS O NO VA, y por eso el test los mira juntos.
+
+    El 26-ago-2026 el "Road To UFC" del viernes 28 (id 1094, 2 combates, sin
+    sede y sin poster) se colo como "el proximo evento" en todas las consultas
+    que preguntan por hora: los dos son `promotion_id = 1` y el viernes va antes
+    que el sabado. La migracion 028 anade `events.tier` para separarlos.
+
+    Filtrar solo uno de estos dos no arregla el fallo, lo CAMBIA POR OTRO:
+
+    * solo el centinela -> el bucle no graba el Road To UFC (bien), pero el
+      vigilante sigue viendo una velada "en marcha" el viernes por la manana sin
+      una sola muestra, la da por CAIDA y grita cada hora, de 05:20Z a 13:20Z:
+      un correo y un rescate en falso por cada run, sobre una cartelera que
+      nadie tenia que grabar.
+    * solo el vigilante -> el centinela duerme hasta el viernes y quema las
+      horas de bucle sobre una cartelera que ESPN ni lista, con la velada del
+      sabado sin vigilar y sin nadie que se queje.
+
+    Cada uno tapa el agujero que abre el otro, asi que van en el mismo commit.
+    """
+    from scripts.live_sentinel import EVENTOS_SQL
+    from scripts.live_watchdog import VELADAS_SQL
+
+    assert "tier NOT IN" in VELADAS_SQL, (
+        "el vigilante del directo volveria a vigilar un Road To UFC y a gritar "
+        "CAIDO cada hora sobre una cartelera que nadie graba."
+    )
+    assert "tier NOT IN" in EVENTOS_SQL, (
+        "el centinela volveria a dormir hasta el viernes y a disparar el bucle "
+        "sobre el evento equivocado."
+    )
+

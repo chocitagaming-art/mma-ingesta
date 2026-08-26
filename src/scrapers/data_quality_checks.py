@@ -89,6 +89,76 @@ def _upcoming_without_bouts(connection) -> list[dict]:
         ]
 
 
+def _futuros_sin_clasificar(connection) -> list[dict]:
+    """Eventos FUTUROS cuyo formato no reconoce la regla de `events.tier`.
+
+    LA DECISIÓN QUE ESTO VIGILA. La regla de la migración 028 es una lista negra:
+    lo que no reconoce cae en 'unknown' y sale DESTACABLE. Es deliberado — un
+    formato nuevo que se cuele en la portada es molesto, visible y de un renglón,
+    mientras que el fallo contrario (un UFC Fight Night que desaparece del hero,
+    de /en-vivo y del centinela, en silencio, un sábado por la noche) es mucho
+    peor. Pero esa decisión solo es segura si alguien AVISA, y este es el aviso.
+
+    ⚠️ Solo mira los FUTUROS. Los 8 'unknown' que hay en la base son veladas UFC
+    completas y todas pasadas (Ultimate Japan, UFC Macao, UFC Freedom 250...):
+    incluirlas dejaría la alarma sonando para siempre y nadie volvería a mirarla.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT e.id, e.name, e.event_date::text, e.source_id
+            FROM events e
+            WHERE e.tier = 'unknown'
+              AND e.event_date IS NOT NULL
+              AND e.event_date >= CURRENT_DATE
+            ORDER BY e.event_date, e.id
+            """
+        )
+        return [
+            {
+                "id": int(r[0]),
+                "name": str(r[1]),
+                "event_date": r[2],
+                "source_id": r[3],
+            }
+            for r in cursor.fetchall()
+        ]
+
+
+def _tier_forzado_a_mano(connection) -> list[dict]:
+    """Eventos con `tier_override` puesto. En régimen normal no debe haber ninguno.
+
+    `tier_override` es la válvula de escape de la migración 028: una columna
+    generada no se puede UPDATEar, y la noche de una velada no se aplica una
+    migración, así que existe un camino para forzar el tipo de UN evento en cinco
+    segundos y sin desplegar. El precio es que ESE es el único camino que le
+    queda a este diseño para volver a desincronizarse del dato — por eso lleva
+    alarma desde el mismo commit que lo creó.
+
+    Que salga una fila aquí no es un error: es un recordatorio de que hay una
+    excepción viva y de que lo permanente se arregla cambiando `event_tier()` en
+    la migración 029, no dejando el parche puesto para siempre.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT e.id, e.name, e.event_date::text, e.tier_override
+            FROM events e
+            WHERE e.tier_override IS NOT NULL
+            ORDER BY e.event_date DESC NULLS LAST, e.id DESC
+            """
+        )
+        return [
+            {
+                "id": int(r[0]),
+                "name": str(r[1]),
+                "event_date": r[2],
+                "tier_override": str(r[3]),
+            }
+            for r in cursor.fetchall()
+        ]
+
+
 def _duplicate_fighter_names(connection) -> list[dict]:
     """Fighter names shared by 2+ rows (usually homonyms; sometimes a dedup miss)."""
     with connection.cursor() as cursor:
@@ -169,6 +239,8 @@ def _collect_raw(connection) -> dict:
     return {
         "duplicate_rank_positions": _duplicate_rank_positions(connection),
         "upcoming_without_bouts": _upcoming_without_bouts(connection),
+        "futuros_sin_clasificar": _futuros_sin_clasificar(connection),
+        "tier_forzado_a_mano": _tier_forzado_a_mano(connection),
         "duplicate_fighter_names": _duplicate_fighter_names(connection),
         "mirrored_scorecards": _mirrored_scorecards(connection),
     }
@@ -191,6 +263,9 @@ def has_critical(data: dict) -> bool:
         # Una sola pelea con la mayoría de tarjetas apuntando al perdedor ya es
         # una mentira publicada en color. No hay umbral que valga.
         or bool(data.get("mirrored_scorecards"))
+        # Un formato de evento que la regla no reconoce puede acabar de hero en
+        # la portada, que es exactamente lo que pasó el 26-ago-2026.
+        or bool(data.get("futuros_sin_clasificar"))
     )
 
 
@@ -224,6 +299,45 @@ def _render_markdown(data: dict) -> str:
     else:
         for e in no_bouts:
             lines.append(f"- **{e['name']}** (id={e['id']}) [{e['event_date']}]")
+    sin_clasificar = data.get("futuros_sin_clasificar", [])
+    lines += [
+        "",
+        f"## 🏷️ Eventos futuros con formato sin reconocer ({len(sin_clasificar)}) — CRÍTICO",
+        "",
+        "> `events.tier = 'unknown'`: la regla de la migración 028 no sabe qué es",
+        "> este evento, así que puede acabar de destacado en la portada. Si es una",
+        "> velada UFC de verdad, no hay nada que hacer. Si es un formato nuevo",
+        "> (otro Road To UFC, un Contender Series), hay que añadir su rama a",
+        "> `public.event_tier()` en una migración 029.",
+        "",
+    ]
+    if not sin_clasificar:
+        lines.append("_Ninguno: toda velada futura tiene su formato reconocido._")
+    else:
+        for e in sin_clasificar:
+            lines.append(
+                f"- **{e['name']}** (id={e['id']}) [{e['event_date']}] "
+                f"slug=`{e['source_id'] or '—'}`"
+            )
+    forzados = data.get("tier_forzado_a_mano", [])
+    lines += [
+        "",
+        f"## 🔧 Eventos con `tier_override` puesto a mano ({len(forzados)})",
+        "",
+        "> La válvula de escape de la 028, para una urgencia en directo. Es el",
+        "> único camino que le queda a `tier` para desincronizarse del dato, así",
+        "> que no debe quedarse puesta: lo permanente se arregla cambiando",
+        "> `public.event_tier()` en una migración 029.",
+        "",
+    ]
+    if not forzados:
+        lines.append("_Ninguno: el tipo de todas las veladas sale de la regla._")
+    else:
+        for e in forzados:
+            lines.append(
+                f"- **{e['name']}** (id={e['id']}) [{e['event_date']}] "
+                f"→ forzado a `{e['tier_override']}`"
+            )
     espejadas = data.get("mirrored_scorecards", [])
     lines += [
         "",
