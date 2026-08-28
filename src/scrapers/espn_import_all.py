@@ -15,7 +15,7 @@ import requests
 
 from .config import get_settings
 from .db import connect
-from .espn import build_espn_session
+from .espn import _is_stance_image, build_espn_session
 from .logging_config import configure_logging
 from .matching import IDENTITY_THRESHOLD, normalize_name as _normalize_name, ratio
 from .models import FighterRecord
@@ -246,14 +246,22 @@ def _nested_text(value: Any) -> str | None:
 
 
 def _extract_headshot_url(payload: dict[str, Any]) -> str | None:
+    # Same trap as espn.py::_extract_headshot_url, and the guard is imported from
+    # there ON PURPOSE: for MMA every `images[]` entry is a standing full-body
+    # pose (rel leftStance/rightStance), never a portrait, so taking images[0]
+    # stores a full-length figure in the face column. Writing the rule twice is
+    # how it comes back — this module is the bulk importer, so a second copy
+    # would silently re-break thousands of rows instead of one.
     headshot = payload.get("headshot")
     if isinstance(headshot, dict):
         return _clean_text(headshot.get("href"))
     images = payload.get("images")
-    if isinstance(images, list) and images:
-        first_image = images[0]
-        if isinstance(first_image, dict):
-            return _clean_text(first_image.get("href"))
+    if isinstance(images, list):
+        for image in images:
+            if isinstance(image, dict) and not _is_stance_image(image):
+                url = _clean_text(image.get("href"))
+                if url:
+                    return url
     return None
 
 

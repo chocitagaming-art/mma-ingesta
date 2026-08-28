@@ -323,6 +323,31 @@ def _nested_text(value: Any) -> str | None:
 
 _NOPHOTO_RE = re.compile(r"nophoto|silhouette|no-photo", re.IGNORECASE)
 
+# 🪤 A STANCE SHOT IS NOT A HEADSHOT, AND THIS COST US A BROKEN CARD.
+# For MMA, `images[]` holds ONLY standing full-body poses, tagged rel
+# "leftStance"/"rightStance" and served from /players/stance/{left,right}/.
+# Sampled 2026-08-28 across six athletes: every single entry was a stance, none
+# was ever a portrait. So falling back to images[0] does not find "another
+# headshot" — it stores a 623x1818 full-length figure in the face column, which
+# the site then squeezes into a 48px round frame.
+# That is exactly what happened to Hector Santiago (fighters.id 9123) on
+# 2026-08-27: ESPN had not published his `headshot` yet, the fallback grabbed
+# his rightStance, and he was heading into the 29-ago card with a warped
+# portrait. ESPN published the real headshot the next day, but nothing would
+# have replaced it: every enrichment pass fills gaps with COALESCE and this
+# column was no longer empty.
+# Match on rel (the semantic field) and keep the path check as a belt-and-braces
+# guard for payloads that omit rel.
+_STANCE_RE = re.compile(r"stance", re.IGNORECASE)
+
+
+def _is_stance_image(image: dict[str, Any]) -> bool:
+    """True when this `images[]` entry is a standing pose, not a portrait."""
+    rels = image.get("rel")
+    if isinstance(rels, list) and any(_STANCE_RE.search(str(r)) for r in rels):
+        return True
+    return bool(_STANCE_RE.search(str(image.get("href") or "")))
+
 
 def _extract_headshot_url(payload: dict[str, Any]) -> str | None:
     url: str | None = None
@@ -331,8 +356,12 @@ def _extract_headshot_url(payload: dict[str, Any]) -> str | None:
         url = _clean_text(headshot.get("href"))
     if url is None:
         images = payload.get("images")
-        if isinstance(images, list) and images and isinstance(images[0], dict):
-            url = _clean_text(images[0].get("href"))
+        if isinstance(images, list):
+            for image in images:
+                if isinstance(image, dict) and not _is_stance_image(image):
+                    url = _clean_text(image.get("href"))
+                    if url:
+                        break
     # ESPN serves a generic "nophoto" silhouette when a real headshot is missing.
     if url and _NOPHOTO_RE.search(url):
         return None
