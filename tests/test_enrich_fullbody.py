@@ -87,20 +87,26 @@ PLACEHOLDER_HTML = f"""
 
 
 class _FakeResponse:
-    def __init__(self, text: str, status_code: int = 200):
+    # `url` is the URL AFTER redirects, which is how resolve_athlete spots an
+    # unknown slug: ufc.com answers those with 200 on /search instead of a 404.
+    # It defaults to the requested URL so every existing test keeps meaning
+    # "the page we asked for is the page we got".
+    def __init__(self, text: str, status_code: int = 200, url: str = "https://www.ufc.com/athlete/x"):
         self.text = text
         self.status_code = status_code
         self.ok = status_code < 400
+        self.url = url
 
 
 class _FakeSession:
-    def __init__(self, html: str):
+    def __init__(self, html: str, final_url: str | None = None):
         self._html = html
+        self._final_url = final_url
         self.requested: list[str] = []
 
     def get(self, url, headers=None, timeout=None):
         self.requested.append(url)
-        return _FakeResponse(self._html)
+        return _FakeResponse(self._html, url=self._final_url or url)
 
 
 # ------------------------------------------------------------ full-body photo

@@ -27,8 +27,10 @@ import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime
+from urllib.parse import urlsplit
 
 import requests
+from bs4 import BeautifulSoup
 
 from .config import get_settings
 from .db import connect
@@ -158,6 +160,50 @@ def _extract_headshot(html: str, name: str) -> str | None:
     return None
 
 
+EVENT_URL = "https://www.ufc.com/event/{slug}"
+_ATHLETE_HREF_RE = re.compile(r"/athlete/([^/?#]+)")
+
+
+def athlete_slugs_from_event_html(html: str) -> dict[tuple[str, str], str]:
+    """Real ufc.com slugs from an event page, keyed by (fight id, corner).
+
+    WHY THIS EXISTS. The slug used to be GUESSED from the name stored in our DB
+    (`slugify`), and for a debutant it is wrong about as often as it is right.
+    Measured on the 29-ago-2026 card, 4 of the 5 problem fighters had a slug the
+    guess could never reach:
+
+        DB name            guessed            real (published by ufc.com)
+        Hector Santiago    hector-santiago    hector-de-sousa-santiago
+        Cameron Nelson     cameron-nelson     cam-nelson
+        Ce Liu             ce-liu             liu-ce
+        Xiao Long          xiao-long          shiyao-ron
+
+    And ufc.com hands the right answer over for free: every corner of the event
+    page is an <a href="/athlete/<slug>">. So we stop inventing it and read it.
+
+    Keyed by (data-fmid, corner) and NOT by name on purpose — that is the same
+    join `backfill_standing_photos` uses, and it sidesteps the whole name-matching
+    problem: the page calls them "Liu Ce" and "Cam Nelson" while we call them
+    "Ce Liu" and "Cameron Nelson", and data-fmid maps straight onto
+    `fights.source_id`.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    slugs: dict[tuple[str, str], str] = {}
+    for bout in soup.select(".c-listing-fight"):
+        fmid = (bout.get("data-fmid") or "").strip()
+        if not fmid:
+            continue
+        for corner in ("red", "blue"):
+            link = bout.select_one(f".c-listing-fight__corner-name--{corner} a[href]")
+            if link is None:
+                container = bout.select_one(f".c-listing-fight__corner--{corner}")
+                link = container.select_one('a[href*="/athlete/"]') if container else None
+            match = _ATHLETE_HREF_RE.search(link.get("href") or "") if link else None
+            if match:
+                slugs[(fmid, corner)] = match.group(1)
+    return slugs
+
+
 def _normalize_ufc_url(url: str | None) -> str | None:
     """Absolute https://www.ufc.com URL from whatever the page served (relative
     path, protocol-relative, http, or missing www)."""
@@ -264,8 +310,11 @@ def _parse_ufc_date(text: str | None) -> date | None:
     return None
 
 
-def resolve_athlete(session: requests.Session, name: str) -> AthleteData | None:
-    url = ATHLETE_URL.format(slug=slugify(name))
+def resolve_athlete(
+    session: requests.Session, name: str, slug: str | None = None
+) -> AthleteData | None:
+    """Read one ufc.com athlete page. `slug` overrides the name-guessed one."""
+    url = ATHLETE_URL.format(slug=slug or slugify(name))
     try:
         response = session.get(url, headers=_HEADERS, timeout=15)
     except Exception as exc:  # noqa: BLE001 - network issues are non-fatal
@@ -275,6 +324,20 @@ def resolve_athlete(session: requests.Session, name: str) -> AthleteData | None:
         return None
     if not response.ok:
         LOGGER.info("HTTP %s for %r (%s)", response.status_code, name, url)
+        return None
+    # 🪤 AN UNKNOWN SLUG DOES NOT 404 — IT REDIRECTS TO /search AND RETURNS 200.
+    # So a wrong guess used to come back as a perfectly OK page with no bio at
+    # all, and the caller counted it as "resolved" with every field None. The
+    # failure was completely mute: Hector Santiago (fighters.id 9123) was guessed
+    # as /athlete/hector-santiago for as long as he existed — his real page is
+    # /athlete/hector-de-sousa-santiago — and no counter, log line or alarm ever
+    # said so. Detecting it here turns a silent nothing into `unresolved`, which
+    # is visible in the run summary.
+    # getattr, not response.url: a real requests Response always carries it, but
+    # the test doubles in test_enrich_fullbody.py do not, and an AttributeError
+    # here would take down a whole pass over a detail of a fake.
+    if "/search" in urlsplit(getattr(response, "url", "") or "").path:
+        LOGGER.info("Slug %r does not exist for %r (redirected to search)", slug or slugify(name), name)
         return None
 
     html = response.text
@@ -307,11 +370,33 @@ def resolve_headshot(session: requests.Session, name: str) -> str | None:
     return data.headshot_url if data else None
 
 
-def _get_upcoming_gap_fighters(connection) -> list[tuple[int, str]]:
+@dataclass(frozen=True)
+class GapFighter:
+    """A fighter to look up, plus where to find his REAL ufc.com slug.
+
+    `event_slug`/`fmid`/`corner` are only populated for the upcoming-card scope:
+    that is the one that can point at a live event page. The whole-table scope
+    (`--all`) leaves them None and keeps guessing the slug from the name, which
+    is all we have for a fighter who is not booked.
+    """
+
+    fighter_id: int
+    name: str
+    event_slug: str | None = None
+    fmid: str | None = None
+    corner: str | None = None
+
+
+def _get_upcoming_gap_fighters(connection) -> list[GapFighter]:
     with connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT DISTINCT f.id, f.name
+            SELECT DISTINCT ON (f.id)
+                   f.id,
+                   f.name,
+                   e.source_id AS event_slug,
+                   fi.source_id AS fmid,
+                   CASE WHEN fi.fighter_red_id = f.id THEN 'red' ELSE 'blue' END AS corner
             FROM events e
             JOIN fights fi ON fi.event_id = e.id
             JOIN fighters f
@@ -321,13 +406,33 @@ def _get_upcoming_gap_fighters(connection) -> list[tuple[int, str]]:
                 (f.headshot_url IS NULL OR f.headshot_url = '')
                 OR (COALESCE(f.wins, 0) = 0 AND COALESCE(f.losses, 0) = 0 AND COALESCE(f.draws, 0) = 0)
               )
-            ORDER BY f.name
+            -- DISTINCT ON keeps ONE bout per fighter to read the slug from, and
+            -- the ORDER BY decides which: never a cancelled bout (its corner may
+            -- not even be on the page any more), then the nearest event. The
+            -- WHERE is deliberately unchanged, so the SET of fighters is exactly
+            -- what it was before — only the extra context is new.
+            ORDER BY f.id,
+                     (fi.status IS DISTINCT FROM 'cancelled') DESC,
+                     e.event_date ASC
             """
         )
-        return [(int(row[0]), str(row[1])) for row in cursor.fetchall()]
+        rows = [
+            GapFighter(
+                fighter_id=int(row[0]),
+                name=str(row[1]),
+                event_slug=row[2],
+                fmid=str(row[3]) if row[3] is not None else None,
+                corner=row[4],
+            )
+            for row in cursor.fetchall()
+        ]
+    # DISTINCT ON forces its own ORDER BY, so the caller's name order is restored
+    # here. It only decides the order of the log lines, but a stable pass is
+    # easier to compare between runs.
+    return sorted(rows, key=lambda gap: gap.name)
 
 
-def _get_all_gap_fighters(connection) -> list[tuple[int, str]]:
+def _get_all_gap_fighters(connection) -> list[GapFighter]:
     """Every fighter missing a photo OR with an empty 0-0-0 record."""
     with connection.cursor() as cursor:
         cursor.execute(
@@ -342,7 +447,37 @@ def _get_all_gap_fighters(connection) -> list[tuple[int, str]]:
             ORDER BY name
             """
         )
-        return [(int(row[0]), str(row[1])) for row in cursor.fetchall()]
+        return [GapFighter(fighter_id=int(row[0]), name=str(row[1])) for row in cursor.fetchall()]
+
+
+def _event_slug_lookup(
+    session: requests.Session, cache: dict[str, dict[tuple[str, str], str]], event_slug: str
+) -> dict[tuple[str, str], str]:
+    """Slugs of one event page, fetched at most once per run (empty on failure)."""
+    if event_slug in cache:
+        return cache[event_slug]
+    url = EVENT_URL.format(slug=event_slug)
+    slugs: dict[tuple[str, str], str] = {}
+    try:
+        response = session.get(url, headers=_HEADERS, timeout=15)
+        if response.ok:
+            slugs = athlete_slugs_from_event_html(response.text)
+        else:
+            LOGGER.info("HTTP %s for event page %s", response.status_code, url)
+    except Exception as exc:  # noqa: BLE001 - a missing map only costs us the guess
+        LOGGER.warning("Could not read event page %s: %s", url, exc)
+    LOGGER.info("Event %s: %d athlete slugs read from the card", event_slug, len(slugs))
+    cache[event_slug] = slugs
+    return slugs
+
+
+def _slug_for(
+    session: requests.Session, cache: dict[str, dict[tuple[str, str], str]], gap: GapFighter
+) -> str | None:
+    """The slug ufc.com publishes for this fighter, or None to fall back to the guess."""
+    if not (gap.event_slug and gap.fmid and gap.corner):
+        return None
+    return _event_slug_lookup(session, cache, gap.event_slug).get((gap.fmid, gap.corner))
 
 
 def enrich(dry_run: bool = False, scope: str = "upcoming", limit: int | None = None) -> Counter:
@@ -358,8 +493,20 @@ def enrich(dry_run: bool = False, scope: str = "upcoming", limit: int | None = N
         counts["gap_fighters"] = total
         LOGGER.info("Processing %d this run", total)
 
-        for idx, (fighter_id, name) in enumerate(gaps, 1):
-            data = resolve_athlete(session, name)
+        slug_cache: dict[str, dict[tuple[str, str], str]] = {}
+
+        for idx, gap in enumerate(gaps, 1):
+            fighter_id, name = gap.fighter_id, gap.name
+            slug = _slug_for(session, slug_cache, gap)
+            if slug:
+                counts["slug_from_card"] += 1
+                if slug != slugify(name):
+                    # The interesting half: the guess would have been wrong. Worth
+                    # a line, because it is the only way to notice that our stored
+                    # name and ufc.com's disagree.
+                    counts["slug_guess_was_wrong"] += 1
+                    LOGGER.info("Slug for %r: %s (the guess %s would have missed)", name, slug, slugify(name))
+            data = resolve_athlete(session, name, slug=slug)
             time.sleep(REQUEST_DELAY_SECONDS)
             if data is None:
                 counts["unresolved"] += 1
@@ -427,7 +574,14 @@ def main() -> None:
 
     scope = "all" if args.all_fighters else "upcoming"
     counts = enrich(dry_run=args.dry_run, scope=scope, limit=args.limit)
-    keys = ["gap_fighters", "resolved", "with_photo", "with_record", "updated", "record_filled", "unresolved"]
+    # slug_from_card / slug_guess_was_wrong ride in the summary on purpose: they
+    # are the only place a wrong stored name shows up. `unresolved` used to be a
+    # dead counter (a bad slug answered 200 on /search and counted as resolved),
+    # so a run of zeros there meant nothing; now it means something.
+    keys = [
+        "gap_fighters", "resolved", "with_photo", "with_record", "updated",
+        "record_filled", "unresolved", "slug_from_card", "slug_guess_was_wrong",
+    ]
     print(json.dumps({key: counts.get(key, 0) for key in keys}, indent=2))
 
 
