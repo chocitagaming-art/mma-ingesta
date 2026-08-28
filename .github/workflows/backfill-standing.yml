@@ -63,11 +63,16 @@ jobs:
             # dispatch manual del 11-jul hizo 24 eventos en 2 min, muy por
             # debajo del timeout de 30. Todo es aditivo: NULL nunca pisa un
             # valor guardado, asi que repetir es seguro.
-            if [ "${{ github.event.schedule }}" = "40 6 * * *" ]; then
-              ARGS="--limit 12"   # pase diario: los 8 futuros + los 4 recientes
-            else
-              ARGS="--limit 40"   # barrido semanal: todo el catalogo de ufc.com
-            fi
+            # 28-AGO-2026, LA MISMA TRAMPA OTRA VEZ, UN NUMERO MAS ARRIBA. El
+            # pase diario llevaba --limit 12 "los 8 futuros + los 4 recientes",
+            # pero _get_target_events ordena por event_date DESC y el catalogo
+            # ya son 34 eventos, no 26: el UFC Fight Night del 29-ago salia en
+            # la POSICION 11 de 34, a un anuncio de caerse del cupo justo el
+            # dia de su velada. Se iguala al barrido semanal. Medido hoy: los
+            # 34 eventos tardan 56 s en dry-run y 75 s escribiendo (110 fotos),
+            # muy por debajo del timeout de 30 min. Y todo es aditivo: NULL
+            # nunca pisa un valor guardado, asi que de mas no hace dano.
+            ARGS="--limit 40"   # diario y semanal: todo el catalogo de ufc.com
           else
             if [ -n "${{ inputs.limit || '' }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
             if [ "${{ inputs.dry_run || false }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
