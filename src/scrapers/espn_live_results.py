@@ -78,7 +78,7 @@ from .espn_live_stats import collect_fight_stats, fetch_competition_status
 from .logging_config import configure_logging
 from .models import EventRecord
 from .repositories.events import find_existing_event_id
-from .repositories.fighters import get_all_fighters, get_fighter_id_by_source
+from .repositories.fighters import get_all_fighters, get_fighter_id_by_espn_id
 from .repositories.fights import fill_fight_result, find_fight_id_by_fighters
 from .repositories.service_heartbeats import SERVICIO_BUCLE, upsert_service_heartbeat
 from .repositories.live_stats import (
@@ -476,9 +476,29 @@ def events_worth_processing(events: list[LiveEvent]) -> list[LiveEvent]:
 
 
 def _resolve_fighter(connection, espn_id, name, exact_index, normalized_index, counts) -> int | None:
-    """DB fighter id: (source='espn', source_id) first, fuzzy name @0.92 second."""
+    """DB fighter id: ESPN id first (mire donde mire que lo guarde), fuzzy name @0.92 second.
+
+    🪤 ANTES ESTO SOLO MIRABA `(source='espn', source_id=...)`, Y ASI CASI NADIE
+    ENTRABA POR ID. Un luchador lleva su id de ESPN en uno de dos sitios segun
+    quien creara la fila: los nacidos en ESPN lo tienen en `source_id`, y los
+    nacidos en ufcstats —la mayoria— lo tienen en la columna `espn_id`, puesta
+    despues por el enriquecimiento. Medido contra Neon el 29-ago-2026: de los
+    2.731 ids de ESPN de la base, la consulta vieja resolvia **188**. El 93 %
+    restante caia al emparejador de nombres, que es lo fragil.
+
+    Y ahi se rompe: el emparejador exige un parecido de 0.92 y ESPN publica
+    algunos nombres chinos con el orden invertido. En la velada del 29-ago,
+    `Jingnan Xiong` (ESPN) contra `Xiong Jingnan` (nuestra BD) da **0.538**, asi
+    que su combate contra Julia Polastri se habria quedado sin resolver: sin
+    resultado en vivo y, lo que no se recupera, sin pelicula minuto a minuto.
+
+    `get_fighter_id_by_espn_id` mira los dos sitios y ya existia —la usa
+    `link_upcoming_fighters` desde el duplicado de Michael Page del 2-ago—, solo
+    que este pase no la usaba. Medido antes de cambiarla, sobre los 2.731 ids:
+    2.543 pasan a resolver por id y **0 resuelven un luchador distinto**.
+    """
     if espn_id:
-        fighter_id = get_fighter_id_by_source(connection, ESPN_SOURCE, espn_id)
+        fighter_id = get_fighter_id_by_espn_id(connection, espn_id)
         if fighter_id is not None:
             counts["fighters_by_source"] += 1
             return fighter_id

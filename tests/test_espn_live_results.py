@@ -125,6 +125,13 @@ def _responder(sql, params=None):
     if "FROM fighters WHERE source" in flat:  # get_fighter_id_by_source
         db_id = ESPN_TO_DB_ID.get(params[1])
         return [(db_id,)] if db_id else []
+    # get_fighter_id_by_espn_id: mira los DOS sitios donde puede vivir el id
+    # (`source_id` de las filas nacidas en ESPN y la columna `espn_id` de las
+    # nacidas en ufcstats), lleva el OR entre paréntesis y pasa el parámetro por
+    # nombre, no por posición. Es la que usa `_resolve_fighter` desde el 29-ago.
+    if "FROM fighters WHERE (source" in flat:
+        db_id = ESPN_TO_DB_ID.get(params["espn_id"])
+        return [(db_id,)] if db_id else []
     if flat.startswith("SELECT id FROM events"):  # get_event_id (exact) -> miss
         return []
     if flat.startswith("SELECT id, name FROM events"):  # token fallback -> hit
@@ -237,6 +244,46 @@ def test_resolve_fighter_prefers_espn_source_then_fuzzy_name(fakedb):
     assert counts["fighters_by_name"] == 1
     # Nombre lejano -> sin match (no se inventa identidad).
     assert _resolve_fighter(conn, "8888888", "Somebody Else", exact, normalized, counts) is None
+
+
+def test_resolve_fighter_finds_the_id_wherever_the_row_keeps_it(fakedb):
+    """🔴 EL CASO DE LA VELADA DEL 29-AGO, y no era un caso raro: era el normal.
+
+    `_resolve_fighter` buscaba el id de ESPN SOLO en `(source='espn', source_id)`,
+    y ahí solo lo llevan los luchadores nacidos en ESPN. La mayoría nació en
+    ufcstats y lo lleva en la columna `espn_id`, puesta después por el
+    enriquecimiento. Medido contra Neon el 29-ago-2026: de los **2.731** ids de
+    ESPN de la base, la consulta vieja resolvía **188**. El resto —el 93 %— caía
+    al emparejador de nombres.
+
+    Y el emparejador exige 0.92 de parecido, así que se rompe en cuanto ESPN
+    escribe el nombre de otra forma. Xiong Jingnan (fighters.id 9086) iba a pelear
+    esa noche contra Julia Polastri, ESPN la publica como «Jingnan Xiong» —con el
+    orden invertido, que en un nombre chino es lo normal— y
+    ratio('jingnan xiong', 'xiong jingnan') = **0.538**. Su combate se habría
+    quedado sin resolver: sin resultado en vivo y sin película minuto a minuto,
+    que es lo único que no se recupera al día siguiente.
+
+    El arreglo no fue código nuevo: `get_fighter_id_by_espn_id` ya existía y ya la
+    usaba `link_upcoming_fighters` desde el duplicado de Michael Page del 2-ago.
+    Este pase, simplemente, no la usaba.
+    """
+    conn = fakedb.Connection(_responder)
+    # Nombre con el orden invertido a propósito: si el id no lo resuelve, el
+    # fuzzy tampoco va a salvarlo, que es justo lo que pasó.
+    fighters = [FighterMatchRecord(9086, "Xiong Jingnan", None, None, None, None, None, None, None)]
+    exact = _build_exact_name_index(fighters)
+    normalized = _build_normalized_name_index(fighters)
+    counts = Counter()
+
+    # El id manda, venga la fila de donde venga.
+    assert _resolve_fighter(conn, "4350812", "Jingnan Xiong", exact, normalized, counts) == 101
+    assert counts["fighters_by_source"] == 1
+
+    # Y sin id, el nombre invertido NO cuela: 0.538 está muy por debajo de 0.92.
+    # Se prefiere no resolver a inventar una identidad.
+    assert _resolve_fighter(conn, None, "Jingnan Xiong", exact, normalized, counts) is None
+    assert counts["fighters_by_name"] == 0
 
 
 def test_resolve_fighter_folds_diacritics_below_fuzzy_cutoff(fakedb):
