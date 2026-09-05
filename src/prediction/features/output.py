@@ -69,7 +69,14 @@ def print_summary(result: DatasetBuildResult) -> None:
         print(spot_check)
 
 
-def main() -> None:
+def main(write_table: bool = False) -> None:
+    """Genera el CSV de entrenamiento.
+
+    write_table=False por defecto A PROPOSITO: create_output_table hace DROP TABLE
+    + CREATE + INSERT sobre la base de PRODUCCION, y la tabla fight_prediction_
+    training_data no la lee nadie (el nombre solo aparece en features/types.py:12).
+    Regenerar un CSV no puede tener ese efecto por accidente.
+    """
     settings = get_settings()
     fights_df = load_base_dataframe(settings.database_url)
     rankings_df = load_rankings_dataframe(settings.database_url)
@@ -79,5 +86,9 @@ def main() -> None:
         print_summary(result)
         raise RuntimeError("No eligible training samples were generated.")
     dataset.to_csv(OUTPUT_CSV_PATH, index=False)
-    create_output_table(settings.database_url, dataset)
+    if write_table:
+        create_output_table(settings.database_url, dataset)
+        print(f"Tabla {OUTPUT_TABLE_NAME} reescrita en la base.")
+    else:
+        print(f"Solo CSV. Para escribir en {OUTPUT_TABLE_NAME}, usa --write-table.")
     print_summary(result)
