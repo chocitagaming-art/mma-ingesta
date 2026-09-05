@@ -23,6 +23,7 @@ from sklearn.metrics import (
 from sklearn.model_selection import ParameterGrid
 from xgboost import XGBClassifier
 
+from src.prediction.bundle_io import save_bundle_preserving
 from src.prediction.features import FEATURE_COLUMNS
 
 
@@ -337,15 +338,16 @@ def main() -> None:
 
     # ISO date so the UI can show "Modelo entrenado el <fecha>" (#29).
     trained_at = datetime.now(timezone.utc).date().isoformat()
-    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(
+    # NO usar joblib.dump directo: este bundle tambien lleva el calibrador y el
+    # modelo de metodo (12 claves method_*), y un dump plano los borraria.
+    save_bundle_preserving(
+        MODEL_PATH,
         {
             "model": model,
             "imputer": prepared.imputer,
             "feature_columns": feature_columns,
             "trained_at": trained_at,
         },
-        MODEL_PATH,
     )
     write_metrics_report(
         train_df=train_df,
