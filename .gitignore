@@ -42,3 +42,7 @@ src/prediction/model_metrics.md
 # filtran la ruta del disco de quien los genero).
 feature_run_output.txt
 *_run_output.txt
+
+# Copias de seguridad de filas antes de una corrección manual en producción.
+# Son volcados de la BD: se quedan en local, no viajan al repo público.
+docs/copias/

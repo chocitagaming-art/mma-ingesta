@@ -46,6 +46,7 @@ from .espn import (
 from .logging_config import configure_logging
 from .matching import fold as _fold, ratio
 from .repositories.fighters import get_all_fighters
+from .rankings_correcciones import aplicar_correcciones
 from .repositories.rankings import (
     RankingRecord,
     delete_rankings_for_snapshot,
@@ -395,6 +396,12 @@ def _build_records(
             records.append(make_record(entry.fighter_name, entry.rank_position, False, entry.rank_change))
             counts["ranked"] += 1
         counts["divisions"] += 1
+    # Manual corrections for the cases where ufc.com itself lags behind reality (a
+    # vacated title it has not published yet). Each one carries its own guard and
+    # expiry and retires itself once the source catches up — see
+    # rankings_correcciones.py. Applied AFTER building and BEFORE the slot guard, so
+    # what we validate is exactly what we are about to write.
+    records = aplicar_correcciones(records, hoy=snapshot_date, counts=counts)
     # Guard the slot UNIQUE before any delete/insert: a readable error beats a
     # raw IntegrityError mid-loop that would abort the whole snapshot.
     _assert_no_duplicate_rank_slots(records)
@@ -442,6 +449,8 @@ def _build_summary(counts: Counter) -> str:
         "snapshot_date", "source_url", "divisions", "champions", "ranked",
         "total_rows", "matched", "matched_folded", "unmatched", "fighters_in_db",
         "unmapped_divisions", "duplicate_groupings", "rank_mismatches",
+        "correcciones_aplicadas", "correcciones_ya_no_necesarias",
+        "correcciones_sin_efecto", "correcciones_caducadas",
         "deleted_existing", "written",
     ]
     return json.dumps({key: counts.get(key, 0) for key in keys}, indent=2)
