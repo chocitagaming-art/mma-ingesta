@@ -732,3 +732,171 @@ def test_el_recinto_generico_del_1059_ya_no_es_un_token_de_lugar():
     assert "gymnastics" not in tokens
     # Y no pierde nada: le quedan los dos que de verdad lo nombran.
     assert {"baku", "azerbaijan"} <= tokens
+
+
+# ------------------------------------------- la MARCA de la velada (Noche UFC)
+#
+# 🪤 El guard sacaba el token distintivo SOLO de `location`, y la UFC titula las
+# veladas de marca con la marca, jamas con la ciudad. Los dos unicos careos de
+# una Noche UFC que hay en el canal oficial en 9 anos lo demuestran:
+#   7dhhFNCQEcQ  2025-09-12  "Noche UFC: Fighter Faceoffs"
+#   qpjPPGtcS3I  2023-09-15  "Noche UFC: Weigh-In Faceoffs"
+# Ninguno lleva ciudad ni "ufc <N>", asi que los dos se RECHAZABAN — y como la
+# escritura es first-writer-wins, el careo se quedaba a NULL para siempre.
+#
+# Todo lo de aqui abajo sale de datos reales: los 797 nombres de `events` y las
+# 20.000 subidas del canal UCvgfXK4nTYKudb0rFR6noLA (2017-05-23 -> 2026-09-11),
+# de las que 483 llevan "face-off" en el titulo.
+
+
+def _noche_ufc_1088():
+    """El evento 1088 tal y como esta en la BD el 11-sep-2026."""
+    return TargetEvent(
+        id=1088,
+        name="Noche UFC: Silva vs. Delgado",
+        location="Desert Diamond Arena, Glendale, AZ, United States",
+        event_date=date(2026, 9, 12),
+    )
+
+
+def _video(titulo, dia=11):
+    return [FeedVideo("vid", titulo, date(2026, 9, dia))]
+
+
+def test_noche_ufc_casa_por_la_marca_del_nombre():
+    # El titulo REAL de la Noche UFC de 2025. Sin este cambio: RECHAZADO.
+    assert match_event(_noche_ufc_1088(), _video("Noche UFC: Fighter Faceoffs")) == "vid"
+
+
+def test_noche_ufc_casa_con_la_marca_al_final_del_titulo():
+    # La otra forma que usa el canal: "<A> vs <B> <cosa> | Noche UFC", que es
+    # como esta titulado el pesaje de ESTA velada (Hh9icPderiM).
+    assert match_event(_noche_ufc_1088(), _video("Silva vs Delgado Face-Offs | Noche UFC")) == "vid"
+
+
+def test_la_marca_no_abre_la_puerta_al_careo_de_otra_ciudad():
+    assert match_event(_noche_ufc_1088(), _video("UFC Paris: Fighter Face-offs")) is None
+
+
+def test_la_marca_no_abre_la_puerta_al_careo_de_una_numerada():
+    assert match_event(_noche_ufc_1088(), _video("UFC 330: Fighter Face-offs")) is None
+
+
+def test_el_careo_de_boxeo_de_la_misma_ventana_sigue_fuera():
+    # El canal oficial emite tambien boxeo. "Canelo vs Crawford: Final Faceoffs"
+    # es REAL (13-sep-2025) y cayo DENTRO de la ventana de la Noche UFC de 2025;
+    # el 12-sep-2026 el canal esta promocionando "Garcia vs Benn" igual. Por eso
+    # "final" es stopword de marca.
+    assert match_event(_noche_ufc_1088(), _video("Canelo vs Crawford: Final Faceoffs", 12)) is None
+    assert match_event(_noche_ufc_1088(), _video("Garcia vs Benn: Final Faceoffs", 12)) is None
+
+
+def test_la_marca_no_se_salta_la_lista_blanca_del_titulo():
+    # La condicion 1 sigue mandando: sin "face-off" no hay careo, lleve la marca
+    # que lleve. Los dos titulos son REALES de esta semana.
+    assert match_event(_noche_ufc_1088(), _video("Noche UFC: Ceremonial Weigh-In", 8)) is None
+    assert match_event(_noche_ufc_1088(), _video("Silva vs Delgado Weigh-Ins | Noche UFC")) is None
+
+
+def test_el_hashtag_pegado_no_es_la_marca():
+    # Los shorts del canal escriben "#NocheUFC" todo junto, y "noche" se busca
+    # como PALABRA: no hay frontera entre "noche" y "ufc". Un short no puede
+    # llevarse la columna.
+    assert match_event(_noche_ufc_1088(), _video("Silva and Delgado FACE-OFF #NocheUFC")) is None
+
+
+def test_los_apellidos_del_estelar_no_son_token_de_marca():
+    # Solo cuenta lo anterior a los dos puntos. Si contase el nombre entero,
+    # "silva" y "delgado" serian tokens del guard.
+    assert match_faceoffs._name_tokens("Noche UFC: Silva vs. Delgado") == {"noche"}
+    assert match_event(_noche_ufc_1088(), _video("Best Silva Face-Offs Ever")) is None
+
+
+def test_fighter_nunca_es_token_de_marca():
+    # LA MINA. "fighter" sale de 28 filas reales ("The Ultimate Fighter N
+    # Finale") y esta en 108 de los 483 titulos de careo del canal, porque el
+    # formato canonico ES "UFC <sitio>: Fighter Face-offs".
+    assert match_faceoffs._name_tokens("The Ultimate Fighter 33 Finale: Ortega vs Rodriguez") == set()
+    assert match_faceoffs._name_tokens("The Ultimate Fighter 31 Finale") == set()
+
+
+def test_un_evento_con_numero_no_aporta_tokens_de_marca():
+    # El numero de cartelera ya lo guarda _UFC_NUM_RE, que es mas fino. De paso
+    # cierra los patrocinios.
+    assert match_faceoffs._name_tokens("Crypto.com UFC 331: Van vs. Pantoja 2") == set()
+    assert match_faceoffs._name_tokens("Polymarket UFC 334: TBD vs. TBD") == set()
+    assert match_faceoffs._name_tokens("UFC 306: Riyadh Season Noche UFC") == set()
+
+
+def test_una_cabecera_que_es_un_emparejamiento_no_aporta_marca():
+    # "Ortiz vs Shamrock 3: The Final Chapter" es una fila REAL: sin este corte,
+    # "ortiz" y "shamrock" serian tokens de marca. Y si manana el scraper trae
+    # la velada SIN separador, los apellidos entrarian por la misma puerta: el
+    # modulo prefiere fallar por defecto.
+    assert match_faceoffs._name_tokens("Ortiz vs Shamrock 3: The Final Chapter") == set()
+    assert match_faceoffs._name_tokens("Noche UFC Silva vs Delgado") == set()
+
+
+def test_fox_y_fuel_no_son_tokens_de_marca():
+    # 33 filas reales de 2011-2013 ("UFC on FOX / FUEL TV"). El cron no las
+    # alcanza, pero el backfill historico de ~210 dias que contempla el modulo
+    # si, y la escritura es irreversible. Ninguna tiene careo en YouTube.
+    assert match_faceoffs._name_tokens("UFC on FOX: Henderson vs. Diaz") == set()
+    assert match_faceoffs._name_tokens("UFC on FUEL TV: Silva vs. Stann") == set()
+
+
+def test_los_digitos_sueltos_no_son_token_de_marca():
+    assert match_faceoffs._name_tokens("UFC Freedom 250") == {"freedom"}
+
+
+def test_ufc_freedom_250_casa_por_la_marca():
+    # El otro careo que se perdia, y es un caso REAL ya pasado: iDjZkLhkZw8,
+    # "UFC Freedom 250: Fighter Faceoffs". Su location ("Washington, DC, USA")
+    # no sale en el titulo y "250" no va pegado a "UFC", asi que ni ciudad ni
+    # numero lo alcanzaban.
+    event = TargetEvent(
+        id=1084,
+        name="UFC Freedom 250",
+        location="Washington, DC, USA",
+        event_date=date(2026, 6, 14),
+    )
+    feed = [FeedVideo("iDjZkLhkZw8", "UFC Freedom 250: Fighter Faceoffs", date(2026, 6, 13))]
+    assert match_event(event, feed) == "iDjZkLhkZw8"
+
+
+def test_ninguna_fila_real_suelta_un_token_de_marca_peligroso():
+    # CENTINELA. Ejecutado el 11-sep-2026 sobre las 797 filas de `events`: solo
+    # TRES sueltan token de marca, y son estas. Aqui van ademas una muestra de
+    # cada familia que NO debe soltar ninguno. Si manana alguien afloja un
+    # recorte, este test lo canta.
+    sueltan = {
+        "UFC Macao: Franklin vs Le": {"macao"},
+        "UFC Freedom 250": {"freedom"},
+        "Noche UFC: Silva vs. Delgado": {"noche"},
+    }
+    for nombre, esperado in sueltan.items():
+        assert match_faceoffs._name_tokens(nombre) == esperado, nombre
+    mudas = [
+        "UFC Fight Night: Du Plessis vs. Usman",
+        "UFC 299: Sandhagen vs. Vera 2",
+        "The Ultimate Fighter 31 Finale: Jones vs Miller",
+        "UFC on FOX: Johnson vs. Reis",
+        "UFC on FUEL TV: Barao vs. McDonald",
+        "UFC Live: Jones vs. Matyushenko",
+        "Road To UFC: Maheshate vs. Flowers",
+        "UFC - Road to UFC 4.6",
+        "Crypto.com UFC 331: Van vs. Pantoja 2",
+        "Ortiz vs Shamrock 3: The Final Chapter",
+        "UFC Fight Night - Fight for the Troops",
+    ]
+    for nombre in mudas:
+        assert match_faceoffs._name_tokens(nombre) == set(), nombre
+    union = set()
+    for nombre in list(sueltan) + mudas:
+        union |= match_faceoffs._name_tokens(nombre)
+    assert union == {"macao", "freedom", "noche"}
+
+
+def test_sin_nombre_no_revienta():
+    assert match_faceoffs._name_tokens(None) == set()
+    assert match_faceoffs._name_tokens("") == set()

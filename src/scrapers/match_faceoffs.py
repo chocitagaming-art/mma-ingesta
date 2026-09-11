@@ -18,8 +18,9 @@ runs RSS-only, exactly as before.
 MATCH GUARD (conservative, mirrors backfill_fight_videos.is_trusted_match) — a
 video is accepted only when ALL hold on the accent-stripped, casefolded title:
   1. matches face-?offs?  (whitelist; excludes "Ceremonial Weigh-In", "Weigh-Ins")
-  2. contains a distinctive place token of the event — a city token, or the
-     'vegas' alias for Nevada/Apex cards — OR the "ufc <N>" card number (name)
+  2. contains a distinctive token of the event — a city token of its `location`
+     (or the 'vegas' alias for Nevada/Apex cards), a BRAND token of its `name`
+     ('noche' for the Noche UFC cards) — OR the "ufc <N>" card number (name)
   3. published within [event_date - 5d, event_date + 1d]
 Better to miss than to mis-attribute: an unmatched event stays NULL and retries
 on the next daily run. Writes are first-writer-wins (set_event_faceoff_video).
@@ -312,6 +313,76 @@ def _place_tokens(location: str | None) -> set[str]:
     return tokens
 
 
+# 🪤 EL GUARD NO SABIA LEER "Noche UFC", Y ESO ERA UNA VELADA AL AÑO PERDIDA.
+#
+# Hasta hoy el token distintivo salía SOLO de `location`. Para el 1088 ("Noche
+# UFC: Silva vs. Delgado", Glendale AZ) eso da {desert, diamond, glendale} — y
+# la UFC titula ESTOS vídeos con la marca, nunca con la ciudad. Los dos únicos
+# careos de una Noche UFC que hay en el canal en 9 años lo confirman: "Noche
+# UFC: Fighter Faceoffs" (7dhhFNCQEcQ, 2025) y "Noche UFC: Weigh-In Faceoffs"
+# (qpjPPGtcS3I, 2023). Cero tokens de lugar y cero "ufc <N>": se rechazaban, y
+# como la escritura es first-writer-wins el careo se quedaba a NULL para
+# siempre.
+#
+# La marca SÍ está en `events.name`. Pero el nombre trae además los APELLIDOS
+# del estelar, y meterlos enteros era el desastre: medido sobre las 797 filas
+# reales, el nombre completo suelta 760 tokens distintos en 790 filas, que
+# aceptarían 647 pares (token, careo) contra los 483 títulos de careo que el
+# canal publicó en 9 años. El peor es "fighter" (28 filas de The Ultimate
+# Fighter): está en 108 de esos 483, porque el formato canónico ES "UFC X:
+# Fighter Face-offs". Por eso aquí se recorta CUATRO veces:
+#   - solo la MARCA, lo que va antes de ':' / raya (fuera los apellidos),
+#   - NADA si esa cabecera es en realidad un emparejamiento ("Ortiz vs Shamrock
+#     3: The Final Chapter", o una velada que llegue sin separador): ahí los
+#     "tokens de marca" serían apellidos, y esto prefiere fallar por defecto,
+#   - fuera los dígitos sueltos: el número ya lo cubre "ufc <N>", y más fino,
+#   - y NADA si el evento ya tiene "ufc <N>", que además desactiva los nombres
+#     patrocinados ("Crypto.com UFC 331", "Polymarket UFC 334").
+# Resultado sobre las 797 filas reales: 3 tokens en 3 eventos (noche, freedom,
+# macao) y 3 pares (token, careo) posibles en 9 años, los 3 correctos. De los 12
+# eventos que el cron alcanza hoy, el único con token de marca es el 1088.
+_BRAND_SPLIT_RE = re.compile(r"[:–—]| - ")
+_BRAND_WORD_RE = re.compile(r"[^a-z0-9]+")
+_BRAND_VS_RE = re.compile(r"\bvs\b")
+# A las de lugar se suman las palabras que viven en los TÍTULOS de careo o en la
+# nomenclatura de la marca, y que por tanto no distinguen una velada de otra.
+# "fighter", "final" y "finale" son las que muerden: "UFC X: Fighter Face-offs"
+# y el "Canelo vs Crawford: Final Faceoffs" (boxeo, 13-sep-2025) del canal, que
+# cae DENTRO de la ventana de una Noche UFC de septiembre. "fox" y "fuel" son
+# los 33 "UFC on FOX / FUEL TV" de 2011-2013: el cron no los alcanza, pero el
+# backfill histórico de ~210 días que contempla este módulo sí, y ninguno de
+# esos 33 tiene careo en YouTube, así que taparlos no cuesta nada.
+_NAME_STOPWORDS = _PLACE_STOPWORDS | frozenset(
+    {
+        "fighter", "fighters", "faceoff", "faceoffs", "face", "offs",
+        "prelims", "main", "card", "final", "finale", "ultimate", "team",
+        "live", "road", "for", "com", "tv", "season", "presents", "and",
+        "fox", "fuel",
+    }
+)
+
+
+def _name_tokens(name: str | None) -> set[str]:
+    """Distinctive BRAND tokens of the event NAME — the 'Noche UFC' guard.
+
+    Only the brand half (before the first ':' / dash), so the main-event
+    surnames never become tokens; nothing at all when that half is itself a
+    matchup ("A vs B"); no bare digits; and NOTHING when the name already
+    carries a "ufc <N>", because that card is guarded by its number, which is
+    tighter, and it keeps sponsor words out ("Crypto.com UFC 331").
+    """
+    if _UFC_NUM_RE.search(name or ""):
+        return set()
+    marca = _BRAND_SPLIT_RE.split(_norm(name), 1)[0]
+    if _BRAND_VS_RE.search(marca):
+        return set()
+    return {
+        t
+        for t in _BRAND_WORD_RE.split(marca)
+        if len(t) >= 3 and not t.isdigit() and t not in _NAME_STOPWORDS
+    }
+
+
 def _title_has_place_token(title_n: str, tokens: set[str]) -> bool:
     return any(re.search(rf"\b{re.escape(tok)}\b", title_n) for tok in tokens)
 
@@ -321,6 +392,7 @@ def match_event(event: TargetEvent, videos: list[FeedVideo]) -> str | None:
     if event.event_date is None:
         return None
     place_tokens = _place_tokens(event.location)
+    name_tokens = _name_tokens(event.name)
     num_match = _UFC_NUM_RE.search(event.name or "")
     ufc_num = num_match.group(1) if num_match else None
     lo = event.event_date - timedelta(days=_DAYS_BEFORE)
@@ -333,7 +405,8 @@ def match_event(event: TargetEvent, videos: list[FeedVideo]) -> str | None:
             continue
         city_ok = _title_has_place_token(title_n, place_tokens)
         num_ok = bool(ufc_num and re.search(rf"\bufc\s*{ufc_num}\b", title_n))
-        if city_ok or num_ok:
+        brand_ok = _title_has_place_token(title_n, name_tokens)
+        if city_ok or num_ok or brand_ok:
             return video.video_id
     return None
 
