@@ -20,8 +20,13 @@ video is accepted only when ALL hold on the accent-stripped, casefolded title:
   1. matches face-?offs?  (whitelist; excludes "Ceremonial Weigh-In", "Weigh-Ins")
   2. contains a distinctive token of the event — a city token of its `location`
      (or the 'vegas' alias for Nevada/Apex cards), a BRAND token of its `name`
-     ('noche' for the Noche UFC cards) — OR the "ufc <N>" card number (name)
-  3. published within [event_date - 5d, event_date + 1d]
+     ('noche' for the Noche UFC cards) — OR the "ufc <N>" card number, WITH a
+     real separator: a glued "#ufc331" hashtag does NOT count (see
+     _TITLE_NUM_TEMPLATE; that gap cost the 1090 its careo)
+  3. published within [event_date - 2d, event_date + 1d] (measured, see _DAYS_BEFORE)
+  4. lasts at least MIN_DURATION_SECONDS, when a YOUTUBE_API_KEY lets us ask —
+     the guard against promo shorts. Without a key it degrades to OPEN, on
+     purpose: see _duration_ok.
 Better to miss than to mis-attribute: an unmatched event stays NULL and retries
 on the next daily run. Writes are first-writer-wins (set_event_faceoff_video).
 
@@ -64,9 +69,64 @@ _HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; mma-ingesta/1.0)"}
 
 _FACEOFF_RE = re.compile(r"face-?offs?\b", re.IGNORECASE)
 _UFC_NUM_RE = re.compile(r"\bufc\s*(\d{2,4})\b", re.IGNORECASE)
+
+# 🪤 LA GRIETA DEL HASHTAG. El careo del 1090 se lo llevo un SHORT de 17 s
+# titulado "what are these faceoffs saying?! #ufc331".
+#
+# Hasta hoy el numero de cartelera se buscaba en el titulo del video con el
+# MISMO patron que en el nombre del evento: `\bufc\s*331\b`. Y ese `\s*` admite
+# CERO espacios, asi que "#ufc331" casaba: la almohadilla es frontera de
+# palabra, de modo que un hashtag de short era literalmente indistinguible del
+# formato oficial "UFC 331: ...". Con eso el short pasaba la guarda 2, y la
+# escritura es first-writer-wins: el careo bueno ya no podia entrar nunca.
+#
+# Aqui el patron del TITULO se separa del patron del NOMBRE y exige DOS cosas:
+#   - `\s+`  — un separador de verdad, no cero,
+#   - `(?<!#)` — y que "ufc" no venga pegado a una almohadilla.
+# Medido el 18-sep-2026 sobre las 20.000 subidas del canal oficial
+# UCvgfXK4nTYKudb0rFR6noLA, de las que 477 llevan "face-off" en el titulo:
+#   - 14 escriben "ufc<num>" PEGADO, y las 14 son shorts/clips promocionales
+#     ("Rosas Jr and Font Face-off! 💥 #ufc326"). NI UNA es un careo de verdad.
+#   - 0 careos usan la forma pegada sin almohadilla, y 0 usan "#ufc <num>".
+#   - los 30 careos que hoy estan en la base usan "UFC <N>: ..." con espacio.
+# O sea: el patron pegado es EXCLUSIVO de los hashtags de short. Cerrarlo no
+# cuesta ni un solo positivo legitimo.
+#
+# El patron del nombre de evento (_UFC_NUM_RE) NO se toca: ese texto lo produce
+# nuestro propio scraper, y de los 798 nombres reales 0 llevan la forma pegada.
+#
+# ⚠️ Y LO MEDIDO VALE SOLO PARA ESTE CANAL, EL DE LA UFC EN INGLES. El canal
+# OFICIAL EN ESPANOL (ufcespanol) SI titula careos de verdad con la almohadilla
+# pegada, y el contraejemplo es justo el video de este incidente:
+#   MQLCbgV5rhc · "#CryptoCom #UFC331: Careos Conferencia de Prensa" · 3:15
+# o sea, el careo BUENO del 1090. Hoy no pasa nada, porque este modulo solo lee
+# UFC_CHANNEL_ID y ademas "Careos" no pasa _FACEOFF_RE. Pero quien anada el
+# canal en espanol y el termino "careo" a la lista blanca TIENE que aflojar esta
+# regla para esos titulos (o exigir el separador solo en el canal ingles): si no,
+# el careo oficial en espanol se rechazaria por la defensa que se puso para
+# protegerlo. Verificado el 18-sep-2026 con el oembed de YouTube.
+_TITLE_NUM_TEMPLATE = r"(?<!#)\bufc\s+{num}\b"
+
 # Careos publish the evening before; allow a small window around the event date.
-_DAYS_BEFORE = 5
+#
+# 🪤 LA VENTANA ERA DE 5 DIAS Y NADIE LA HABIA MEDIDO. El short del 1090 se
+# publico a 3 dias del evento y entro por aqui. Medido el 18-sep-2026 cruzando
+# `events.event_date` con el `publishedAt` real (YouTube Data API) de los 30
+# careos que hay en la base:
+#     delta 0 dias -> 8 videos      delta 1 dia -> 22 videos
+#     delta 2 dias -> 0             delta 3+ dias -> 0
+# El desfase MAXIMO real es de UN dia, no de dos ni de tres. Con 2 queda un dia
+# entero de margen sobre el peor caso medido y el short de 3 dias se queda
+# fuera el solo, sin necesidad de API ni de cuota.
+_DAYS_BEFORE = 2
 _DAYS_AFTER = 1
+
+# Minimum video length for a careo, in seconds. MISMO UMBRAL QUE LA WEB: ver
+# mma-app/src/lib/youtube.ts:126 (MIN_DURATION_SECONDS = 75), que ya lo usa para
+# descartar shorts al pintar el embed. Los 30 careos reales de la base duran
+# entre 152 s y 1363 s, asi que 75 s deja un margen de 2x sobre el mas corto
+# legitimo y corta en seco los shorts verticales (el del incidente: 17 s).
+MIN_DURATION_SECONDS = 75
 
 # --- Optional YouTube Data API rescue (opt-in via YOUTUBE_API_KEY) --------
 # The RSS feed only exposes the ~15 latest uploads, so a careo drops out of it
@@ -74,6 +134,12 @@ _DAYS_AFTER = 1
 # the channel's uploads playlist pages further back at 1 quota unit/page (vs 100
 # for search.list), letting the daily cron RESCUE those missed face-offs.
 PLAYLIST_ITEMS_ENDPOINT = "https://www.googleapis.com/youtube/v3/playlistItems"
+# videos.list?part=contentDetails is the ONLY place a duration comes from: neither
+# the Atom feed nor playlistItems carries it. 1 quota unit per batch of up to 50
+# ids, and we only ever ask about titles that already passed the face-off
+# whitelist (0-3 per run), so the duration guard costs 1 unit/day.
+VIDEOS_ENDPOINT = "https://www.googleapis.com/youtube/v3/videos"
+_VIDEOS_BATCH = 50
 _RESCUE_LOOKBACK_DAYS = 45
 # Safety cap on pagination. The published_after early-stop normally trips first;
 # 20 pages (~1000 videos, 20 quota units of 10k/day) is enough to reach ~45 days
@@ -238,6 +304,132 @@ def fetch_channel_uploads(
     return videos
 
 
+# --- Duration guard (the net under the title guards) ----------------------
+
+_ISO8601_DURATION_RE = re.compile(
+    r"^P(?:(?P<days>\d+)D)?"
+    r"(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?)?$",
+    re.IGNORECASE,
+)
+
+
+def parse_iso8601_duration(text: str | None) -> int | None:
+    """Seconds from a YouTube ISO-8601 duration ("PT3M15S" -> 195).
+
+    Returns None — NOT 0 — for anything unparseable, so an unknown duration can
+    never be mistaken for a zero-length video and get a legitimate careo
+    rejected. A live stream still in progress reports "P0D", which parses to 0
+    seconds and is correctly treated as too short."""
+    if not text:
+        return None
+    match = _ISO8601_DURATION_RE.match(text.strip())
+    if not match:
+        return None
+    raw = match.groupdict()
+    # 🪤 TODOS LOS COMPONENTES SON OPCIONALES EN EL PATRON, asi que "P" y "PT" a
+    # secas CASABAN y salian valiendo 0 segundos — o sea "demasiado corto", que
+    # es justo lo que este parser no puede decir cuando no ha entendido nada. Lo
+    # cazo test_parse_iso8601_devuelve_none_y_no_cero_cuando_no_entiende. Sin un
+    # solo componente presente no hay duracion, hay basura: None.
+    if all(v is None for v in raw.values()):
+        return None
+    parts = {k: int(v) if v else 0 for k, v in raw.items()}
+    return (
+        parts["days"] * 86400
+        + parts["hours"] * 3600
+        + parts["minutes"] * 60
+        + parts["seconds"]
+    )
+
+
+def _requests_videos_fetcher(timeout: int = 15) -> _PlaylistFetcher:
+    def fetch(params: dict) -> dict:
+        response = requests.get(VIDEOS_ENDPOINT, params=params, timeout=timeout)
+        response.raise_for_status()
+        return response.json()
+
+    return fetch
+
+
+def fetch_video_durations(
+    api_key: str,
+    video_ids: list[str],
+    *,
+    fetcher: _PlaylistFetcher | None = None,
+) -> dict[str, int]:
+    """Durations in seconds for the given video ids, via videos.list.
+
+    Returns ONLY the ids it could actually resolve. An id missing from the
+    result means "we don't know", never "it's short" — see _duration_ok for why
+    that distinction is the whole design of the degraded path.
+
+    Never raises: a network error, a revoked key or a quota wall logs a WARNING
+    and yields an empty dict, which degrades the guard to open rather than
+    silently rejecting every careo."""
+    if not api_key or not video_ids:
+        return {}
+    fetch = fetcher or _requests_videos_fetcher()
+    durations: dict[str, int] = {}
+    unique_ids = list(dict.fromkeys(video_ids))
+    for start in range(0, len(unique_ids), _VIDEOS_BATCH):
+        batch = unique_ids[start : start + _VIDEOS_BATCH]
+        try:
+            data = fetch(
+                {
+                    "part": "contentDetails",
+                    "id": ",".join(batch),
+                    "key": api_key,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - the guard degrades, it never breaks the run
+            LOGGER.warning(
+                "Duracion: videos.list fallo (%s) para %d ids; "
+                "esos videos quedan SIN comprobar (guarda degradada a abierta).",
+                exc,
+                len(batch),
+            )
+            continue
+        for item in data.get("items", []):
+            video_id = item.get("id")
+            seconds = parse_iso8601_duration(
+                (item.get("contentDetails") or {}).get("duration")
+            )
+            if video_id and seconds is not None:
+                durations[video_id] = seconds
+    return durations
+
+
+def _duration_ok(video_id: str, durations: dict[str, int] | None) -> bool:
+    """Whether a candidate clears the length guard.
+
+    ⚠️ ESTA FUNCION ES DELIBERADAMENTE PERMISIVA, Y ESA ES LA DECISION DE DISENO
+    MAS IMPORTANTE DEL FILTRO. Solo devuelve False cuando SABEMOS la duracion y
+    es corta. Sin `durations` (no hay YOUTUBE_API_KEY) o con el id ausente (la
+    llamada fallo, o YouTube no devolvio esa fila) devuelve True.
+
+    El razonamiento, porque la alternativa es tentadora y es PEOR que el bug:
+    rechazar por defecto dejaria TODOS los eventos sin careo en cuanto faltase
+    el secreto o se agotase la cuota — una averia total y MUDA de la funcion,
+    justo lo que este proyecto persigue. El bug que arreglamos costo UN careo
+    mal; el fail-closed costaria TODOS, y ademas se dispararia por la causa mas
+    tonta (un secreto sin renovar en GitHub Actions).
+
+    Y puede ser permisiva porque ESTA GUARDA ES LA RED, NO LA UNICA DEFENSA. Las
+    otras dos del incidente funcionan sin API y sin cuota: el short "#ufc331" ya
+    no pasa el patron del numero (grieta del hashtag) y se publico a 3 dias, o
+    sea fuera de la ventana de 2. Cualquiera de las dos lo habria bloqueado
+    sola. La duracion cubre el caso futuro que aun no hemos visto.
+
+    El fallo deja rastro: fetch_video_durations avisa por WARNING, asi que la
+    guarda degradada es visible en el log, no silenciosa."""
+    if durations is None:
+        return True
+    seconds = durations.get(video_id)
+    if seconds is None:
+        return True
+    return seconds >= MIN_DURATION_SECONDS
+
+
 def _norm(text: str | None) -> str:
     return strip_accents(text or "").casefold()
 
@@ -387,8 +579,45 @@ def _title_has_place_token(title_n: str, tokens: set[str]) -> bool:
     return any(re.search(rf"\b{re.escape(tok)}\b", title_n) for tok in tokens)
 
 
-def match_event(event: TargetEvent, videos: list[FeedVideo]) -> str | None:
-    """First feed video that satisfies the conservative guard, else None."""
+def faceoff_candidate_ids(*feeds: list[FeedVideo] | None) -> list[str]:
+    """Ids of every video whose title passes the face-off whitelist.
+
+    This is the ONLY set worth spending a videos.list quota unit on: the title
+    guard has already thrown out the other ~99% of the feed, so the duration
+    lookup stays at one batch (1 unit) even across the RSS and rescue feeds."""
+    ids: list[str] = []
+    for feed in feeds:
+        for video in feed or []:
+            if _FACEOFF_RE.search(_norm(video.title)):
+                ids.append(video.video_id)
+    return list(dict.fromkeys(ids))
+
+
+def _title_for(video_id: str, *feeds: list[FeedVideo] | None) -> str | None:
+    """The video's own title, as YouTube published it, for migration 029.
+
+    The title is already in the feed we matched against, so this costs nothing
+    extra -- no second API call, no quota. Returns None when the id is not in
+    any feed, and then the column simply stays NULL: a missing title is fine,
+    an invented one is not.
+    """
+    for feed in feeds:
+        for video in feed or ():
+            if video.video_id == video_id:
+                return video.title or None
+    return None
+
+
+def match_event(
+    event: TargetEvent,
+    videos: list[FeedVideo],
+    durations: dict[str, int] | None = None,
+) -> str | None:
+    """First feed video that satisfies the conservative guard, else None.
+
+    ``durations`` maps video id -> seconds (from fetch_video_durations). None,
+    or an id that isn't in it, disables the length guard for that video — see
+    _duration_ok for why the degraded path is deliberately permissive."""
     if event.event_date is None:
         return None
     place_tokens = _place_tokens(event.location)
@@ -404,10 +633,23 @@ def match_event(event: TargetEvent, videos: list[FeedVideo]) -> str | None:
         if not _FACEOFF_RE.search(title_n):
             continue
         city_ok = _title_has_place_token(title_n, place_tokens)
-        num_ok = bool(ufc_num and re.search(rf"\bufc\s*{ufc_num}\b", title_n))
+        num_ok = bool(
+            ufc_num
+            and re.search(_TITLE_NUM_TEMPLATE.format(num=ufc_num), title_n)
+        )
         brand_ok = _title_has_place_token(title_n, name_tokens)
-        if city_ok or num_ok or brand_ok:
-            return video.video_id
+        if not (city_ok or num_ok or brand_ok):
+            continue
+        if not _duration_ok(video.video_id, durations):
+            LOGGER.info(
+                "Descartado %s %r: %ds < %ds (parece un short, no un careo).",
+                video.video_id,
+                video.title,
+                (durations or {}).get(video.video_id, -1),
+                MIN_DURATION_SECONDS,
+            )
+            continue
+        return video.video_id
     return None
 
 
@@ -463,6 +705,7 @@ def run(
     feed: list[FeedVideo],
     api_feed: list[FeedVideo] | None = None,
     rescue_days: int = _RESCUE_LOOKBACK_DAYS,
+    durations: dict[str, int] | None = None,
 ) -> Counter:
     counts: Counter = Counter()
     matched_ids: set[int] = set()
@@ -471,14 +714,15 @@ def run(
     events = get_target_events(connection)
     counts["targets"] = len(events)
     for event in events:
-        video_id = match_event(event, feed)
+        video_id = match_event(event, feed, durations)
         if not video_id:
             counts["no_match"] += 1
             continue
         counts["matched"] += 1
         matched_ids.add(event.id)
         LOGGER.info("Event %d %r -> face-off %s (rss)", event.id, event.name, video_id)
-        if apply and set_event_faceoff_video(connection, event.id, video_id):
+        title = _title_for(video_id, feed)
+        if apply and set_event_faceoff_video(connection, event.id, video_id, title):
             connection.commit()
             counts["written"] += 1
 
@@ -490,7 +734,7 @@ def run(
         for event in rescue_events:
             if event.id in matched_ids:
                 continue  # RSS already filled it this run
-            video_id = match_event(event, api_feed)
+            video_id = match_event(event, api_feed, durations)
             if not video_id:
                 counts["no_match"] += 1
                 continue
@@ -502,7 +746,10 @@ def run(
                 event.name,
                 video_id,
             )
-            if apply and set_event_faceoff_video(connection, event.id, video_id):
+            title = _title_for(video_id, api_feed, feed)
+            if apply and set_event_faceoff_video(
+                connection, event.id, video_id, title
+            ):
                 connection.commit()
                 counts["written"] += 1
     return counts
@@ -544,6 +791,13 @@ def main() -> None:
     api_feed: list[FeedVideo] | None = None
     api_key = os.getenv("YOUTUBE_API_KEY", "").strip()
     if api_key:
+        # El cutoff se DERIVA de _DAYS_BEFORE, asi que estrecharlo de 5 a 2 no
+        # rompe el rescate: el evento mas viejo que get_rescue_target_events
+        # devuelve esta en `today - rescue_days`, su ventana de match empieza en
+        # `today - rescue_days - _DAYS_BEFORE`, y este cutoff sigue quedando 2
+        # dias POR DEBAJO de ese suelo. Las dos cifras se mueven juntas. Y no se
+        # pierde ningun careo real: el desfase maximo medido sobre los 30 de la
+        # base es de 1 dia (ver _DAYS_BEFORE).
         cutoff = date.today() - timedelta(days=args.rescue_days + _DAYS_BEFORE + 2)
         try:
             api_feed = fetch_channel_uploads(
@@ -564,11 +818,33 @@ def main() -> None:
     else:
         LOGGER.info("No YOUTUBE_API_KEY: RSS-only (no API rescue).")
 
+    # Duration guard. Only the titles that ALREADY passed the face-off whitelist
+    # are worth a lookup, so this is one batch (1 quota unit) per run. Without a
+    # key `durations` stays None and the guard degrades to open on purpose —
+    # _duration_ok explains why that beats rejecting everything in silence.
+    durations: dict[str, int] | None = None
+    if api_key:
+        candidatos = faceoff_candidate_ids(feed, api_feed)
+        durations = fetch_video_durations(api_key, candidatos)
+        LOGGER.info(
+            "Duracion: %d candidatos con 'face-off' en el titulo, %d resueltos "
+            "(umbral %ds).",
+            len(candidatos), len(durations), MIN_DURATION_SECONDS,
+        )
+    else:
+        LOGGER.warning(
+            "Sin YOUTUBE_API_KEY no hay filtro de duracion: un short con el "
+            "titulo adecuado solo lo paran la ventana de %d dias y el patron "
+            "del numero de cartelera.",
+            _DAYS_BEFORE,
+        )
+
     settings = get_settings()
     with connect(settings.database_url) as connection:
         counts = run(
             connection, apply=args.apply, feed=feed,
             api_feed=api_feed, rescue_days=args.rescue_days,
+            durations=durations,
         )
 
     keys = ["targets", "matched", "rescue_targets", "rescued", "no_match", "written"]

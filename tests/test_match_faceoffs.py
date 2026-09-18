@@ -6,6 +6,7 @@ published), verified against channel UCvgfXK4nTYKudb0rFR6noLA on 2026-07-18.
 """
 
 import sys
+from collections import Counter
 from datetime import date
 from types import SimpleNamespace
 
@@ -209,12 +210,51 @@ def test_run_dry_run_writes_nothing(fakedb):
 # ------------------------------------------------------------------ repository
 
 
+def _last_params(conn):
+    """Params of the last statement the fake connection executed."""
+    return [params for cur in conn.cursors for _, params in cur.executed][-1]
+
+
 def test_set_event_faceoff_video_first_writer_wins(fakedb):
     conn = fakedb.Connection(lambda sql, params=None: [])
     set_event_faceoff_video(conn, 1061, "Vb_0zQ-hIzM")
     sql = " ".join(fakedb.mutating_statements(conn)[0].split())
     assert "SET faceoff_video_id = %s" in sql
-    assert "WHERE id = %s AND faceoff_video_id IS NULL" in sql
+    # The id is still first-writer-wins: it is only ever set on a NULL row, or
+    # on the row that already holds this very same id (title backfill below).
+    assert "faceoff_video_id IS NULL" in sql
+    assert "faceoff_video_id = %s AND faceoff_video_title IS NULL" in sql
+
+
+def test_set_event_faceoff_video_writes_the_title_too(fakedb):
+    """Migration 029: the id alone left the page labelling a video it never read."""
+    conn = fakedb.Connection(lambda sql, params=None: [])
+    set_event_faceoff_video(conn, 1061, "Vb_0zQ-hIzM", "UFC 300: Fighter Face-offs")
+    sql = " ".join(fakedb.mutating_statements(conn)[0].split())
+    assert "faceoff_video_title = COALESCE(%s, faceoff_video_title)" in sql
+    params = _last_params(conn)
+    assert "UFC 300: Fighter Face-offs" in params
+
+
+def test_set_event_faceoff_video_without_title_keeps_the_stored_one(fakedb):
+    """COALESCE, not a plain assignment: a title-less run must not erase a title."""
+    conn = fakedb.Connection(lambda sql, params=None: [])
+    set_event_faceoff_video(conn, 1061, "Vb_0zQ-hIzM")
+    sql = " ".join(fakedb.mutating_statements(conn)[0].split())
+    assert "COALESCE(%s, faceoff_video_title)" in sql
+    assert _last_params(conn)[1] is None
+
+
+def test_title_for_reads_the_title_off_the_feed():
+    """No extra API call: the title travelled with the video we matched."""
+    feed = _feed()
+    assert match_faceoffs._title_for(feed[0].video_id, feed) == feed[0].title
+
+
+def test_title_for_unknown_id_is_none_not_invented():
+    """A missing title stays NULL. An invented one is how the page starts lying."""
+    assert match_faceoffs._title_for("nosuchvideo", _feed()) is None
+    assert match_faceoffs._title_for("nosuchvideo", None) is None
 
 
 def test_set_event_faceoff_video_empty_is_noop(fakedb):
@@ -900,3 +940,416 @@ def test_ninguna_fila_real_suelta_un_token_de_marca_peligroso():
 def test_sin_nombre_no_revienta():
     assert match_faceoffs._name_tokens(None) == set()
     assert match_faceoffs._name_tokens("") == set()
+
+
+# =====================================================================
+# EL INCIDENTE DEL 1090 (18-sep-2026) - un SHORT de 17 s se llevo el careo
+# =====================================================================
+#
+# El evento 1090 ("Crypto.com UFC 331: Van vs. Pantoja 2", 19-sep-2026) acabo
+# con faceoff_video_id = '0xTX8Aut0VY', que es un short VERTICAL de 17 segundos
+# del canal oficial titulado "what are these faceoffs saying?! #ufc331". Como la
+# escritura es first-writer-wins, el careo bueno ya no podia entrar: hubo que
+# arreglarlo A MANO en la base.
+#
+# Las tres grietas, y las tres defensas que las cierran:
+#   (1) el patron del numero admitia CERO espacios y '#' es frontera de palabra,
+#       asi que "#ufc331" era indistinguible del oficial "UFC 331: ...".
+#   (2) no habia NINGUN filtro de duracion: ni segundos, ni "/shorts/", ni nada.
+#   (3) la ventana era de 5 dias por delante y el short se publico a TRES.
+#
+# Todo lo que se afirma aqui esta medido el 18-sep-2026 contra datos reales: las
+# 20.000 subidas del canal UCvgfXK4nTYKudb0rFR6noLA (477 con "face-off" en el
+# titulo) y los 30 careos que hay en events.faceoff_video_id.
+
+
+def _evento_1090():
+    """El 1090 tal y como esta en la BD el 18-sep-2026."""
+    return TargetEvent(
+        id=1090,
+        name="Crypto.com UFC 331: Van vs. Pantoja 2",
+        location="Crypto.com Arena, Los Angeles, CA, United States",
+        event_date=date(2026, 9, 19),
+    )
+
+
+# --------------------------------------------- (1) la grieta del hashtag
+
+
+def test_REGRESION_1090_el_short_del_hashtag_ya_no_se_lleva_el_careo():
+    """EL TEST DEL INCIDENTE. Datos exactos del video que rompio el 1090:
+    id 0xTX8Aut0VY, canal UFC, 17 s, publicado el 16-sep-2026."""
+    short = [
+        FeedVideo(
+            "0xTX8Aut0VY",
+            "what are these faceoffs saying?! #ufc331",
+            date(2026, 9, 16),
+        )
+    ]
+    # Sin saber siquiera la duracion: las defensas (1) y (3) ya lo tumban solas.
+    assert match_event(_evento_1090(), short) is None
+    # Y con la duracion delante, tambien.
+    assert match_event(_evento_1090(), short, {"0xTX8Aut0VY": 17}) is None
+
+
+def test_el_hashtag_pegado_no_cuenta_como_numero_de_cartelera():
+    # Aisla la defensa (1): mismo hashtag, pero publicado DENTRO de la ventana
+    # de 2 dias y con duracion de sobra. Lo unico que queda para rechazarlo es
+    # que "#ufc331" no vale como "UFC 331". Sin este aislamiento, el test de
+    # regresion de arriba daria verde aunque la grieta del hashtag siguiera
+    # abierta (lo pararia la ventana), que es exactamente el medio arreglo.
+    video = [FeedVideo("short2", "insane faceoffs! #ufc331", date(2026, 9, 18))]
+    assert match_event(_evento_1090(), video, {"short2": 600}) is None
+
+
+def test_el_numero_pegado_sin_almohadilla_tampoco_cuenta():
+    # La otra mitad del cierre. Medido: de los 477 titulos con "face-off" del
+    # canal, CERO escriben "ufc<num>" pegado sin almohadilla. Exigir separador
+    # real no cuesta ni un positivo legitimo.
+    video = [FeedVideo("v", "UFC331 Fighter Face-offs", date(2026, 9, 18))]
+    assert match_event(_evento_1090(), video, {"v": 600}) is None
+
+
+def test_el_careo_bueno_de_una_numerada_sigue_casando():
+    # CONTROL POSITIVO, y es el que decide si el arreglo vale: el formato
+    # canonico "UFC 331: ..." con espacio real tiene que seguir entrando. Si
+    # este se rompe, el arreglo es peor que el bug.
+    video = [FeedVideo("bueno", "UFC 331: Fighter Face-offs", date(2026, 9, 18))]
+    assert match_event(_evento_1090(), video, {"bueno": 300}) == "bueno"
+
+
+def test_el_patrocinio_delante_del_numero_no_estorba():
+    # El nombre del evento es "Crypto.com UFC 331: ...". Un titulo patrocinado
+    # lleva texto DELANTE de "UFC 331" y sigue teniendo separador real: el
+    # lookbehind solo mira que no sea una almohadilla.
+    video = [
+        FeedVideo("v", "Crypto.com UFC 331: Fighter Face-offs", date(2026, 9, 18))
+    ]
+    assert match_event(_evento_1090(), video, {"v": 300}) == "v"
+
+
+def test_los_careos_reales_que_casan_por_numero_siguen_casando():
+    """CENTINELA DE NO-REGRESION. Los 7 careos de la base cuyo evento lleva
+    "UFC <N>" en el nombre y que por tanto pueden casar POR EL NUMERO (los otros
+    23 casan por ciudad o por marca). Sacados de `events` el 18-sep-2026 con su
+    titulo real de YouTube. Ninguno puede caerse con el patron nuevo."""
+    reales = [
+        ("UFC 324: Gaethje vs. Pimblett", "UFC 324: Fighter Faceoffs"),
+        ("UFC 325: Volkanovski vs. Lopes 2", "UFC 325: Fighter Faceoffs"),
+        ("UFC 326: Holloway vs. Oliveira 2", "UFC 326: Fighter Faceoffs"),
+        ("UFC 327: Prochazka vs. Ulberg", "UFC 327: Fighter Faceoffs"),
+        ("UFC 328: Chimaev vs. Strickland", "UFC 328: Fighter Faceoffs"),
+        ("UFC 329: McGregor vs. Holloway 2", "UFC 329: Fighter Face-offs"),
+        ("UFC 330: Makhachev vs. Machado Garry", "UFC 330: Fighter Face-offs"),
+    ]
+    for nombre, titulo in reales:
+        evento = TargetEvent(
+            id=1,
+            name=nombre,
+            # Location a proposito INUTIL: asi el unico camino posible es el
+            # numero. Si el test pasara por la ciudad no probaria nada.
+            location="Un Sitio Cualquiera, XX, United States",
+            event_date=date(2026, 9, 19),
+        )
+        feed = [FeedVideo("v", titulo, date(2026, 9, 18))]
+        assert match_event(evento, feed, {"v": 300}) == "v", titulo
+
+
+def test_el_contraejemplo_noche_ufc_2023_no_se_rompe():
+    # qpjPPGtcS3I, "Noche UFC: Weigh-In Faceoffs", canal UFC, 127 s. Es un careo
+    # LEGITIMO y casa por la MARCA del nombre, no por numero ni por ciudad: el
+    # cambio del patron del numero no puede tocarlo. Ademas 127 s > 75 s, asi
+    # que tampoco lo tumba el filtro de duracion - que es justo por lo que el
+    # umbral no puede subirse a la ligera.
+    evento = TargetEvent(
+        id=1088,
+        name="Noche UFC: Silva vs. Delgado",
+        location="Desert Diamond Arena, Glendale, AZ, United States",
+        event_date=date(2026, 9, 12),
+    )
+    feed = [FeedVideo("qpjPPGtcS3I", "Noche UFC: Weigh-In Faceoffs", date(2026, 9, 11))]
+    assert match_event(evento, feed, {"qpjPPGtcS3I": 127}) == "qpjPPGtcS3I"
+
+
+# --------------------------------------------- (2) el filtro de duracion
+
+
+def test_parse_iso8601_duracion():
+    assert match_faceoffs.parse_iso8601_duration("PT3M15S") == 195
+    assert match_faceoffs.parse_iso8601_duration("PT17S") == 17
+    assert match_faceoffs.parse_iso8601_duration("PT17M20S") == 1040
+    assert match_faceoffs.parse_iso8601_duration("PT1H2M3S") == 3723
+    assert match_faceoffs.parse_iso8601_duration("P1DT1S") == 86401
+
+
+def test_parse_iso8601_devuelve_none_y_no_cero_cuando_no_entiende():
+    # LA DIFERENCIA QUE IMPORTA. Si lo ilegible valiera 0, un careo bueno con una
+    # duracion rara se rechazaria por "demasiado corto". None significa "no lo
+    # se", y _duration_ok deja pasar lo que no sabe.
+    for basura in (None, "", "3:15", "PT", "no-es-una-duracion"):
+        assert match_faceoffs.parse_iso8601_duration(basura) is None
+    # "P0D" es un directo en curso: eso SI son 0 segundos de verdad.
+    assert match_faceoffs.parse_iso8601_duration("P0D") == 0
+
+
+def test_el_short_de_17_segundos_se_rechaza_por_duracion():
+    # Aisla la defensa (2): el titulo pasa la guarda de la ciudad y la fecha
+    # esta dentro de la ventana. Lo unico que lo rechaza son los 17 segundos.
+    evento = _evento_1090()
+    feed = [FeedVideo("corto", "Los Angeles Face-offs", date(2026, 9, 18))]
+    assert match_event(evento, feed, {"corto": 17}) is None
+
+
+def test_un_video_de_195_segundos_se_acepta():
+    # Mismo caso, misma guarda, 195 s (PT3M15S, la duracion real del careo bueno
+    # del 1090). Es el control que separa "filtra shorts" de "filtra todo".
+    evento = _evento_1090()
+    feed = [FeedVideo("largo", "Los Angeles Face-offs", date(2026, 9, 18))]
+    assert match_event(evento, feed, {"largo": 195}) == "largo"
+
+
+def test_el_umbral_es_el_mismo_que_usa_la_web():
+    # mma-app/src/lib/youtube.ts:126 tiene MIN_DURATION_SECONDS = 75. Si alguien
+    # cambia uno de los dos sin el otro, la web y el scraper discrepan: el
+    # scraper escribiria un video que la web se niega a pintar.
+    assert match_faceoffs.MIN_DURATION_SECONDS == 75
+
+
+def test_el_limite_del_umbral_es_inclusivo():
+    evento = _evento_1090()
+    feed = [FeedVideo("v", "Los Angeles Face-offs", date(2026, 9, 18))]
+    assert match_event(evento, feed, {"v": 75}) == "v"
+    assert match_event(evento, feed, {"v": 74}) is None
+
+
+def test_fetch_video_durations_pide_en_lotes_y_parsea():
+    llamadas = []
+
+    def fetcher(params):
+        llamadas.append(params)
+        return {
+            "items": [
+                {"id": "a", "contentDetails": {"duration": "PT3M15S"}},
+                {"id": "b", "contentDetails": {"duration": "PT17S"}},
+            ]
+        }
+
+    duraciones = match_faceoffs.fetch_video_durations(
+        "key", ["a", "b", "a"], fetcher=fetcher
+    )
+    assert duraciones == {"a": 195, "b": 17}
+    assert len(llamadas) == 1, "un solo lote, 1 unidad de cuota"
+    # Los ids repetidos no se piden dos veces.
+    assert llamadas[0]["id"] == "a,b"
+    assert llamadas[0]["key"] == "key"
+    assert llamadas[0]["part"] == "contentDetails"
+
+
+def test_fetch_video_durations_omite_el_id_que_no_sabe_parsear():
+    def fetcher(params):
+        return {
+            "items": [
+                {"id": "bueno", "contentDetails": {"duration": "PT2M"}},
+                {"id": "raro", "contentDetails": {"duration": "loquesea"}},
+                {"id": "vacio", "contentDetails": {}},
+            ]
+        }
+
+    duraciones = match_faceoffs.fetch_video_durations(
+        "k", ["bueno", "raro", "vacio"], fetcher=fetcher
+    )
+    # Ausente != corto. Los que no se entienden se quedan FUERA del dict, y
+    # _duration_ok los deja pasar en vez de tumbarlos.
+    assert duraciones == {"bueno": 120}
+
+
+def test_solo_se_pregunta_por_los_titulos_que_ya_pasaron_la_lista_blanca():
+    # El coste de cuota depende de esto: si preguntaramos por el feed entero
+    # serian 15 ids en vez de 2, y con el rescate de 45 dias, cientos.
+    feed = _feed()  # 3 videos, solo 2 con "face-off"
+    assert match_faceoffs.faceoff_candidate_ids(feed) == ["Vb_0zQ-hIzM", "ppv330face1"]
+    # Une varios feeds sin repetir y aguanta None (sin rescate).
+    assert match_faceoffs.faceoff_candidate_ids(feed, None, feed) == [
+        "Vb_0zQ-hIzM",
+        "ppv330face1",
+    ]
+    assert match_faceoffs.faceoff_candidate_ids(None) == []
+
+
+# ------------------------------ (2b) el camino degradado, sin YOUTUBE_API_KEY
+#
+# LA DECISION DE DISENO DEL FILTRO. Sin clave, o con la llamada caida, la guarda
+# de duracion se abre en vez de cerrarse. Rechazar por defecto dejaria TODOS los
+# eventos sin careo en cuanto caducase un secreto de GitHub Actions - una averia
+# total y muda, peor que el bug que arreglamos, que costo UN careo. Puede abrirse
+# porque la duracion es LA RED, no la unica defensa: en el incidente real, (1) y
+# (3) bloquean el short sin tocar la API.
+
+
+def test_sin_duraciones_la_guarda_se_abre_en_vez_de_cerrarse():
+    evento = _evento_1090()
+    feed = [FeedVideo("v", "Los Angeles Face-offs", date(2026, 9, 18))]
+    # durations=None (no hay clave): el careo legitimo SIGUE entrando. Esto es
+    # lo que evita que un secreto caducado apague la funcion entera.
+    assert match_event(evento, feed) == "v"
+    assert match_event(evento, feed, None) == "v"
+
+
+def test_un_id_ausente_del_dict_se_trata_como_desconocido_no_como_corto():
+    # La llamada fue bien pero YouTube no devolvio esa fila (video privado,
+    # borrado, respuesta parcial). Ausente significa "no lo se", no "es corto".
+    evento = _evento_1090()
+    feed = [FeedVideo("v", "Los Angeles Face-offs", date(2026, 9, 18))]
+    assert match_event(evento, feed, {"otro": 10}) == "v"
+
+
+def test_el_incidente_real_se_bloquea_IGUAL_sin_api_key():
+    # Y esta es la prueba de que abrir la guarda es asumible: el short del 1090,
+    # con la guarda de duracion completamente desactivada, sigue rechazado.
+    short = [
+        FeedVideo(
+            "0xTX8Aut0VY",
+            "what are these faceoffs saying?! #ufc331",
+            date(2026, 9, 16),
+        )
+    ]
+    assert match_event(_evento_1090(), short, None) is None
+
+
+def test_fetch_video_durations_sin_clave_no_llama_a_nadie():
+    def boom(params):
+        raise AssertionError("sin clave no se puede llamar a la API")
+
+    assert match_faceoffs.fetch_video_durations("", ["a"], fetcher=boom) == {}
+    assert match_faceoffs.fetch_video_durations("k", [], fetcher=boom) == {}
+
+
+def test_si_videos_list_revienta_se_avisa_y_se_degrada_a_abierta(caplog):
+    def fetcher(params):
+        raise RuntimeError("quotaExceeded")
+
+    with caplog.at_level("WARNING"):
+        duraciones = match_faceoffs.fetch_video_durations("k", ["a"], fetcher=fetcher)
+
+    assert duraciones == {}, "nunca levanta: la guarda degrada, no rompe la corrida"
+    avisos = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(avisos) == 1, "degradar en SILENCIO seria el mismo pecado que el bug"
+    assert "quotaExceeded" in avisos[0].getMessage()
+
+
+def test_main_sin_clave_pasa_durations_none_a_run(monkeypatch, fakedb):
+    # EL MEDIO ARREGLO QUE ESTE TEST IMPIDE: implementar el filtro y olvidarse de
+    # cablearlo en main(). Un test sobre match_event solo da VERDE con el
+    # cableado sin hacer, y el cron seguiria sin filtrar nada.
+    visto = {}
+    monkeypatch.delenv("YOUTUBE_API_KEY", raising=False)
+    monkeypatch.setattr(match_faceoffs, "fetch_channel_feed", lambda *a, **k: _RSS_STUB)
+    monkeypatch.setattr(
+        match_faceoffs, "get_settings", lambda: SimpleNamespace(database_url="x")
+    )
+    monkeypatch.setattr(match_faceoffs, "connect", lambda url: _empty_conn(fakedb))
+
+    def fake_run(conn, **kwargs):
+        visto.update(kwargs)
+        return Counter()
+
+    monkeypatch.setattr(match_faceoffs, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["prog"])
+    match_faceoffs.main()
+    assert "durations" in visto, "main() tiene que cablear el filtro hasta run()"
+    assert visto["durations"] is None
+
+
+def test_main_con_clave_resuelve_duraciones_y_las_pasa_a_run(monkeypatch, fakedb):
+    visto = {}
+    monkeypatch.setenv("YOUTUBE_API_KEY", "quota-key")
+    monkeypatch.setattr(match_faceoffs, "fetch_channel_feed", lambda *a, **k: _RSS_STUB)
+    monkeypatch.setattr(match_faceoffs, "fetch_channel_uploads", lambda *a, **k: [])
+    monkeypatch.setattr(
+        match_faceoffs, "get_settings", lambda: SimpleNamespace(database_url="x")
+    )
+    monkeypatch.setattr(match_faceoffs, "connect", lambda url: _empty_conn(fakedb))
+
+    def fake_durations(api_key, ids, **kw):
+        visto["api_key"] = api_key
+        visto["ids"] = ids
+        return {"x": 300}
+
+    monkeypatch.setattr(match_faceoffs, "fetch_video_durations", fake_durations)
+
+    def fake_run(conn, **kwargs):
+        visto.update(kwargs)
+        return Counter()
+
+    monkeypatch.setattr(match_faceoffs, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["prog"])
+    match_faceoffs.main()
+    assert visto["api_key"] == "quota-key"
+    # _RSS_STUB es "UFC 330: Fighter Face-offs" con id "x": pasa la lista
+    # blanca, asi que se pregunta por el y por nadie mas.
+    assert visto["ids"] == ["x"]
+    assert visto["durations"] == {"x": 300}
+
+
+def test_run_pasa_las_duraciones_a_las_DOS_pasadas(fakedb):
+    # El rescate por API es tan capaz de morder un short como la pasada RSS:
+    # cablear solo una de las dos deja media puerta abierta.
+    corto = [FeedVideo("corto", "UFC 329: Fighter Face-offs", date(2026, 7, 10))]
+    conn = fakedb.Connection(
+        _rescue_responder(
+            rss_rows=[], rescue_rows=[_RESCUE_EVENT], update_result=[(1,)]
+        )
+    )
+    counts = match_faceoffs.run(
+        conn,
+        apply=True,
+        feed=[],
+        api_feed=corto,
+        rescue_days=45,
+        durations={"corto": 17},
+    )
+    assert counts.get("rescued", 0) == 0
+    assert counts["written"] == 0
+    assert fakedb.mutating_statements(conn) == []
+
+
+# --------------------------------------------- (3) la ventana de fechas
+
+
+def test_la_ventana_es_de_dos_dias():
+    # MEDIDO el 18-sep-2026 cruzando events.event_date con el publishedAt real
+    # (YouTube Data API) de los 30 careos que hay en la base:
+    #     delta 0 dias -> 8 videos     delta 1 dia -> 22 videos
+    #     delta 2 dias -> 0            delta 3+   -> 0
+    # El desfase MAXIMO real es de UN dia. Con 2 queda un dia entero de margen
+    # sobre el peor caso observado, y el short del incidente (3 dias) se cae.
+    assert match_faceoffs._DAYS_BEFORE == 2
+    assert match_faceoffs._DAYS_AFTER == 1
+
+
+def test_un_careo_a_tres_dias_del_evento_queda_fuera_de_la_ventana():
+    # Es la distancia exacta a la que se publico el short del 1090.
+    evento = _evento_1090()
+    feed = [FeedVideo("v", "UFC 331: Fighter Face-offs", date(2026, 9, 16))]
+    assert match_event(evento, feed, {"v": 300}) is None
+
+
+def test_los_dos_desfases_reales_medidos_siguen_dentro():
+    # Los unicos dos que existen de verdad en los 30: mismo dia (8 videos) y
+    # vispera (22 videos). Ninguno puede caerse al estrechar la ventana.
+    evento = _evento_1090()
+    for dia in (19, 18):
+        feed = [FeedVideo("v", "UFC 331: Fighter Face-offs", date(2026, 9, dia))]
+        assert match_event(evento, feed, {"v": 300}) == "v", dia
+    # Y el dia DESPUES sigue valiendo (_DAYS_AFTER = 1): el canal publica de
+    # noche en EEUU, que ya es el dia siguiente en UTC.
+    feed = [FeedVideo("v", "UFC 331: Fighter Face-offs", date(2026, 9, 20))]
+    assert match_event(evento, feed, {"v": 300}) == "v"
+
+
+def test_el_margen_de_dos_dias_sigue_abierto():
+    # El limite exacto: 2 dias entra, 3 no. Si manana la UFC adelanta un careo,
+    # este test dice cuanto margen queda de verdad.
+    evento = _evento_1090()
+    feed = [FeedVideo("v", "UFC 331: Fighter Face-offs", date(2026, 9, 17))]
+    assert match_event(evento, feed, {"v": 300}) == "v"
