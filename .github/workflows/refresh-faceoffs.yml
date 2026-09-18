@@ -10,6 +10,14 @@ name: Match face-off videos
 # the channel uploads playlist (playlistItems, 1 quota unit/page) to rescue
 # careos of recently-passed events that already fell out of the ~15-video RSS
 # window. Without the secret the job runs RSS-only, exactly as before.
+#
+# ⚠️ DESDE EL 18-sep-2026 EL SECRETO YOUTUBE_API_KEY YA NO SOLO DA EL RESCATE:
+# tambien alimenta el FILTRO DE DURACION (videos.list, 1 unidad de cuota por
+# pasada), que es la tercera defensa contra los shorts promocionales despues de
+# que un short de 17 s se llevara el careo del evento 1090. Si el secreto falta o
+# caduca, esa guarda se ABRE a proposito (fail-open, ver _duration_ok) y el job
+# sigue en VERDE: solo deja un WARNING en el log. O sea que un secreto caducado
+# aqui no se ve en el semaforo de Actions — hay que leer el log.
 # See match_faceoffs.py. Needs DATABASE_URL (+ optional YOUTUBE_API_KEY).
 on:
   schedule:

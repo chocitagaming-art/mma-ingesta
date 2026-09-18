@@ -111,12 +111,23 @@ def upsert_event_meta(connection: PgConnection, event: EventMetaRecord) -> int:
 
 
 def set_event_faceoff_video(
-    connection: PgConnection, event_id: int, video_id: str
+    connection: PgConnection, event_id: int, video_id: str, title: str | None = None
 ) -> bool:
     """Store the UFC face-off (careo) YouTube video id for an event (migration 022).
 
-    FIRST-WRITER-WINS: only fills while NULL, so a later noisy match can never
-    overwrite a good one and daily re-runs are idempotent (WHERE ... IS NULL).
+    FIRST-WRITER-WINS for the id: only fills while NULL, so a later noisy match
+    can never overwrite a good one and daily re-runs are idempotent.
+
+    The title (migration 029) is what stops the page from labelling a video it
+    never checked -- see the 029 comments and the 17-second short of 16-sep-2026.
+    It is written alongside the id, and it ALSO backfills on a row whose id we
+    already matched but whose title is still NULL: that is the only case where
+    this touches an already-written row, and it cannot change which video is
+    shown because the id must already be identical. Without that backfill the
+    title would only ever reach rows written after this migration, and every
+    careo already in the table would keep falling back to the hand-written
+    label -- which is the exact failure the column exists to prevent.
+
     Returns True if a row was written."""
     if not video_id:
         return False
@@ -124,10 +135,15 @@ def set_event_faceoff_video(
         cursor.execute(
             """
             UPDATE events
-            SET faceoff_video_id = %s
-            WHERE id = %s AND faceoff_video_id IS NULL
+            SET faceoff_video_id = %s,
+                faceoff_video_title = COALESCE(%s, faceoff_video_title)
+            WHERE id = %s
+              AND (
+                faceoff_video_id IS NULL
+                OR (faceoff_video_id = %s AND faceoff_video_title IS NULL AND %s IS NOT NULL)
+              )
             """,
-            (video_id, event_id),
+            (video_id, title, event_id, video_id, title),
         )
         return cursor.rowcount > 0
 
