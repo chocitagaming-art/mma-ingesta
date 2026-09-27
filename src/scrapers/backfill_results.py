@@ -58,7 +58,7 @@ from .config import get_settings
 from .db import connect
 from .enrich_ranked import _fold
 from .espn_live_results import ESPN_PROVISIONAL_METHODS
-from .matching import given_name_diminutive_match, token_subset_match
+from .matching import given_name_diminutive_match, plausibly_same_person, token_subset_match
 from .fight_officials import (
     TargetFight,
     insert_scorecard,
@@ -112,12 +112,14 @@ class _Bout:
         "id", "red_id", "blue_id", "red_name", "blue_name", "method",
         "has_stats", "has_round_stats",
         "referee", "has_scorecards", "red_source_id", "blue_source_id",
+        "red_alt_name", "blue_alt_name", "red_nickname", "blue_nickname",
     )
 
     def __init__(
         self, id, red_id, blue_id, red_name, blue_name, method=None,
         has_stats=False, has_round_stats=False,
         referee=None, has_scorecards=False, red_source_id=None, blue_source_id=None,
+        red_alt_name=None, blue_alt_name=None, red_nickname=None, blue_nickname=None,
     ):
         self.id = id
         self.red_id = red_id
@@ -131,6 +133,56 @@ class _Bout:
         self.has_scorecards = has_scorecards
         self.red_source_id = red_source_id
         self.blue_source_id = blue_source_id
+        # The ufc.com spelling stored on the fight row (fights.fighter_*_name).
+        # red_name/blue_name prefer fighters.name once the corner is linked,
+        # and that ESPN-sourced name can be a different transliteration of the
+        # same person (bout 16352: ufc.com/ufcstats "Mahammadali Osmanli" vs
+        # fighter 9130 "Mehemmedeli Osmanli"; bout 16351: ring name "Tina
+        # Black" vs fighter 9132 "Valesca Machado"). ufcstats writes the
+        # ufc.com form, so each corner answers to BOTH names. None for
+        # ufcstats-sourced bouts: their matching is exactly what it was.
+        self.red_alt_name = red_alt_name or None
+        self.blue_alt_name = blue_alt_name or None
+        self.red_nickname = red_nickname or None
+        self.blue_nickname = blue_nickname or None
+
+    def _names(self, corner: str) -> tuple[str, ...]:
+        """Every non-empty name this corner answers to, primary first.
+
+        An alternative that folds equal to either name of the OTHER corner is
+        dropped: it can only be stale (corners relisted the other way round)
+        and would hand that fighter's stats to this corner's id. So is one
+        that does not even look like the linked fighter (name or nickname):
+        the link itself may be wrong (a scoreboard link made while ESPN still
+        listed a withdrawn fighter), and then the alias would give the
+        substitute's win and stats to the withdrawn fighter's id.
+
+        And never for a fighter imported FROM ufcstats (source_id is a
+        '/fighter-details/' link): ufcstats already knows him by his
+        fighters.name, so the alias adds nothing for him, and only a wrong link
+        could make ufcstats list someone else in his slot. Two different
+        "Silva"s pass the name filter; this identity check does not. The alias
+        exists for the ESPN-imported debutants (16351, 16352).
+        """
+        primary, alt, nickname, source_id = (
+            (self.red_name, self.red_alt_name, self.red_nickname, self.red_source_id)
+            if corner == "red"
+            else (self.blue_name, self.blue_alt_name, self.blue_nickname, self.blue_source_id)
+        )
+        other = (
+            (self.blue_name, self.blue_alt_name) if corner == "red"
+            else (self.red_name, self.red_alt_name)
+        )
+        names = [primary] if primary else []
+        if (
+            alt
+            and _fold(alt) != _fold(primary)
+            and _fold(alt) not in {_fold(n) for n in other if n}
+            and "fighter-details/" not in (source_id or "")
+            and plausibly_same_person(alt, [primary], nicknames=[nickname])
+        ):
+            names.append(alt)
+        return tuple(names)
 
     def needs_result(self) -> bool:
         """No result yet, or only the PROVISIONAL one the ESPN live updater
@@ -150,6 +202,14 @@ class _Bout:
     def key(self) -> frozenset[str]:
         return frozenset({_fold(self.red_name), _fold(self.blue_name)})
 
+    def keys(self) -> list[frozenset[str]]:
+        """:meth:`key` plus every pairing that swaps in an alternative name."""
+        return [
+            frozenset({_fold(red), _fold(blue)})
+            for red in self._names("red") or ("",)
+            for blue in self._names("blue") or ("",)
+        ]
+
     def corner_for(self, name: str) -> str | None:
         """Map a fighter NAME (from ufcstats) onto this bout's corner label.
 
@@ -160,14 +220,21 @@ class _Bout:
         fighter went unlinked at import (fighter_red_id NULL, a designed state
         for debutants) still matches, so its bout can consolidate the
         corner-agnostic fields (result, referee).
+
+        Each tier tries every name of a corner (see ``red_alt_name``), and the
+        ambiguity rule holds across all of them: a name that ties both corners
+        at the same tier maps to neither.
         """
+        red_names, blue_names = self._names("red"), self._names("blue")
         folded = _fold(name)
-        if folded == _fold(self.red_name):
-            return "red"
-        if folded == _fold(self.blue_name):
-            return "blue"
-        red_ok = token_subset_match(name, self.red_name)
-        blue_ok = token_subset_match(name, self.blue_name)
+        red_exact = any(folded == _fold(n) for n in red_names)
+        blue_exact = any(folded == _fold(n) for n in blue_names)
+        if red_exact != blue_exact:
+            return "red" if red_exact else "blue"
+        if red_exact and blue_exact:
+            return None  # Ambiguo: el mismo nombre en las dos esquinas.
+        red_ok = any(token_subset_match(name, n) for n in red_names)
+        blue_ok = any(token_subset_match(name, n) for n in blue_names)
         if red_ok != blue_ok:
             return "red" if red_ok else "blue"
         if red_ok and blue_ok:
@@ -175,8 +242,8 @@ class _Bout:
         # Tercer nivel: diminutivo del nombre de pila (bout 12850, página
         # "Zach Reese" vs BD "Zachary Reese"). Solo se intenta cuando el
         # subconjunto no ha dicho nada de NINGUNA esquina.
-        red_dim = given_name_diminutive_match(name, self.red_name)
-        blue_dim = given_name_diminutive_match(name, self.blue_name)
+        red_dim = any(given_name_diminutive_match(name, n) for n in red_names)
+        blue_dim = any(given_name_diminutive_match(name, n) for n in blue_names)
         if red_dim != blue_dim:
             return "red" if red_dim else "blue"
         return None
@@ -325,7 +392,9 @@ def _get_bouts(connection, event_id: int) -> list[_Bout]:
                    fi.referee,
                    EXISTS (SELECT 1 FROM fight_scorecards sc
                            WHERE sc.fight_id = fi.id) AS has_scorecards,
-                   red.source_id, blue.source_id
+                   red.source_id, blue.source_id,
+                   fi.fighter_red_name, fi.fighter_blue_name,
+                   red.nickname, blue.nickname
             FROM fights fi
             LEFT JOIN fighters red ON red.id = fi.fighter_red_id
             LEFT JOIN fighters blue ON blue.id = fi.fighter_blue_id
@@ -336,7 +405,7 @@ def _get_bouts(connection, event_id: int) -> list[_Bout]:
         return [
             _Bout(
                 int(r[0]), r[1], r[2], r[3], r[4], r[5], bool(r[6]), bool(r[7]),
-                r[8], bool(r[9]), r[10], r[11],
+                r[8], bool(r[9]), r[10], r[11], r[12], r[13], r[14], r[15],
             )
             for r in cursor.fetchall()
         ]
@@ -503,9 +572,9 @@ def _match_fight(bout: _Bout, fights: list[FightPageRecord]) -> FightPageRecord 
     by_key: dict[frozenset[str], FightPageRecord] = {
         frozenset({_fold(f.red_name), _fold(f.blue_name)}): f for f in fights
     }
-    exact = by_key.get(bout.key())
-    if exact is not None:
-        return exact
+    exact = {id(f): f for f in (by_key.get(k) for k in bout.keys()) if f is not None}
+    if len(exact) == 1:
+        return next(iter(exact.values()))
     candidates = [f for f in fights if _corners_match(bout, f)]
     return candidates[0] if len(candidates) == 1 else None
 
@@ -645,6 +714,19 @@ def _fill_officials(connection, bout, fight_page_soup, counts, dry_run) -> None:
         blue_name=bout.blue_name,
     )
     red_first = resolve_first_person_is_red(officials, target)
+    if red_first is None and (bout.red_alt_name or bout.blue_alt_name):
+        # Same transliteration gap as corner_for: retry on the ufc.com names.
+        red_first = resolve_first_person_is_red(
+            officials,
+            TargetFight(
+                fight_id=bout.id,
+                source_id="",
+                red_source_id=bout.red_source_id,
+                blue_source_id=bout.blue_source_id,
+                red_name=bout.red_alt_name or bout.red_name,
+                blue_name=bout.blue_alt_name or bout.blue_name,
+            ),
+        )
     if red_first is None:
         counts["officials_unresolved"] += 1
         LOGGER.warning(

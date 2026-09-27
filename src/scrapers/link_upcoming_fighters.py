@@ -46,6 +46,7 @@ from .enrich_ranked import (
 from .enrich_records_espn import _fetch_espn_record
 from .espn import EspnAthlete
 from .espn_live_results import fetch_scoreboard, match_db_event, parse_scoreboard
+from .matching import plausibly_same_person
 from .logging_config import configure_logging
 from .models import FighterRecord
 from .repositories.fighters import get_fighter_id_by_espn_id, upsert_fighter
@@ -88,6 +89,40 @@ def resolver_rival_por_marcador(ancla_espn_id: str, peleas) -> str | None:
     pelea = encontrados[0]
     rival = pelea.blue_espn_id if pelea.red_espn_id == ancla_espn_id else pelea.red_espn_id
     return rival or None
+
+
+def nombre_rival_en_marcador(ancla_espn_id: str, rival_espn_id: str, peleas) -> str | None:
+    """El nombre con el que ESPN publica al rival en el combate del ancla."""
+    for pelea in peleas:
+        if (pelea.red_espn_id, pelea.blue_espn_id) == (ancla_espn_id, rival_espn_id):
+            return pelea.blue_name
+        if (pelea.red_espn_id, pelea.blue_espn_id) == (rival_espn_id, ancla_espn_id):
+            return pelea.red_name
+    return None
+
+
+def nombre_compatible(nombre_hueco: str, candidatos, apodos=()) -> bool:
+    """Si el nombre de ufc.com del hueco puede ser la misma persona que alguno
+    de los nombres de ESPN / de la ficha.
+
+    Es un filtro GRUESO a proposito, no una identificacion: la identidad la da
+    el marcador (ids). Solo tiene que parar el caso que el marcador no ve:
+    ufc.com ya ha cambiado al luchador por un sustituto y ESPN todavia publica
+    al que se retiro. Las reglas estan en `matching.plausibly_same_person`:
+    mismas palabras en otro orden, grafia casi igual, o un APELLIDO en comun
+    (el nombre de pila solo no basta: "Michael Johnson" no es "Michael
+    Chiesa"). Si no se parece, el hueco se queda a NULL, visible, en vez de
+    soldar a otro.
+    """
+    return plausibly_same_person(nombre_hueco, candidatos, nicknames=apodos)
+
+
+def _nombres_de_ficha(connection, fighter_id: int) -> tuple[str | None, str | None]:
+    """`(name, nickname)` de una ficha, para comparar con el hueco."""
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT name, nickname FROM fighters WHERE id = %s", (fighter_id,))
+        row = cursor.fetchone()
+        return (row[0], row[1]) if row else (None, None)
 
 
 def _resolve(session, name: str) -> tuple[EspnAthlete, tuple[int, int, int]] | None:
@@ -235,9 +270,30 @@ def _resolver_hueco(session, connection, hueco, promotion_id: int, cache: dict, 
                 session, event_date, event_id, promotion_id, connection, cache
             )
             rival_espn_id = resolver_rival_por_marcador(ancla_espn_id, peleas)
+            existente = (
+                get_fighter_id_by_espn_id(connection, rival_espn_id) if rival_espn_id else None
+            )
+            if rival_espn_id:
+                # Un enlace por el marcador ya no se revisa cada manana (el
+                # upsert de la cartelera lo conserva mientras ufc.com no cambie
+                # el nombre del hueco), asi que tiene que ser de la persona del
+                # hueco: si ESPN aun publica al que se retiro, no se enlaza.
+                candidatos = [nombre_rival_en_marcador(ancla_espn_id, rival_espn_id, peleas)]
+                apodos: list = []
+                if existente is not None:
+                    nombre_ficha, apodo_ficha = _nombres_de_ficha(connection, existente)
+                    candidatos.append(nombre_ficha)
+                    apodos.append(apodo_ficha)
+                if not nombre_compatible(name, candidatos, apodos):
+                    counts["marcador_rechazado"] += 1
+                    LOGGER.warning(
+                        "%r -> el marcador pone a %r (%s) y no se parece: no se enlaza",
+                        name, [c for c in candidatos + apodos if c], rival_espn_id,
+                    )
+                    rival_espn_id = None
+                    existente = None
             if rival_espn_id:
                 counts["por_marcador"] += 1
-                existente = get_fighter_id_by_espn_id(connection, rival_espn_id)
                 if existente is not None:
                     LOGGER.info(
                         "%r -> por el marcador: atleta %s, que YA tiene ficha (%d)",
@@ -272,6 +328,7 @@ def link_upcoming(dry_run: bool = False) -> dict[str, int]:
     counts = {
         "slots": 0, "resolved": 0, "linked": 0, "unresolved": 0,
         "por_marcador": 0, "por_nombre": 0, "reutilizadas": 0,
+        "marcador_rechazado": 0,
     }
     cache_marcador: dict = {}
     with connect(settings.database_url) as connection:

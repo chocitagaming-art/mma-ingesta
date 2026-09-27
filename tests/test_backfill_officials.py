@@ -190,6 +190,7 @@ def test_get_bouts_reads_officials_state(fakedb):
         11, 201, 202, "Shara Magomedov", "Michel Pereira", "Decision - Unanimous",
         True, True, None, False,
         "/fighter-details/06734ca9d88dec3a", "/fighter-details/595db60957de51d3",
+        None, None, None, None,
     )
     conn = fakedb.Connection(lambda sql, params=None: [row])
     bout = _get_bouts(conn, 5)[0]
@@ -201,6 +202,24 @@ def test_get_bouts_reads_officials_state(fakedb):
     flat = " ".join(sql.split())
     assert "fi.referee" in flat
     assert "EXISTS (SELECT 1 FROM fight_scorecards sc WHERE sc.fight_id = fi.id)" in flat
+    # No ufc.com names on this (ufcstats-style) row: no alternatives.
+    assert bout.red_alt_name is None and bout.blue_alt_name is None
+
+
+def test_get_bouts_reads_the_ufc_com_names_as_alternatives(fakedb):
+    # Bout 16352 relinked: fighters.name first (ESPN), the fight row's own
+    # ufc.com spelling rides along as the alternative for each corner.
+    row = (
+        16352, 9130, 9129, "Mehemmedeli Osmanli", "Ilimbek Akylbek Uulu", "DQ",
+        False, False, "Kerry Hatley", False, None, None,
+        "Mahammadali Osmanli", "Ilimbek Akylbek", "Ineffable", None,
+    )
+    conn = fakedb.Connection(lambda sql, params=None: [row])
+    bout = _get_bouts(conn, 1091)[0]
+    assert (bout.red_alt_name, bout.blue_alt_name) == ("Mahammadali Osmanli", "Ilimbek Akylbek")
+    assert bout.fighter_id_for("Mahammadali Osmanli") == 9130
+    flat = " ".join(conn.cursors[0].executed[0][0].split())
+    assert "fi.fighter_red_name, fi.fighter_blue_name, red.nickname, blue.nickname FROM fights fi" in flat
 
 
 def test_is_decision_covers_all_spellings():
