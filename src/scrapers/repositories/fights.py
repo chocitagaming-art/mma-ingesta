@@ -164,7 +164,9 @@ def upsert_upcoming_fight(connection: PgConnection, fight: UpcomingFightRecord) 
     conflict branch resets status to NULL: a fight cancelled on a previous run
     that reappears on the card is reactivated here. is_title_fight follows the
     no-NULL-overwrite policy (COALESCE both on insert — the column is NOT NULL
-    — and on update).
+    — and on update), and so do weight_class and card_segment. The corner ids
+    keep a stored link through an unmatched (NULL) re-scrape only while the
+    ufc.com name in that slot is unchanged; see the CASE comments.
     """
     with connection.cursor() as cursor:
         cursor.execute(
@@ -178,14 +180,102 @@ def upsert_upcoming_fight(connection: PgConnection, fight: UpcomingFightRecord) 
             ON CONFLICT (source, source_id)
             DO UPDATE SET
                 event_id = EXCLUDED.event_id,
-                fighter_red_id = EXCLUDED.fighter_red_id,
-                fighter_blue_id = EXCLUDED.fighter_blue_id,
-                fighter_red_name = EXCLUDED.fighter_red_name,
-                fighter_blue_name = EXCLUDED.fighter_blue_name,
-                weight_class = EXCLUDED.weight_class,
+                -- Corners. ufc.com is the corner authority, so a RESOLVED
+                -- incoming id always wins (substitutes and swaps follow the
+                -- card). A NULL from the name matcher means "unknown", not
+                -- "nobody": the stored id (a manual link, or link_upcoming's
+                -- scoreboard link) survives only while the slot provably holds
+                -- the same person, i.e. the same ufc.com name in the same
+                -- corner, or in the other one (swap). A new name under the same
+                -- fmid is a substitute and gets NULL, never the old id. TBD is
+                -- a placeholder, never evidence. A swap only counts when the two
+                -- incoming names differ, or one stored id would land in both
+                -- corners. Every guard compares against the OTHER corner's
+                -- incoming id, so no combination can break fights_red_ne_blue
+                -- (that would roll back the whole event, every run).
+                --
+                -- A bout with a result and some link keeps its stored PAIR, and
+                -- its names with it (a finished bout relisted with the corners
+                -- the other way round must not leave each name on the other
+                -- fighter's id: backfill_results matches stats by these names).
+                -- The one thing it still accepts is filling an EMPTY corner with
+                -- a resolved id for the same slot name that is not the other
+                -- corner and agrees with winner_id.
+                --
+                -- Bout 16352 (event 1091) lost both corners the morning after
+                -- its fight because this branch used to write EXCLUDED blindly.
+                fighter_red_id = CASE
+                    WHEN (fights.winner_id IS NOT NULL OR fights.method IS NOT NULL)
+                     AND (fights.fighter_red_id IS NOT NULL OR fights.fighter_blue_id IS NOT NULL)
+                        THEN CASE
+                            WHEN fights.fighter_red_id IS NULL
+                             AND EXCLUDED.fighter_red_id IS NOT NULL
+                             AND EXCLUDED.fighter_red_id IS DISTINCT FROM fights.fighter_blue_id
+                             AND lower(EXCLUDED.fighter_red_name) = lower(fights.fighter_red_name)
+                             AND (fights.winner_id IS NULL
+                                  OR fights.winner_id = fights.fighter_blue_id
+                                  OR fights.winner_id = EXCLUDED.fighter_red_id)
+                                THEN EXCLUDED.fighter_red_id
+                            ELSE fights.fighter_red_id
+                        END
+                    WHEN EXCLUDED.fighter_red_id IS NOT NULL
+                        THEN EXCLUDED.fighter_red_id
+                    WHEN EXCLUDED.fighter_red_name = 'TBD'
+                        THEN NULL
+                    WHEN lower(EXCLUDED.fighter_red_name) = lower(fights.fighter_red_name)
+                     AND fights.fighter_red_id IS DISTINCT FROM EXCLUDED.fighter_blue_id
+                        THEN fights.fighter_red_id
+                    WHEN lower(EXCLUDED.fighter_red_name) = lower(fights.fighter_blue_name)
+                     AND lower(EXCLUDED.fighter_red_name) <> lower(EXCLUDED.fighter_blue_name)
+                     AND fights.fighter_blue_id IS DISTINCT FROM EXCLUDED.fighter_blue_id
+                        THEN fights.fighter_blue_id
+                    ELSE NULL
+                END,
+                fighter_blue_id = CASE
+                    WHEN (fights.winner_id IS NOT NULL OR fights.method IS NOT NULL)
+                     AND (fights.fighter_red_id IS NOT NULL OR fights.fighter_blue_id IS NOT NULL)
+                        THEN CASE
+                            WHEN fights.fighter_blue_id IS NULL
+                             AND EXCLUDED.fighter_blue_id IS NOT NULL
+                             AND EXCLUDED.fighter_blue_id IS DISTINCT FROM fights.fighter_red_id
+                             AND lower(EXCLUDED.fighter_blue_name) = lower(fights.fighter_blue_name)
+                             AND (fights.winner_id IS NULL
+                                  OR fights.winner_id = fights.fighter_red_id
+                                  OR fights.winner_id = EXCLUDED.fighter_blue_id)
+                                THEN EXCLUDED.fighter_blue_id
+                            ELSE fights.fighter_blue_id
+                        END
+                    WHEN EXCLUDED.fighter_blue_id IS NOT NULL
+                        THEN EXCLUDED.fighter_blue_id
+                    WHEN EXCLUDED.fighter_blue_name = 'TBD'
+                        THEN NULL
+                    WHEN lower(EXCLUDED.fighter_blue_name) = lower(fights.fighter_blue_name)
+                     AND fights.fighter_blue_id IS DISTINCT FROM EXCLUDED.fighter_red_id
+                        THEN fights.fighter_blue_id
+                    WHEN lower(EXCLUDED.fighter_blue_name) = lower(fights.fighter_red_name)
+                     AND lower(EXCLUDED.fighter_red_name) <> lower(EXCLUDED.fighter_blue_name)
+                     AND fights.fighter_red_id IS DISTINCT FROM EXCLUDED.fighter_red_id
+                        THEN fights.fighter_red_id
+                    ELSE NULL
+                END,
+                fighter_red_name = CASE
+                    WHEN (fights.winner_id IS NOT NULL OR fights.method IS NOT NULL)
+                     AND (fights.fighter_red_id IS NOT NULL OR fights.fighter_blue_id IS NOT NULL)
+                        THEN fights.fighter_red_name
+                    ELSE EXCLUDED.fighter_red_name
+                END,
+                fighter_blue_name = CASE
+                    WHEN (fights.winner_id IS NOT NULL OR fights.method IS NOT NULL)
+                     AND (fights.fighter_red_id IS NOT NULL OR fights.fighter_blue_id IS NOT NULL)
+                        THEN fights.fighter_blue_name
+                    ELSE EXCLUDED.fighter_blue_name
+                END,
+                -- A missing class text or an unsplit "Fight Card" template
+                -- (no segment headers) arrives as NULL: keep what we had.
+                weight_class = COALESCE(EXCLUDED.weight_class, fights.weight_class),
                 scheduled_rounds = EXCLUDED.scheduled_rounds,
                 bout_order = EXCLUDED.bout_order,
-                card_segment = EXCLUDED.card_segment,
+                card_segment = COALESCE(EXCLUDED.card_segment, fights.card_segment),
                 -- Not EXCLUDED.is_title_fight: that already went through the
                 -- insert-side COALESCE(placeholder, FALSE), so a NULL argument
                 -- would arrive as FALSE and stomp a stored TRUE. The raw

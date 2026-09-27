@@ -130,7 +130,7 @@ CREATE TABLE fights (
     fighter_red_id INTEGER, fighter_blue_id INTEGER,
     fighter_red_name TEXT, fighter_blue_name TEXT
 );
-CREATE TABLE fighters (id INTEGER PRIMARY KEY, name TEXT, source_id TEXT);
+CREATE TABLE fighters (id INTEGER PRIMARY KEY, name TEXT, nickname TEXT, source_id TEXT);
 CREATE TABLE fight_stats (fight_id INTEGER, fighter_id INTEGER);
 CREATE TABLE fight_stats_rounds (fight_id INTEGER, fighter_id INTEGER, round INTEGER);
 CREATE TABLE fight_scorecards (fight_id INTEGER, judge TEXT);

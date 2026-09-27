@@ -93,6 +93,7 @@ def _responder(sql, params=None):
         return [(
             FIGHT_ID, RED_ID, BLUE_ID, RED_NAME, BLUE_NAME, "U-DEC",
             True, False, "Keith Peterson", True, "/fighter-details/aaa", "/fighter-details/bbb",
+            None, None, None, None,
         )]
     return []
 

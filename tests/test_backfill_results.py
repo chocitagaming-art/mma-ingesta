@@ -217,3 +217,129 @@ def test_match_fight_with_unlinked_corner_id():
     assert _winner_id_for(bout, "Jose Delgado") is None
     # ...while the linked corner keeps working normally.
     assert bout.fighter_id_for("Austin Bashi") == 1
+
+
+# ------------------------------------- alternative (ufc.com) name per corner
+#
+# Bouts 16351/16352 (event 1091, 26-sep-2026): once a corner is linked,
+# _get_bouts names it after fighters.name (ESPN), but ufcstats writes the
+# ufc.com spelling that the fight row keeps in fighter_*_name. Each corner
+# must answer to both, or the bout is "no ufcstats fight" / its stats go
+# "unmatched" forever.
+
+
+def _linked(red_name, blue_name, red_alt, blue_alt, red_id=9130, blue_id=9129,
+            red_nickname=None, blue_nickname=None) -> _Bout:
+    return _Bout(
+        16352, red_id, blue_id, red_name, blue_name,
+        red_alt_name=red_alt, blue_alt_name=blue_alt,
+        red_nickname=red_nickname, blue_nickname=blue_nickname,
+    )
+
+
+def test_corner_for_matches_the_ufc_com_spelling_of_a_linked_corner():
+    bout = _linked("Mehemmedeli Osmanli", "Ilimbek Akylbek Uulu",
+                   "Mahammadali Osmanli", "Ilimbek Akylbek")
+    assert bout.corner_for("Mahammadali Osmanli") == "red"
+    assert bout.corner_for("Ilimbek Akylbek") == "blue"
+    # Stats rows resolve to the linked ids, which is what fills fight_stats.
+    assert bout.fighter_id_for("Mahammadali Osmanli") == 9130
+    assert bout.fighter_id_for("Ilimbek Akylbek") == 9129
+    # The ESPN names keep working too.
+    assert bout.corner_for("Mehemmedeli Osmanli") == "red"
+
+
+def test_match_fight_by_the_ring_name_stored_on_the_fight_row():
+    # 16351: fighter 9132 is "Valesca Machado"; ufc.com and ufcstats say
+    # "Tina Black". Before: "no ufcstats fight for Melissa Amaya vs Valesca Machado".
+    bout = _linked("Melissa Amaya", "Valesca Machado", "Melissa Amaya", "Tina Black",
+                   red_id=9131, blue_id=9132, blue_nickname="Tina Black")
+    fights = [
+        _fight("Raul Rosas Jr.", "Raoni Barcelos", source_id="other"),
+        _fight("Tina Black", "Melissa Amaya", source_id="target"),
+    ]
+    assert _match_fight(bout, fights) is fights[1]
+    assert _winner_id_for(bout, "Tina Black") == 9132
+
+
+def test_match_fight_linked_transliteration_both_corners():
+    # 16352 once relinked: both corners differ from ufcstats; only the alt
+    # names pair the bout (exact key over the alternatives).
+    bout = _linked("Mehemmedeli Osmanli", "Ilimbek Akylbek Uulu",
+                   "Mahammadali Osmanli", "Ilimbek Akylbek")
+    fights = [_fight("Ilimbek Akylbek", "Mahammadali Osmanli")]
+    assert _match_fight(bout, fights) is fights[0]
+
+
+def test_alt_name_never_makes_a_name_claim_both_corners():
+    # A stale alt name equal to the OTHER corner's name is dropped, so the
+    # page fighter maps to his real corner and never to both.
+    bout = _linked("Jose Aldo", "Max Holloway", "Max Holloway", None, red_id=1, blue_id=2)
+    assert bout.corner_for("Max Holloway") == "blue"
+    assert bout.corner_for("Jose Aldo") == "red"
+
+
+def test_without_alt_names_matching_is_unchanged():
+    # ufcstats-sourced bouts carry no fighter_*_name: same answers as before.
+    bout = _Bout(10, 1, 2, "Austin Bashi", "Jose Miguel Delgado")
+    assert bout.keys() == [bout.key()]
+    assert bout.corner_for("Jose Delgado") == "blue"
+    assert bout.corner_for("Tina Black") is None
+
+
+def test_alt_name_equal_to_primary_adds_no_extra_key():
+    bout = _linked("Rodolfo Vieira", "Robert Bryczek", "RODOLFO VIEIRA", "Robert Bryczek",
+                   red_id=6269, blue_id=7265)
+    assert bout.keys() == [bout.key()]
+
+
+def test_stale_alt_name_equal_to_the_other_corner_is_ignored():
+    # Corners relisted the other way round: red's alt is blue's name. It must
+    # not become an alias of red, or blue's stats would land on red's id.
+    bout = _linked("Mehemmedeli Osmanli", "Ilimbek Akylbek Uulu",
+                   "Ilimbek Akylbek Uulu", "Mehemmedeli Osmanli")
+    assert bout.corner_for("Ilimbek Akylbek Uulu") == "blue"
+    assert bout.corner_for("Mehemmedeli Osmanli") == "red"
+
+
+def test_alt_name_that_does_not_look_like_the_linked_fighter_is_ignored():
+    # A wrong link (scoreboard link made while ESPN still listed the withdrawn
+    # Michael Chiesa, id 30, for the slot of debutant substitute Michael
+    # Johnson): the ufc.com name must not become an alias of fighter 30, or
+    # Johnson's win and stats would be written onto Chiesa.
+    bout = _linked("Kyle Nelson", "Michael Chiesa", None, "Michael Johnson",
+                   red_id=6434, blue_id=30, blue_nickname="Maverick")
+    assert bout.corner_for("Michael Johnson") is None
+    assert bout.fighter_id_for("Michael Johnson") is None
+    fights = [_fight("Michael Johnson", "Kyle Nelson")]
+    assert _match_fight(bout, fights) is None
+
+
+def test_ring_name_without_the_nickname_is_not_an_alias():
+    # "Tina Black" only counts as Valesca Machado because it IS her nickname.
+    bout = _linked("Melissa Amaya", "Valesca Machado", None, "Tina Black",
+                   red_id=9131, blue_id=9132)
+    assert bout.corner_for("Tina Black") is None
+
+
+def test_no_alias_for_a_fighter_imported_from_ufcstats():
+    # Two different Silvas pass any name filter. A withdrawn veteran (imported
+    # from ufcstats, so ufcstats already knows him by fighters.name) must never
+    # answer to the substitute's ufc.com name: that would only mean a wrong link.
+    bout = _Bout(
+        17000, 7001, 7002, "Natalia Silva", "Someone Else",
+        red_source_id="/fighter-details/aaaaaaaaaaaaaaaa", blue_source_id="5000000",
+        red_alt_name="Jessica Silva", blue_alt_name=None,
+    )
+    assert bout.corner_for("Jessica Silva") is None
+    assert bout.corner_for("Natalia Silva") == "red"
+
+
+def test_alias_still_works_for_espn_imported_debutants():
+    bout = _Bout(
+        16352, 9130, 9129, "Mehemmedeli Osmanli", "Ilimbek Akylbek Uulu",
+        red_source_id="5345640", blue_source_id="5345639",
+        red_alt_name="Mahammadali Osmanli", blue_alt_name="Ilimbek Akylbek",
+    )
+    assert bout.fighter_id_for("Mahammadali Osmanli") == 9130
+    assert bout.fighter_id_for("Ilimbek Akylbek") == 9129

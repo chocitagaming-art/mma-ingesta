@@ -217,3 +217,59 @@ def fuzzy_match(left: str, right: str, threshold: float = DEFAULT_THRESHOLD) -> 
     :data:`IDENTITY_THRESHOLD` for fighter_id-linking call sites).
     """
     return fold_ratio(left, right) >= threshold
+
+
+# Minimum length of a shared word for plausibly_same_person. With 4,
+# "Osmanli" and "Silva" count; particles ("da", "de", "jr") never do.
+_MIN_SHARED_TOKEN_LEN = 4
+
+
+def _surname_tokens(name: str) -> set[str]:
+    """Folded words of a name except the first (the given name), each of at
+    least _MIN_SHARED_TOKEN_LEN letters. A one-word name keeps its word."""
+    words = fold(name).split()
+    if len(words) > 1:
+        words = words[1:]
+    return {word for word in words if len(word) >= _MIN_SHARED_TOKEN_LEN}
+
+
+def plausibly_same_person(name: str, candidates, nicknames=()) -> bool:
+    """Whether ``name`` can be the same fighter as any of ``candidates``.
+
+    A COARSE filter on purpose, never an identification: it only has to tell
+    apart two spellings of one person from two people. Accepted:
+
+    * the same words in any order ("Liu Ce" / "Ce Liu", ring name == nickname);
+    * a close whole-name spelling (fuzzy_match at DEFAULT_THRESHOLD: a letter
+      fold() cannot strip, like the Polish l in "Blachowicz");
+    * a shared word of 4+ letters in SURNAME position, i.e. not the first word
+      of either name ("Mahammadali/Mehemmedeli Osmanli", "Jose Montanha da
+      Silva" / "Henrique da Silva Lopes", "Ilimbek Akylbek (Uulu)").
+
+    A shared first name alone ("Michael Johnson" / "Michael Chiesa") is NOT
+    enough: that is the substitute-vs-withdrawn case this filter exists for.
+    ``nicknames`` only count as a WHOLE name (same words or a close
+    spelling): a nickname word is not a surname ("The King" must not make
+    "Sean King" look like Erik Silva). A shared common surname (two different
+    Silvas) still passes; callers must not treat a True as proof of identity.
+    """
+    name = name or ""
+    words = sorted(fold(name).split())
+    surname = _surname_tokens(name)
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if sorted(fold(candidate).split()) == words:
+            return True
+        if fuzzy_match(name, candidate, DEFAULT_THRESHOLD):
+            return True
+        if surname & _surname_tokens(candidate):
+            return True
+    for nickname in nicknames:
+        if not nickname:
+            continue
+        if sorted(fold(nickname).split()) == words:
+            return True
+        if fuzzy_match(name, nickname, DEFAULT_THRESHOLD):
+            return True
+    return False

@@ -128,6 +128,23 @@ def test_upsert_update_branch_coalesces_with_stored_column(fakedb):
 # ------------------------------------------------- BE7: upsert reactivation
 
 
+def test_upsert_corners_are_not_blindly_overwritten(fakedb):
+    # Bout 16352: `fighter_red_id = EXCLUDED.fighter_red_id` wrote the name
+    # matcher's NULLs over a manual link. The behaviour is pinned against real
+    # Postgres in test_upcoming_fmid_dedup; this only guards the SQL shape.
+    conn = fakedb.Connection(lambda sql, params=None: [(11,)])
+    upsert_upcoming_fight(conn, _record(_bouts()[0]))
+    sql, params = conn.cursors[0].executed[0]
+    flat = " ".join(sql.split())
+    assert "fighter_red_id = EXCLUDED.fighter_red_id," not in flat
+    assert "fighter_blue_id = EXCLUDED.fighter_blue_id," not in flat
+    assert "fighter_red_id = CASE" in flat and "fighter_blue_id = CASE" in flat
+    assert "card_segment = COALESCE(EXCLUDED.card_segment, fights.card_segment)" in flat
+    assert "weight_class = COALESCE(EXCLUDED.weight_class, fights.weight_class)" in flat
+    # No new placeholders: the positional contract of the other tests holds.
+    assert flat.count("%s") == 13 and len(params) == 13
+
+
 def test_upsert_reactivates_reappearing_bout(fakedb):
     conn = fakedb.Connection(lambda sql, params=None: [(11,)])
     upsert_upcoming_fight(conn, _record(_bouts()[0]))
