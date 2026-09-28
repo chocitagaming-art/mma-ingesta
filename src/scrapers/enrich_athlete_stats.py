@@ -16,9 +16,11 @@ mapped BY LABEL, so column order never matters and an unknown extra stat is
 ignored. A page without the block (historical fighters, 404) yields None and is
 skipped — never written as a spurious 0/0/0.
 
-ANTI-HOMONYM GUARD — same policy as enrich_facts / enrich_fullbody: the hero
-name the page renders must match the DB fighter's name; a page with no hero name
-is only trusted when the stored headshot already comes from ufc.com. Exact
+ANTI-HOMONYM GUARD — same policy as enrich_facts / enrich_fullbody (shared
+enrich_fullbody._hero_name_matches): the hero name the page renders must match
+the DB fighter's name, or be exactly their nickname (2+ words, shared by no other
+fighter; counted as ``nickname_match`` and logged); a page with no
+hero name is only trusted when the stored headshot already comes from ufc.com. Exact
 duplicate names in the DB (the two Bruno Silva) share a slug and would cross-
 attribute, so they are excluded from the scope.
 
@@ -51,7 +53,7 @@ from bs4 import BeautifulSoup
 
 from .config import get_settings
 from .db import connect
-from .enrich_fullbody import _names_match
+from .enrich_fullbody import _accepted_by_nickname, _hero_name_matches, _unique_nickname_sql
 from .enrich_photos_ufc import ATHLETE_URL, REQUEST_DELAY_SECONDS, _HEADERS, _HERO_NAME_RE, slugify
 from .logging_config import configure_logging
 from .repositories.fighters import update_fighter_finish_stats
@@ -88,8 +90,8 @@ class StatsPage:
 
 # resolver(session, name) -> StatsPage | None. Injected in tests (no network).
 Resolver = Callable[[requests.Session, str], "StatsPage | None"]
-# Target row: (fighter_id, name, ufc_confirmed) — same shape as enrich_facts.
-Target = tuple[int, str, bool]
+# Target row: (fighter_id, name, nickname, ufc_confirmed) — same shape as enrich_facts.
+Target = tuple[int, str, str | None, bool]
 
 
 def _clean_text(text: str) -> str:
@@ -156,11 +158,13 @@ def resolve_stats(session: requests.Session, name: str) -> StatsPage | None:
     return StatsPage(stats=parse_finish_stats(soup), page_name=page_name)
 
 
-def _identity_verified(db_name: str, page: StatsPage, ufc_confirmed: bool) -> bool:
+def _identity_verified(
+    db_name: str, page: StatsPage, ufc_confirmed: bool, *, nickname: str | None
+) -> bool:
     """Same anti-homonym policy as enrich_facts._identity_verified."""
     if page.page_name is None:
         return ufc_confirmed
-    return _names_match(db_name, page.page_name)
+    return _hero_name_matches(db_name, nickname, page.page_name)
 
 
 def _get_target_fighters(
@@ -184,9 +188,10 @@ def _get_target_fighters(
                 WHERE dup.id <> f.id AND lower(dup.name) = lower(f.name)
               )
     """
+    nickname = _unique_nickname_sql("f.nickname")
     if all_scope:
         sql = f"""
-            SELECT f.id, f.name, (f.headshot_url ILIKE %s) AS ufc_confirmed
+            SELECT f.id, f.name, {nickname}, (f.headshot_url ILIKE %s) AS ufc_confirmed
             FROM fighters f
             WHERE f.name IS NOT NULL AND f.name <> ''
               {homonym_free}
@@ -207,7 +212,7 @@ def _get_target_fighters(
         """
     else:
         sql = f"""
-            SELECT DISTINCT f.id, f.name, (f.headshot_url ILIKE %s) AS ufc_confirmed
+            SELECT DISTINCT f.id, f.name, {nickname}, (f.headshot_url ILIKE %s) AS ufc_confirmed
             FROM fighters f
             JOIN fights fi ON fi.fighter_red_id = f.id OR fi.fighter_blue_id = f.id
             JOIN events e ON e.id = fi.event_id
@@ -225,7 +230,10 @@ def _get_target_fighters(
         params.append(offset)
     with connection.cursor() as cursor:
         cursor.execute(sql, tuple(params))
-        return [(int(row[0]), str(row[1]), bool(row[2])) for row in cursor.fetchall()]
+        return [
+            (int(row[0]), str(row[1]), row[2] or None, bool(row[3]))
+            for row in cursor.fetchall()
+        ]
 
 
 def backfill(
@@ -248,41 +256,48 @@ def backfill(
         "all" if all_scope else "upcoming", total,
     )
 
-    for idx, (fighter_id, name, ufc_confirmed) in enumerate(targets, 1):
+    for idx, (fighter_id, name, nickname, ufc_confirmed) in enumerate(targets, 1):
         page = resolver(session, name)
         sleeper(REQUEST_DELAY_SECONDS)
         if page is None:
             # Includes ufc.com 404s (fighters without a page): expected.
             counts["unresolved"] += 1
-        elif not _identity_verified(name, page, ufc_confirmed):
+        elif not _identity_verified(name, page, ufc_confirmed, nickname=nickname):
             counts["name_mismatch"] += 1
             LOGGER.warning(
                 "Name mismatch for fighter id=%d %r: page renders %r — skipping",
                 fighter_id, name, page.page_name,
             )
-        elif page.stats is None:
-            # Page exists but has no hero stats block (most historical fighters).
-            counts["no_stats"] += 1
         else:
-            counts["with_stats"] += 1
-            if dry_run:
-                counts["would_update"] += 1
+            if _accepted_by_nickname(name, page.page_name):
+                counts["nickname_match"] += 1
                 LOGGER.info(
-                    "[dry-run] id=%d %r: KO=%d SUB=%d 1R=%d",
-                    fighter_id, name, page.stats.wins_by_ko,
-                    page.stats.wins_by_submission, page.stats.first_round_finishes,
+                    "Accepted by nickname: fighter id=%d %r (nickname %r) — page renders %r",
+                    fighter_id, name, nickname, page.page_name,
                 )
+            if page.stats is None:
+                # Page exists but has no hero stats block (most historical fighters).
+                counts["no_stats"] += 1
             else:
-                updated = update_fighter_finish_stats(
-                    connection,
-                    fighter_id,
-                    wins_by_ko=page.stats.wins_by_ko,
-                    wins_by_submission=page.stats.wins_by_submission,
-                    first_round_finishes=page.stats.first_round_finishes,
-                )
-                if updated:
-                    connection.commit()
-                    counts["updated"] += 1
+                counts["with_stats"] += 1
+                if dry_run:
+                    counts["would_update"] += 1
+                    LOGGER.info(
+                        "[dry-run] id=%d %r: KO=%d SUB=%d 1R=%d",
+                        fighter_id, name, page.stats.wins_by_ko,
+                        page.stats.wins_by_submission, page.stats.first_round_finishes,
+                    )
+                else:
+                    updated = update_fighter_finish_stats(
+                        connection,
+                        fighter_id,
+                        wins_by_ko=page.stats.wins_by_ko,
+                        wins_by_submission=page.stats.wins_by_submission,
+                        first_round_finishes=page.stats.first_round_finishes,
+                    )
+                    if updated:
+                        connection.commit()
+                        counts["updated"] += 1
 
         if idx % PROGRESS_EVERY == 0:
             LOGGER.info(
@@ -341,7 +356,10 @@ def main() -> None:
             all_scope=args.all_scope,
         )
 
-    keys = ["targets", "with_stats", "updated", "would_update", "no_stats", "unresolved", "name_mismatch"]
+    keys = [
+        "targets", "with_stats", "updated", "would_update", "no_stats", "unresolved",
+        "name_mismatch", "nickname_match",
+    ]
     print(json.dumps({key: counts.get(key, 0) for key in keys}, indent=2))
     if args.dry_run:
         print("Dry-run: nothing was written. Re-run without --dry-run to persist.")

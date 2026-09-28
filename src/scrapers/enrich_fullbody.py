@@ -22,7 +22,12 @@ ufc.com, slugify(name) can land on a namesake's page. Before persisting
 anything, the name the page renders (hero-profile__name) must match the DB
 fighter's name after normalization (NFKD accents stripped, casefold, whitespace
 collapsed): exact equality or every token of the shorter name contained in the
-longer one ('Jose Aldo' vs 'Jose Aldo Junior' passes). The guard runs for ALL
+longer one ('Jose Aldo' vs 'Jose Aldo Junior' passes) — or the hero name must
+be EXACTLY the fighter's stored nickname (same normalization, no containment,
+at least two words, and a nickname no other fighter shares): ufc.com publishes
+some fighters under their nickname (fighters.id=9132 'Valesca Machado' renders
+as 'Tina Black'). Every acceptance by nickname is counted (``nickname_match``)
+and logged at INFO. The guard runs for ALL
 resolved pages — it is a regex over HTML already in memory, so it is free, and
 it also protects previously-confirmed fighters against slug redirects — but a
 page WITHOUT a hero name is only trusted for fighters whose ufc.com headshot
@@ -73,10 +78,31 @@ PROGRESS_EVERY = 25
 # resolver(session, name) -> AthleteData | None. Injected in tests.
 Resolver = Callable[[requests.Session, str], AthleteData | None]
 
-# Target row: (fighter_id, name, ufc_confirmed) — ufc_confirmed is True when the
-# stored headshot already comes from ufc.com (page identity proven by the
-# previous pass), which relaxes the guard only when the page has no hero name.
-Target = tuple[int, str, bool]
+# Target row: (fighter_id, name, nickname, ufc_confirmed) — nickname (None when
+# empty or shared with another fighter) is the guard's second way to recognize
+# the hero name; ufc_confirmed is True when the stored headshot already comes
+# from ufc.com (page identity proven by the previous pass), which relaxes the
+# guard only when the page has no hero name.
+Target = tuple[int, str, str | None, bool]
+
+
+def _unique_nickname_sql(column: str) -> str:
+    """SELECT-list expression for the guard's nickname: ``column`` itself, or
+    NULL when another fighter carries the same nickname (lower-cased and
+    trimmed: the same criterion as the exact-duplicate-name exclusion).
+
+    A shared nickname cannot tell whose page this is ('The Sniper' belongs to 5
+    fighters in the DB, 'The Great' to 4), so it never reaches the guard. Shared
+    by the three ufc.com enrichers. The subquery is uncorrelated, so Postgres
+    evaluates it once (hashed SubPlan); ``count(nickname)`` leaves the NULL
+    group out of the list.
+    """
+    return (
+        f"CASE WHEN lower(btrim({column})) IN ("
+        "SELECT lower(btrim(nickname)) FROM fighters"
+        " GROUP BY 1 HAVING count(nickname) > 1"
+        f") THEN NULL ELSE {column} END AS nickname"
+    )
 
 
 def _get_target_fighters(
@@ -90,8 +116,9 @@ def _get_target_fighters(
     conservative filter: only fighters whose headshot is already from ufc.com.
     """
     if solo_ufc:
-        sql = """
-            SELECT id, name, TRUE AS ufc_confirmed
+        nickname = _unique_nickname_sql("nickname")
+        sql = f"""
+            SELECT id, name, {nickname}, TRUE AS ufc_confirmed
             FROM fighters
             WHERE headshot_url ILIKE %s
               AND (full_body_url IS NULL OR leg_reach_cm IS NULL OR trains_at IS NULL)
@@ -99,8 +126,9 @@ def _get_target_fighters(
         """
         params: list = ["%ufc.com%"]
     else:
-        sql = """
-            SELECT f.id, f.name, (f.headshot_url ILIKE %s) AS ufc_confirmed
+        nickname = _unique_nickname_sql("f.nickname")
+        sql = f"""
+            SELECT f.id, f.name, {nickname}, (f.headshot_url ILIKE %s) AS ufc_confirmed
             FROM fighters f
             WHERE f.name IS NOT NULL AND f.name <> ''
               AND (f.full_body_url IS NULL OR f.leg_reach_cm IS NULL OR f.trains_at IS NULL)
@@ -125,7 +153,10 @@ def _get_target_fighters(
         params.append(limit)
     with connection.cursor() as cursor:
         cursor.execute(sql, tuple(params))
-        return [(int(row[0]), str(row[1]), bool(row[2])) for row in cursor.fetchall()]
+        return [
+            (int(row[0]), str(row[1]), row[2] or None, bool(row[3]))
+            for row in cursor.fetchall()
+        ]
 
 
 # Letras con trazo/barra que NFKD NO descompone: sin transliterar, 'Blachowicz'
@@ -161,17 +192,71 @@ def _names_match(db_name: str, page_name: str) -> bool:
     return set(shorter) <= set(longer)
 
 
-def _page_identity_verified(db_name: str, data: AthleteData, ufc_confirmed: bool) -> bool:
+# Minimum words for a nickname to count as a page identity (see below).
+_MIN_NICKNAME_WORDS = 2
+
+
+def _nickname_word_count(nickname: str) -> int:
+    """Whitespace-separated words that carry at least one name token. Counted on
+    the stored nickname, NOT on the normalized tokens: 'D-Rod' normalizes to
+    ['d', 'rod'] but is one word, and a punctuation-only chunk is no word."""
+    return sum(1 for word in nickname.split() if _normalized_name_tokens(word))
+
+
+def _hero_name_matches(db_name: str, nickname: str | None, page_name: str) -> bool:
+    """True when the hero name a ufc.com page renders identifies this fighter.
+
+    Shared by the three ufc.com enrichers (fullbody, athlete_stats, facts) so
+    their guards cannot drift apart. Two ways in:
+
+    1. By name: ``_names_match`` (exact or subset containment), unchanged.
+    2. By nickname: ufc.com publishes some fighters under their nickname —
+       fighters.id=9132 is 'Valesca Machado' in our DB, and her canonical page
+       /athlete/valesca-machado renders 'Tina Black' in hero-profile__name.
+       The nickname path is deliberately STRICTER than the name path:
+         - equality of the normalized token lists (same
+           ``_normalized_name_tokens``, same order), never containment. With
+           containment a generic nickname would open the door to other people:
+           'Black' would accept any '<X> Black' page and 'Tina Black Jr' a
+           'Tina Black' one;
+         - at least two words (``_nickname_word_count``). A one-word nickname
+           ('Bones', 'D-Rod') has the same shape as a mononym hero name, so a
+           single matching word is too weak to prove whose page this is;
+         - the nickname must be ours alone. Two words are no uniqueness proof
+           ('The Sniper' is carried by 5 fighters), so the target queries hand
+           over NULL for a nickname another fighter shares
+           (``_unique_nickname_sql``) and this path never sees it.
+    """
+    if _names_match(db_name, page_name):
+        return True
+    if not nickname:
+        return False
+    if _nickname_word_count(nickname) < _MIN_NICKNAME_WORDS:
+        return False
+    return _normalized_name_tokens(nickname) == _normalized_name_tokens(page_name)
+
+
+def _accepted_by_nickname(db_name: str, page_name: str | None) -> bool:
+    """For a page the guard ALREADY accepted: True when only the nickname path
+    let it in (it renders a hero name that does not match the DB name). The
+    backfills count and log these, since that path is looser than the name one."""
+    return page_name is not None and not _names_match(db_name, page_name)
+
+
+def _page_identity_verified(
+    db_name: str, data: AthleteData, ufc_confirmed: bool, *, nickname: str | None
+) -> bool:
     """Anti-homonym guard: the resolved page must belong to this DB fighter.
 
-    When the page renders a hero name, it must match the DB name (all fighters,
-    confirmed or not — the check is free and catches slug redirects). When the
-    page has no hero name, only fighters already confirmed on ufc.com (their
-    stored headshot came from there) are trusted.
+    When the page renders a hero name, it must match the DB name or be exactly
+    the fighter's nickname (``_hero_name_matches``; all fighters, confirmed or
+    not — the check is free and catches slug redirects). When the page has no
+    hero name, only fighters already confirmed on ufc.com (their stored headshot
+    came from there) are trusted; the nickname plays no part there.
     """
     if data.page_name is None:
         return ufc_confirmed
-    return _names_match(db_name, data.page_name)
+    return _hero_name_matches(db_name, nickname, data.page_name)
 
 
 def backfill(
@@ -193,14 +278,14 @@ def backfill(
         "solo-ufc" if solo_ufc else "all", total,
     )
 
-    for idx, (fighter_id, name, ufc_confirmed) in enumerate(targets, 1):
+    for idx, (fighter_id, name, nickname, ufc_confirmed) in enumerate(targets, 1):
         data = resolver(session, name)
         sleeper(REQUEST_DELAY_SECONDS)
         if data is None:
             # Includes ufc.com 404s (historical fighters without a page):
             # expected, counted, never an error.
             counts["unresolved"] += 1
-        elif not _page_identity_verified(name, data, ufc_confirmed):
+        elif not _page_identity_verified(name, data, ufc_confirmed, nickname=nickname):
             counts["name_mismatch"] += 1
             LOGGER.warning(
                 "Name mismatch for fighter id=%d %r: page renders %r — skipping",
@@ -208,6 +293,12 @@ def backfill(
             )
         else:
             counts["resolved"] += 1
+            if _accepted_by_nickname(name, data.page_name):
+                counts["nickname_match"] += 1
+                LOGGER.info(
+                    "Accepted by nickname: fighter id=%d %r (nickname %r) — page renders %r",
+                    fighter_id, name, nickname, data.page_name,
+                )
             if data.full_body_url:
                 counts["with_full_body"] += 1
             if data.leg_reach_cm:
@@ -274,7 +365,7 @@ def main() -> None:
 
     keys = [
         "targets", "resolved", "with_full_body", "with_leg_reach", "with_trains_at",
-        "updated", "unresolved", "name_mismatch",
+        "updated", "unresolved", "name_mismatch", "nickname_match",
     ]
     print(json.dumps({key: counts.get(key, 0) for key in keys}, indent=2))
     if args.dry_run:

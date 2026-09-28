@@ -330,8 +330,9 @@ def test_update_with_all_null_new_values_updates_nothing(fakedb):
 # ------------------------------------------------------------------- backfill
 
 
+# Rows as the query returns them: (id, name, nickname, ufc_confirmed).
 # ufc_confirmed=True: both already carried a ufc.com headshot (old behaviour).
-_TARGET_ROWS = [(1, "Marlon Vera", True), (2, "Jon Jones", True)]
+_TARGET_ROWS = [(1, "Marlon Vera", None, True), (2, "Jon Jones", "Bones", True)]
 
 
 def _responder(update_result, target_rows=_TARGET_ROWS):
@@ -419,8 +420,8 @@ def test_targets_default_scope_is_all_fighters_missing_any_field(fakedb):
     assert "(f.full_body_url IS NULL OR f.leg_reach_cm IS NULL OR f.trains_at IS NULL)" in flat
     assert "(f.headshot_url ILIKE %s) AS ufc_confirmed" in flat
     assert params == ("%ufc.com%",)
-    # Rows come back typed as (id, name, ufc_confirmed).
-    assert targets == [(1, "Marlon Vera", True), (2, "Jon Jones", True)]
+    # Rows come back typed as (id, name, nickname, ufc_confirmed).
+    assert targets == [(1, "Marlon Vera", None, True), (2, "Jon Jones", "Bones", True)]
 
 
 def test_targets_ordered_ranked_then_upcoming_then_headshot_then_rest(fakedb):
@@ -447,7 +448,43 @@ def test_targets_solo_ufc_restores_old_filter(fakedb):
     assert "WHERE headshot_url ILIKE %s" in flat
     assert "(full_body_url IS NULL OR leg_reach_cm IS NULL OR trains_at IS NULL)" in flat
     assert params == ("%ufc.com%",)
-    assert targets == [(1, "Marlon Vera", True), (2, "Jon Jones", True)]
+    assert targets == [(1, "Marlon Vera", None, True), (2, "Jon Jones", "Bones", True)]
+
+
+def test_targets_select_exact_columns_in_both_scopes(fakedb):
+    # The rows are unpacked by POSITION as (id, name, nickname, ufc_confirmed),
+    # so the SELECT list is pinned exactly: a reordered column or a
+    # 'NULL AS nickname' must fail here instead of silently in production.
+    # An empty-string nickname comes back as None (no identity to match).
+    nickname = enrich_fullbody._unique_nickname_sql
+    expected = {
+        False: f"SELECT f.id, f.name, {nickname('f.nickname')}, "
+        "(f.headshot_url ILIKE %s) AS ufc_confirmed FROM fighters f WHERE ",
+        True: f"SELECT id, name, {nickname('nickname')}, TRUE AS ufc_confirmed "
+        "FROM fighters WHERE ",
+    }
+    rows = [(9132, "Valesca Machado", "Tina Black", False), (1, "Marlon Vera", "", True)]
+    for solo_ufc in (False, True):
+        conn = fakedb.Connection(_responder(update_result=[], target_rows=rows))
+        targets = enrich_fullbody._get_target_fighters(conn, solo_ufc=solo_ufc)
+        assert _selected_sql(conn).startswith(expected[solo_ufc])
+        assert targets == [
+            (9132, "Valesca Machado", "Tina Black", False),
+            (1, "Marlon Vera", None, True),
+        ]
+
+
+def test_unique_nickname_sql_drops_a_nickname_other_fighters_share():
+    # 'The Sniper' is the nickname of 5 fighters in the DB: it cannot tell whose
+    # page this is, so the query hands the guard NULL instead of it. Same
+    # criterion as the exact-duplicate-name exclusion (lower, trimmed); the
+    # subquery is uncorrelated, so Postgres evaluates it once.
+    assert enrich_fullbody._unique_nickname_sql("f.nickname") == (
+        "CASE WHEN lower(btrim(f.nickname)) IN ("
+        "SELECT lower(btrim(nickname)) FROM fighters"
+        " GROUP BY 1 HAVING count(nickname) > 1"
+        ") THEN NULL ELSE f.nickname END AS nickname"
+    )
 
 
 def test_targets_limit_appended_in_both_scopes(fakedb):
@@ -495,10 +532,131 @@ def test_names_match_transliterates_stroke_letters():
     assert enrich_fullbody._names_match("Jan Błachowicz", "Jan Blachowicz")
 
 
+# 🪤 Caso real (fighters.id=9132): en la base es 'Valesca Machado' con apodo
+# 'Tina Black', y ufc.com la publica en /athlete/valesca-machado con el h1
+# 'Tina Black'. Por nombre no casa nunca, así que las tres guardas la rechazaban
+# y se quedaba sin KO/SUB/1R, gimnasio, lugar de nacimiento ni facts.
+
+
+def test_hero_name_matches_page_rendering_the_exact_nickname():
+    assert enrich_fullbody._hero_name_matches("Valesca Machado", "Tina Black", "Tina Black")
+
+
+def test_hero_name_matches_nickname_normalized_like_names():
+    # Same normalization as the name: accents, case and spacing never matter.
+    assert enrich_fullbody._hero_name_matches("Valesca Machado", "Tína  BLACK", "Tina Black")
+    assert enrich_fullbody._hero_name_matches("Valesca Machado", "Tina Black", "TINA BLÁCK")
+
+
+def test_hero_name_rejects_nickname_page_for_another_fighter_without_nickname():
+    assert not enrich_fullbody._hero_name_matches("Joe Smith", None, "Tina Black")
+    assert not enrich_fullbody._hero_name_matches("Joe Smith", "", "Tina Black")
+
+
+def test_hero_name_rejects_single_token_nickname():
+    # 'Black' is a subset of 'Tina Black' but the nickname path never uses
+    # containment; and a one-word nickname is not an identity even when equal.
+    assert not enrich_fullbody._hero_name_matches("Valesca Machado", "Black", "Tina Black")
+    assert not enrich_fullbody._hero_name_matches("Jon Jones Jr", "Bones", "Bones")
+
+
+def test_hero_name_rejects_one_word_nickname_even_when_it_splits_into_tokens():
+    # Real DB nicknames: 'D-Rod' normalizes to ['d', 'rod'], but it is ONE word,
+    # a mononym-shaped label like 'Bones'. Words are counted on the stored
+    # nickname (split on whitespace); tokens only decide the equality.
+    for name, nickname in (
+        ("Daniel Rodriguez", "D-Rod"),
+        ("Maria Oliveira", "Spider-Girl"),
+        ("Gavin Tucker", "Guv'Nor"),
+        ("Brian Ortega", "T-City"),
+    ):
+        assert not enrich_fullbody._hero_name_matches(name, nickname, nickname)
+    # A punctuation-only chunk is not a word either: 'Tina .' is one word.
+    assert not enrich_fullbody._hero_name_matches("Valesca Machado", "Tina .", "Tina")
+
+
+def test_hero_name_nickname_requires_equality_not_containment():
+    assert not enrich_fullbody._hero_name_matches("Valesca Machado", "Tina Black Jr", "Tina Black")
+    assert not enrich_fullbody._hero_name_matches("Valesca Machado", "Tina Black", "Tina Black Jr")
+    # Token ORDER counts too: the nickname is a phrase, not a set of words.
+    assert not enrich_fullbody._hero_name_matches("Valesca Machado", "Black Tina", "Tina Black")
+
+
+def test_hero_name_name_path_is_unchanged():
+    # The nickname only ADDS a way in; the name rules stay exactly as they were.
+    assert enrich_fullbody._hero_name_matches("Jose Aldo", None, "Jose Aldo Junior")
+    assert enrich_fullbody._hero_name_matches("Weili Zhang", "Magnum", "Zhang Weili")
+    assert not enrich_fullbody._hero_name_matches("Joe Smith", "Tina Black", "John Smith")
+
+
+def test_page_identity_verified_accepts_exact_nickname():
+    data = AthleteData(full_body_url="https://x.png", page_name="Tina Black")
+    assert enrich_fullbody._page_identity_verified(
+        "Valesca Machado", data, False, nickname="Tina Black"
+    )
+    assert not enrich_fullbody._page_identity_verified("Joe Smith", data, False, nickname=None)
+    assert not enrich_fullbody._page_identity_verified(
+        "Valesca Machado", data, False, nickname="Black"
+    )
+
+
+def test_page_identity_verified_without_page_name_still_depends_only_on_confirmation():
+    anon = AthleteData(full_body_url="https://x.png", page_name=None)
+    assert enrich_fullbody._page_identity_verified("Valesca Machado", anon, True, nickname="Tina Black")
+    assert not enrich_fullbody._page_identity_verified(
+        "Valesca Machado", anon, False, nickname="Tina Black"
+    )
+
+
+def test_backfill_accepts_page_rendering_the_fighters_nickname(fakedb):
+    # Valesca Machado is published under her nickname; a fighter WITHOUT that
+    # nickname landing on the same hero name is still a mismatch.
+    rows = [(9132, "Valesca Machado", "Tina Black", False), (2, "Joe Smith", None, False)]
+    conn = fakedb.Connection(_responder(update_result=[(1,)], target_rows=rows))
+    counts = enrich_fullbody.backfill(
+        conn,
+        dry_run=False,
+        resolver=lambda _s, _n: AthleteData(full_body_url="https://x.png", page_name="Tina Black"),
+        sleeper=lambda _s: None,
+    )
+    assert counts["resolved"] == 1
+    assert counts["name_mismatch"] == 1
+    assert counts["updated"] == 1
+    updates = [
+        params for cur in conn.cursors for sql, params in cur.executed if "UPDATE" in sql.upper()
+    ]
+    assert len(updates) == 1
+    assert 9132 in updates[0]
+
+
+def test_backfill_counts_and_logs_every_acceptance_by_nickname(fakedb, caplog):
+    # The nickname path is looser than the old guard, so every page it lets in
+    # leaves a trace: its own counter plus an INFO line with both names. A page
+    # accepted by NAME never counts there.
+    rows = [(9132, "Valesca Machado", "Tina Black", False), (1, "Marlon Vera", "Chito", True)]
+    conn = fakedb.Connection(_responder(update_result=[(1,)], target_rows=rows))
+    hero = {"Valesca Machado": "Tina Black", "Marlon Vera": "Marlon Vera"}
+    with caplog.at_level("INFO", logger="src.scrapers.enrich_fullbody"):
+        counts = enrich_fullbody.backfill(
+            conn,
+            dry_run=True,
+            resolver=lambda _s, name: AthleteData(full_body_url="https://x.png", page_name=hero[name]),
+            sleeper=lambda _s: None,
+        )
+    assert counts["resolved"] == 2
+    assert counts["nickname_match"] == 1
+    traces = [
+        r.getMessage() for r in caplog.records if r.getMessage().startswith("Accepted by nickname")
+    ]
+    assert len(traces) == 1
+    assert "id=9132" in traces[0]
+    assert "'Tina Black'" in traces[0]
+
+
 def test_backfill_skips_and_counts_name_mismatch_without_writing(fakedb):
     # Guessed slug (ufc_confirmed=False) landing on a namesake's page: the hero
     # name disagrees with the DB name -> skip, count, and never touch the DB.
-    rows = [(1, "Joe Smith", False)]
+    rows = [(1, "Joe Smith", None, False)]
     conn = fakedb.Connection(_responder(update_result=[(1,)], target_rows=rows))
     homonym = lambda _s, _n: AthleteData(  # noqa: E731
         full_body_url="https://www.ufc.com/images/styles/athlete_bio_full_body/s3/SMITH_JOHN.png",
@@ -516,7 +674,7 @@ def test_backfill_skips_and_counts_name_mismatch_without_writing(fakedb):
 def test_backfill_guard_applies_even_to_confirmed_fighters(fakedb):
     # The guard is free (the HTML is already in memory), so it also protects
     # confirmed fighters against slug redirects landing on someone else's page.
-    rows = [(1, "Joe Smith", True)]
+    rows = [(1, "Joe Smith", None, True)]
     conn = fakedb.Connection(_responder(update_result=[(1,)], target_rows=rows))
     counts = enrich_fullbody.backfill(
         conn,
@@ -529,7 +687,7 @@ def test_backfill_guard_applies_even_to_confirmed_fighters(fakedb):
 
 
 def test_backfill_accepts_guessed_slug_when_page_name_has_extra_token(fakedb):
-    rows = [(1, "Jose Aldo", False)]
+    rows = [(1, "Jose Aldo", None, False)]
     conn = fakedb.Connection(_responder(update_result=[(1,)], target_rows=rows))
     counts = enrich_fullbody.backfill(
         conn,
@@ -545,7 +703,7 @@ def test_backfill_accepts_guessed_slug_when_page_name_has_extra_token(fakedb):
 def test_backfill_missing_page_name_trusts_only_confirmed_fighters(fakedb):
     # A page without hero-profile__name cannot be verified: proceed only for
     # fighters whose ufc.com headshot already proved the page is theirs.
-    rows = [(1, "Marlon Vera", True), (2, "Conor McGregor", False)]
+    rows = [(1, "Marlon Vera", None, True), (2, "Conor McGregor", "The Notorious", False)]
     conn = fakedb.Connection(_responder(update_result=[(1,)], target_rows=rows))
     counts = enrich_fullbody.backfill(
         conn,

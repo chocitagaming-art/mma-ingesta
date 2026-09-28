@@ -18,6 +18,7 @@ from src.scrapers.enrich_facts import (
     parse_fighter_facts,
     parse_fighter_qa,
 )
+from src.scrapers.enrich_fullbody import _unique_nickname_sql
 from src.scrapers.repositories.fighters import update_fighter_facts
 
 # ------------------------------------------------------------------- fixtures
@@ -200,13 +201,34 @@ def test_parse_qa_condit_style_label_headers_stay_separate_pairs():
 
 def test_identity_guard_matches_and_rejects():
     page = FactsPage(facts=[], qa=[], page_name="Joel Alvarez")
-    assert _identity_verified("Joel Álvarez", page, ufc_confirmed=False)
+    assert _identity_verified("Joel Álvarez", page, ufc_confirmed=False, nickname=None)
     other = FactsPage(facts=[], qa=[], page_name="Bruno Silva")
-    assert not _identity_verified("Joel Álvarez", other, ufc_confirmed=False)
+    assert not _identity_verified("Joel Álvarez", other, ufc_confirmed=False, nickname=None)
     # No hero name: only trusted when the headshot already proved the page.
     anon = FactsPage(facts=[], qa=[], page_name=None)
-    assert _identity_verified("Joel Álvarez", anon, ufc_confirmed=True)
-    assert not _identity_verified("Joel Álvarez", anon, ufc_confirmed=False)
+    assert _identity_verified("Joel Álvarez", anon, ufc_confirmed=True, nickname=None)
+    assert not _identity_verified("Joel Álvarez", anon, ufc_confirmed=False, nickname=None)
+
+
+def test_identity_guard_accepts_hero_name_equal_to_nickname():
+    # Caso real fighters.id=9132: ufc.com pinta 'Tina Black' en la página
+    # canónica de Valesca Machado. Apodo exacto -> verificada; nada más laxo.
+    page = FactsPage(facts=["x"], qa=[], page_name="Tina Black")
+    assert _identity_verified("Valesca Machado", page, ufc_confirmed=False, nickname="Tina Black")
+    assert _identity_verified("Valesca Machado", page, ufc_confirmed=False, nickname="Tína BLACK")
+    assert not _identity_verified("Joe Smith", page, ufc_confirmed=False, nickname=None)
+    assert not _identity_verified("Valesca Machado", page, ufc_confirmed=False, nickname="Black")
+    assert not _identity_verified(
+        "Valesca Machado", page, ufc_confirmed=False, nickname="Tina Black Jr"
+    )
+
+
+def test_identity_guard_without_page_name_ignores_nickname():
+    anon = FactsPage(facts=["x"], qa=[], page_name=None)
+    assert _identity_verified("Valesca Machado", anon, ufc_confirmed=True, nickname="Tina Black")
+    assert not _identity_verified(
+        "Valesca Machado", anon, ufc_confirmed=False, nickname="Tina Black"
+    )
 
 
 # ----------------------------------------------------------- translation shape
@@ -219,12 +241,14 @@ def _fake_translator(facts, qa):
     )
 
 
-def _responder(update_result=None):
+_JOEL = (1, "Joel Alvarez", None, False)  # (id, name, nickname, ufc_confirmed)
+
+
+def _responder(update_result=None, target=_JOEL):
     def responder(sql, params=None):
         upper = sql.upper()
         if upper.strip().startswith("SELECT"):
-            # One target: (id, name, ufc_confirmed)
-            return [(1, "Joel Alvarez", False)]
+            return [target]
         if "UPDATE" in upper:
             return update_result or []
         return []
@@ -252,6 +276,7 @@ def test_backfill_writes_translated_content_and_commits(fakedb):
         sleeper=lambda seconds: None,
     )
     assert counts["updated"] == 1
+    assert counts["nickname_match"] == 0  # accepted by NAME
     updates = fakedb.mutating_statements(conn)
     assert len(updates) == 1
     assert "COALESCE(fighter_facts, %s::jsonb)" in updates[0]
@@ -314,6 +339,29 @@ def test_backfill_name_mismatch_never_writes(fakedb):
     assert fakedb.mutating_statements(conn) == []
 
 
+def test_backfill_writes_facts_for_fighter_published_under_nickname(fakedb, caplog):
+    target = (9132, "Valesca Machado", "Tina Black", False)
+    conn = fakedb.Connection(_responder(update_result=[(1,)], target=target))
+    with caplog.at_level("INFO", logger="src.scrapers.enrich_facts"):
+        counts = enrich_facts.backfill(
+            conn,
+            translator=_fake_translator,
+            resolver=lambda session, name: FactsPage(
+                facts=["Pro since 2016"], qa=[], page_name="Tina Black"
+            ),
+            sleeper=lambda seconds: None,
+        )
+    assert counts["name_mismatch"] == 0
+    assert counts["updated"] == 1
+    assert len(fakedb.mutating_statements(conn)) == 1
+    # La vía del apodo es más laxa: siempre deja rastro (contador + INFO).
+    assert counts["nickname_match"] == 1
+    traces = [
+        r.getMessage() for r in caplog.records if r.getMessage().startswith("Accepted by nickname")
+    ]
+    assert len(traces) == 1 and "id=9132" in traces[0] and "'Tina Black'" in traces[0]
+
+
 def test_backfill_translation_failure_skips_row(fakedb):
     conn = fakedb.Connection(_responder(update_result=[(1,)]))
 
@@ -342,6 +390,28 @@ def test_target_selection_is_or_and_homonym_safe(fakedb):
         sql = " ".join(cur.executed[0][0].split())
         assert "(f.fighter_facts IS NULL OR f.fighter_qa IS NULL)" in sql
         assert "lower(dup.name) = lower(f.name)" in sql
+
+
+def test_target_selection_brings_the_nickname_in_both_scopes(fakedb):
+    # Las filas se desempaquetan por POSICIÓN (id, name, nickname, ufc_confirmed):
+    # se fija la lista exacta del SELECT para que una columna cambiada de sitio
+    # falle aquí y no en producción.
+    nickname = _unique_nickname_sql("f.nickname")
+    columns = f"f.id, f.name, {nickname}, (f.headshot_url ILIKE %s) AS ufc_confirmed"
+    expected = {
+        True: f"SELECT {columns} FROM fighters f WHERE ",
+        False: f"SELECT DISTINCT {columns} FROM fighters f JOIN fights fi ",
+    }
+    rows = [(9132, "Valesca Machado", "Tina Black", False), (1, "Joel Alvarez", "", True)]
+    for all_scope in (True, False):
+        conn = fakedb.Connection(lambda sql, params=None: rows)
+        targets = enrich_facts._get_target_fighters(conn, all_scope=all_scope)
+        flat = " ".join(conn.cursors[0].executed[0][0].split())
+        assert flat.startswith(expected[all_scope])
+        assert targets == [
+            (9132, "Valesca Machado", "Tina Black", False),
+            (1, "Joel Alvarez", None, True),
+        ]
 
 
 # ------------------------------------------------------------------ repository
