@@ -16,6 +16,7 @@ from src.scrapers.enrich_athlete_stats import (
     _identity_verified,
     parse_finish_stats,
 )
+from src.scrapers.enrich_fullbody import _unique_nickname_sql
 from src.scrapers.repositories.fighters import update_fighter_finish_stats
 
 # ------------------------------------------------------------------- fixtures
@@ -85,23 +86,47 @@ def test_parse_stats_missing_one_stat_defaults_to_zero():
 
 def test_identity_guard_matches_and_rejects():
     page = StatsPage(stats=FinishStats(2, 1, 2), page_name="Anna Melisano")
-    assert _identity_verified("Anna Melisano", page, ufc_confirmed=False)
+    assert _identity_verified("Anna Melisano", page, ufc_confirmed=False, nickname=None)
     other = StatsPage(stats=FinishStats(2, 1, 2), page_name="Somebody Else Entirely")
-    assert not _identity_verified("Anna Melisano", other, ufc_confirmed=False)
+    assert not _identity_verified("Anna Melisano", other, ufc_confirmed=False, nickname=None)
     # No hero name: only trusted when the headshot already proved the page.
     anon = StatsPage(stats=FinishStats(2, 1, 2), page_name=None)
-    assert _identity_verified("Anna Melisano", anon, ufc_confirmed=True)
-    assert not _identity_verified("Anna Melisano", anon, ufc_confirmed=False)
+    assert _identity_verified("Anna Melisano", anon, ufc_confirmed=True, nickname=None)
+    assert not _identity_verified("Anna Melisano", anon, ufc_confirmed=False, nickname=None)
+
+
+def test_identity_guard_accepts_hero_name_equal_to_nickname():
+    # Real case fighters.id=9132: ufc.com renders 'Tina Black' on Valesca
+    # Machado's canonical page. Exact nickname -> verified; anything looser not.
+    page = StatsPage(stats=FinishStats(1, 0, 1), page_name="Tina Black")
+    assert _identity_verified("Valesca Machado", page, ufc_confirmed=False, nickname="Tina Black")
+    assert _identity_verified("Valesca Machado", page, ufc_confirmed=False, nickname="Tína BLACK")
+    assert not _identity_verified("Joe Smith", page, ufc_confirmed=False, nickname=None)
+    assert not _identity_verified("Valesca Machado", page, ufc_confirmed=False, nickname="Black")
+    assert not _identity_verified(
+        "Valesca Machado", page, ufc_confirmed=False, nickname="Tina Black Jr"
+    )
+
+
+def test_identity_guard_without_page_name_ignores_nickname():
+    anon = StatsPage(stats=FinishStats(1, 0, 1), page_name=None)
+    assert _identity_verified("Valesca Machado", anon, ufc_confirmed=True, nickname="Tina Black")
+    assert not _identity_verified(
+        "Valesca Machado", anon, ufc_confirmed=False, nickname="Tina Black"
+    )
 
 
 # ------------------------------------------------------------------- backfill
 
 
-def _responder(update_result=None):
+_ANNA = (1, "Anna Melisano", None, False)  # (id, name, nickname, ufc_confirmed)
+
+
+def _responder(update_result=None, target=_ANNA):
     def responder(sql, params=None):
         upper = sql.upper()
         if upper.strip().startswith("SELECT"):
-            return [(1, "Anna Melisano", False)]  # one target: (id, name, ufc_confirmed)
+            return [target]
         if "UPDATE" in upper:
             return update_result or []
         return []
@@ -121,6 +146,7 @@ def test_backfill_writes_stats_and_commits(fakedb):
         sleeper=lambda seconds: None,
     )
     assert counts["updated"] == 1
+    assert counts["nickname_match"] == 0  # accepted by NAME
     updates = fakedb.mutating_statements(conn)
     assert len(updates) == 1
     assert "wins_by_ko = %s" in updates[0]
@@ -166,6 +192,26 @@ def test_backfill_name_mismatch_never_writes(fakedb):
     assert fakedb.mutating_statements(conn) == []
 
 
+def test_backfill_writes_stats_for_fighter_published_under_nickname(fakedb, caplog):
+    target = (9132, "Valesca Machado", "Tina Black", False)
+    conn = fakedb.Connection(_responder(update_result=[(1,)], target=target))
+    with caplog.at_level("INFO", logger="src.scrapers.enrich_athlete_stats"):
+        counts = enrich_athlete_stats.backfill(
+            conn,
+            resolver=lambda session, name: _page(page_name="Tina Black"),
+            sleeper=lambda seconds: None,
+        )
+    assert counts["name_mismatch"] == 0
+    assert counts["updated"] == 1
+    assert len(fakedb.mutating_statements(conn)) == 1
+    # The looser nickname path always leaves a trace: counter + INFO line.
+    assert counts["nickname_match"] == 1
+    traces = [
+        r.getMessage() for r in caplog.records if r.getMessage().startswith("Accepted by nickname")
+    ]
+    assert len(traces) == 1 and "id=9132" in traces[0] and "'Tina Black'" in traces[0]
+
+
 def test_backfill_unresolved_page_counts(fakedb):
     conn = fakedb.Connection(_responder())
     counts = enrich_athlete_stats.backfill(
@@ -189,6 +235,27 @@ def test_target_selection_scopes_and_homonym_safe(fakedb):
         assert "wins_by_ko IS NULL" not in sql
     upcoming_sql = " ".join(conn.cursors[1].executed[0][0].split())
     assert "e.status = 'upcoming'" in upcoming_sql
+
+
+def test_target_selection_brings_the_nickname_in_both_scopes(fakedb):
+    # Rows are unpacked by POSITION as (id, name, nickname, ufc_confirmed): pin
+    # the exact SELECT list so a reordered column fails here, not in production.
+    nickname = _unique_nickname_sql("f.nickname")
+    columns = f"f.id, f.name, {nickname}, (f.headshot_url ILIKE %s) AS ufc_confirmed"
+    expected = {
+        True: f"SELECT {columns} FROM fighters f WHERE ",
+        False: f"SELECT DISTINCT {columns} FROM fighters f JOIN fights fi ",
+    }
+    rows = [(9132, "Valesca Machado", "Tina Black", False), (1, "Anna Melisano", "", True)]
+    for all_scope in (True, False):
+        conn = fakedb.Connection(lambda sql, params=None: rows)
+        targets = enrich_athlete_stats._get_target_fighters(conn, all_scope=all_scope)
+        flat = " ".join(conn.cursors[0].executed[0][0].split())
+        assert flat.startswith(expected[all_scope])
+        assert targets == [
+            (9132, "Valesca Machado", "Tina Black", False),
+            (1, "Anna Melisano", None, True),
+        ]
 
 
 def test_target_selection_supports_limit_and_offset(fakedb):
