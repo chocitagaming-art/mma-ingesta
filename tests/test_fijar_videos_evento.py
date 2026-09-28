@@ -13,7 +13,10 @@ script que escribe a pelo en produccion se prueba ENTERO o no se prueba:
   5. sin --aplicar NO se escribe ni una linea;
   6. el id y su titulo viajan juntos: id nuevo con titulo viejo es el rotulo
      que miente, y la migracion 029 existe para cerrarlo;
-  7. correrlo dos veces no escribe la segunda.
+  7. correrlo dos veces no escribe la segunda;
+  8. el directo (migracion 027) tiene tres palancas: --directo lo fija con su
+     titulo real, --quitar-directo lo deja a NULL y --ocultar-directo escribe
+     el interruptor 'off' que apaga la web sin desplegar.
 
 NI RED NI POSTGRES. El `fetch` se inyecta y la conexion se falsea con el
 `fakedb` de conftest, que anota el SQL que se habria ejecutado. La trampa que
@@ -49,6 +52,14 @@ SHORT_SEGUNDOS = 17
 
 CAREO_VIEJO_LEGITIMO = "qpjPPGtcS3I"  # "Noche UFC: Weigh-In Faceoffs", 2023
 
+# El directo de ejemplo de la migracion 027 (UFC 330, evento 1088, canal
+# ufcespanol). Titulo resuelto por oembed el 28-sep-2026. Los 0 segundos son lo
+# que da /watch MIENTRAS emite o esta programado; hoy, ya terminado, da 3600.
+# Aqui se simula la noche de la velada, que es cuando se usa la palanca.
+DIRECTO = "qM-h-OudTqM"
+DIRECTO_TITULO = "UFC 330 | Previa del Evento ¡EN VIVO!"
+DIRECTO_SEGUNDOS_EN_EMISION = 0
+
 EVENTO = 1090
 
 TITULOS = {
@@ -56,12 +67,14 @@ TITULOS = {
     PESAJE: PESAJE_TITULO,
     SHORT: SHORT_TITULO,
     CAREO_VIEJO_LEGITIMO: "Noche UFC: Weigh-In Faceoffs",
+    DIRECTO: DIRECTO_TITULO,
 }
 DURACIONES = {
     CAREO: CAREO_SEGUNDOS,
     PESAJE: PESAJE_SEGUNDOS,
     SHORT: SHORT_SEGUNDOS,
     CAREO_VIEJO_LEGITIMO: 127,  # 2:07, medido contra YouTube el 18-sep-2026
+    DIRECTO: DIRECTO_SEGUNDOS_EN_EMISION,
 }
 
 
@@ -123,6 +136,8 @@ FILA_1090_TRAS_EL_ARREGLO_A_MANO = {
     "faceoff_video_title": None,  # pero SIN titulo: eso es lo que falta
     "weighin_video_id": None,
     "weighin_video_title": None,
+    "live_video_id": None,
+    "live_video_title": None,
 }
 
 
@@ -137,17 +152,27 @@ class BaseFalsa:
     def __init__(self, fila: dict | None = None, columnas_presentes=None):
         self.fila = dict(fila) if fila is not None else None
         self.columnas = (
-            list(fijar.COLUMNS_FROM_MIGRATION_029)
+            list(fijar.REQUIRED_COLUMNS)
             if columnas_presentes is None
             else list(columnas_presentes)
         )
         self.updates: list[tuple[str, tuple]] = []
+        self.lecturas = 0
+        # Lo que `ejecutar` apunta de cada pasada: las conexiones abiertas (para
+        # contar los commit) y los POST a /api/revalidate (con que secreto).
+        self.conexiones: list = []
+        self.revalidaciones: list[str] = []
+
+    @property
+    def commits(self) -> int:
+        return sum(conn.commits for conn in self.conexiones)
 
     def __call__(self, sql, params=None):
         plano = " ".join(sql.split()).lower()
         if "information_schema.columns" in plano:
             return [(c,) for c in self.columnas]
         if plano.startswith("select") and "from events" in plano:
+            self.lecturas += 1
             if self.fila is None:
                 return []
             return [tuple(self.fila[c] for c in fijar.EVENT_COLUMNS)]
@@ -165,9 +190,20 @@ class BaseFalsa:
 
 @pytest.fixture
 def ejecutar(monkeypatch, fakedb):
-    """Corre `main()` sin red y sin Postgres. Devuelve (codigo, base, youtube)."""
+    """Corre `main()` sin red y sin Postgres. Devuelve (codigo, base, youtube).
 
-    def correr(*argv, base: BaseFalsa | None = None, youtube: YouTubeFalso | None = None):
+    Tampoco toca la WEB: el POST a /api/revalidate se sustituye por uno que
+    solo apunta en `base.revalidaciones`, y el secreto no se lee del .env de
+    verdad (por defecto no hay; `secreto=` lo pone).
+    """
+
+    def correr(
+        *argv,
+        base: BaseFalsa | None = None,
+        youtube: YouTubeFalso | None = None,
+        secreto: str | None = None,
+        http_revalidate: int | None = 200,
+    ):
         base = base if base is not None else BaseFalsa(FILA_1090_TRAS_EL_ARREGLO_A_MANO)
         youtube = youtube if youtube is not None else YouTubeFalso()
         conexiones: list = []
@@ -175,11 +211,18 @@ def ejecutar(monkeypatch, fakedb):
         def conectar(_dsn):
             conn = fakedb.Connection(base)
             conexiones.append(conn)
+            base.conexiones.append(conn)
             return conn
+
+        def revalidar(secret):
+            base.revalidaciones.append(secret)
+            return http_revalidate
 
         monkeypatch.setattr(fijar, "_dsn", lambda: "postgresql://falsa/no-existe")
         monkeypatch.setattr(fijar, "_connect", conectar)
         monkeypatch.setattr(fijar, "fetch_text", youtube)
+        monkeypatch.setattr(fijar, "revalidate_secret", lambda: secreto)
+        monkeypatch.setattr(fijar, "post_revalidate", revalidar)
 
         codigo = fijar.main(list(argv))
         escrituras = [
@@ -583,3 +626,505 @@ def test_un_titulo_con_emoji_no_rompe_el_informe(ejecutar, capsys):
         TITULOS[SHORT] = SHORT_TITULO
 
     assert titulo in salida
+
+
+# --- 10. El directo: fijarlo, quitarlo y apagarlo ------------------------
+FILA_CON_DIRECTO_FIJADO = dict(
+    FILA_1090_TRAS_EL_ARREGLO_A_MANO,
+    live_video_id=DIRECTO,
+    live_video_title=DIRECTO_TITULO,
+)
+
+URL_WATCH = "https://www.youtube.com/watch?v=qM-h-OudTqM"
+URL_CORTA = "https://youtu.be/qM-h-OudTqM?si=Xy12_abcDEF"  # boton Compartir
+URL_LIVE = "https://www.youtube.com/live/qM-h-OudTqM?si=Xy12_abcDEF"
+
+
+def columnas_del_update(sql: str) -> set[str]:
+    """Las columnas del SET de un UPDATE: para ver que viajan en la MISMA sentencia."""
+    return {
+        trozo.split("=")[0].strip()
+        for trozo in sql.split("SET", 1)[1].split("WHERE")[0].split(",")
+    }
+
+
+def test_directo_escribe_id_y_titulo_a_la_vez(ejecutar):
+    codigo, base, _youtube, escrituras = ejecutar(
+        "--evento", str(EVENTO), "--directo", DIRECTO, "--aplicar"
+    )
+
+    assert codigo == 0
+    assert len(escrituras) == 1, "id y titulo en UN solo UPDATE, no en dos"
+    sql, params = base.updates[0]
+    assert columnas_del_update(sql) == {"live_video_id", "live_video_title"}, (
+        "el directo no puede tocar careo ni pesaje"
+    )
+    assert params[-1] == EVENTO
+    assert base.fila["live_video_id"] == DIRECTO
+    assert base.fila["live_video_title"] == DIRECTO_TITULO, "el titulo sale del oembed"
+
+
+def test_directo_con_lengthseconds_0_no_avisa_de_short(ejecutar, capsys):
+    """Un directo en emision da 0 s: avisar ahi seria avisar SIEMPRE."""
+    info = fijar.resolve_video(DIRECTO, fetch=YouTubeFalso())
+    assert info.length_seconds == 0 and info.looks_like_a_short, (
+        "el 0 tiene que llegar: lo que calla el aviso es el acto, no un dato perdido"
+    )
+
+    codigo, _base, _youtube, _escrituras = ejecutar(
+        "--evento", str(EVENTO), "--directo", DIRECTO
+    )
+
+    salida = capsys.readouterr().out
+    assert codigo == 0
+    assert "SHORT" not in salida.upper()
+    assert "AVISO GORDO" not in salida
+
+
+def test_los_mismos_0_segundos_en_un_careo_si_avisan(ejecutar, capsys):
+    """La otra mitad: el silencio es SOLO del directo, el aviso sigue vivo."""
+    ejecutar("--evento", str(EVENTO), "--careo", DIRECTO)
+
+    assert "SHORT" in capsys.readouterr().out.upper()
+
+
+def test_quitar_directo_pone_los_dos_a_null(ejecutar):
+    codigo, base, youtube, escrituras = ejecutar(
+        "--evento",
+        str(EVENTO),
+        "--quitar-directo",
+        "--aplicar",
+        base=BaseFalsa(FILA_CON_DIRECTO_FIJADO),
+    )
+
+    assert codigo == 0
+    assert len(escrituras) == 1
+    assert columnas_del_update(base.updates[0][0]) == {
+        "live_video_id",
+        "live_video_title",
+    }
+    assert base.fila["live_video_id"] is None
+    assert base.fila["live_video_title"] is None
+    assert youtube.pedidas == [], "quitar no es un video: no hay nada que preguntar"
+
+
+def test_ocultar_directo_escribe_off_y_null(ejecutar):
+    """El interruptor: 'off' en el id apaga lo automatico de la web sin desplegar."""
+    codigo, base, youtube, escrituras = ejecutar(
+        "--evento",
+        str(EVENTO),
+        "--ocultar-directo",
+        "--aplicar",
+        base=BaseFalsa(FILA_CON_DIRECTO_FIJADO),
+    )
+
+    assert fijar.LIVE_VIDEO_OFF == "off", "es el literal que compara la web"
+    assert codigo == 0
+    assert len(escrituras) == 1
+    assert columnas_del_update(base.updates[0][0]) == {
+        "live_video_id",
+        "live_video_title",
+    }
+    assert base.fila["live_video_id"] == "off"
+    assert base.fila["live_video_title"] is None, "el titulo viejo no se queda"
+    assert youtube.pedidas == []
+
+
+def test_ocultar_directo_sin_aplicar_no_escribe_nada(ejecutar, capsys):
+    codigo, base, _youtube, escrituras = ejecutar(
+        "--evento",
+        str(EVENTO),
+        "--ocultar-directo",
+        base=BaseFalsa(FILA_CON_DIRECTO_FIJADO),
+    )
+
+    assert codigo == 0
+    assert escrituras == []
+    assert base.fila["live_video_id"] == DIRECTO
+    assert "SIMULACION" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "palanca",
+    [("--directo", DIRECTO), ("--quitar-directo",), ("--ocultar-directo",)],
+    ids=["directo", "quitar", "ocultar"],
+)
+def test_si_falta_la_migracion_027_aborta_diciendolo(ejecutar, capsys, palanca):
+    """Aborta ANTES de leer el evento, y nombra solo la migracion que falta."""
+    base = BaseFalsa(
+        FILA_CON_DIRECTO_FIJADO, columnas_presentes=fijar.COLUMNS_FROM_MIGRATION_029
+    )
+
+    codigo, base, _youtube, escrituras = ejecutar(
+        "--evento", str(EVENTO), *palanca, "--aplicar", base=base
+    )
+
+    salida = capsys.readouterr().out
+    assert codigo == 1
+    assert escrituras == []
+    assert base.lecturas == 0, "no se lee una fila con columnas que no existen"
+    assert "027_events_live_video.sql" in salida
+    assert "029" not in salida, "la 029 esta aplicada: nombrarla despista"
+
+
+@pytest.mark.parametrize(
+    "palanca, fila_inicial",
+    [
+        (("--directo", DIRECTO), FILA_1090_TRAS_EL_ARREGLO_A_MANO),
+        (("--directo", URL_LIVE), FILA_1090_TRAS_EL_ARREGLO_A_MANO),
+        (("--quitar-directo",), FILA_CON_DIRECTO_FIJADO),
+        (("--ocultar-directo",), FILA_CON_DIRECTO_FIJADO),
+    ],
+    ids=["directo", "directo-por-url", "quitar", "ocultar"],
+)
+def test_cada_palanca_del_directo_es_idempotente(ejecutar, palanca, fila_inicial):
+    argv = ("--evento", str(EVENTO), *palanca, "--aplicar")
+    _codigo, base, _youtube, primeras = ejecutar(*argv, base=BaseFalsa(fila_inicial))
+    assert len(primeras) == 1, "si la primera no escribe, esto no prueba nada"
+
+    codigo, _base, _youtube, segundas = ejecutar(*argv, base=base)
+
+    assert codigo == 0
+    assert segundas == [], f"la segunda pasada volvio a escribir: {segundas}"
+
+
+@pytest.mark.parametrize(
+    "pegado",
+    [
+        URL_WATCH,
+        "https://www.youtube.com/watch?v=qM-h-OudTqM&t=120s&ab_channel=ufcespanol",
+        "https://www.youtube.com/watch?app=desktop&v=qM-h-OudTqM",  # v no va primero
+        "https://m.youtube.com/watch?v=qM-h-OudTqM",
+        "youtube.com/watch?v=qM-h-OudTqM",  # sin esquema
+        "https://youtu.be/qM-h-OudTqM",
+        URL_CORTA,
+        "https://www.youtube.com/live/qM-h-OudTqM",
+        URL_LIVE,
+        "  qM-h-OudTqM  ",  # el id pelado, con los espacios del copiar y pegar
+    ],
+)
+def test_del_directo_se_saca_el_id_de_la_url(pegado):
+    assert fijar.extract_video_id(pegado) == DIRECTO
+
+
+@pytest.mark.parametrize(
+    "pegado",
+    [
+        None,
+        "",
+        "off",
+        # La pagina en vivo del CANAL no es UN video: el sabado que viene
+        # apuntaria a otro. Por eso no se acepta.
+        "https://www.youtube.com/@ufcespanol/live",
+        "https://www.youtube.com/watch?v=qM-h-OudTq",  # id de 10
+        "https://www.youtube.com/watch?list=PL1234567890",  # sin v
+        "https://www.youtube.com/live/",
+        "https://www.youtube.com/shorts/qM-h-OudTqM",  # un short nunca es el directo
+        "https://vimeo.com/live/qM-h-OudTqM",  # otro sitio, aunque el id encaje
+        "https://[youtube.com/watch?v=qM-h-OudTqM",  # host roto: urlsplit revienta
+    ],
+)
+def test_lo_que_no_es_una_url_de_video_de_youtube_no_da_id(pegado):
+    assert fijar.extract_video_id(pegado) is None
+
+
+@pytest.mark.parametrize(
+    "url", [URL_WATCH, URL_CORTA, URL_LIVE], ids=["watch", "youtu.be", "live"]
+)
+def test_directo_con_url_escribe_el_id_pelado(ejecutar, url):
+    codigo, base, youtube, escrituras = ejecutar(
+        "--evento", str(EVENTO), "--directo", url, "--aplicar"
+    )
+
+    assert codigo == 0
+    assert len(escrituras) == 1
+    assert base.fila["live_video_id"] == DIRECTO, "en la base va el id, nunca la URL"
+    assert base.fila["live_video_title"] == DIRECTO_TITULO
+    assert youtube.pedidas and all(DIRECTO in pedida for pedida in youtube.pedidas)
+
+
+def test_directo_con_la_url_del_canal_aborta_sin_pedir_nada(ejecutar):
+    codigo, base, youtube, escrituras = ejecutar(
+        "--evento",
+        str(EVENTO),
+        "--directo",
+        "https://www.youtube.com/@ufcespanol/live",
+        "--aplicar",
+    )
+
+    assert codigo == 1
+    assert escrituras == []
+    assert youtube.pedidas == []
+    assert base.lecturas == 0
+
+
+def test_directo_off_no_cuela_y_senala_el_interruptor(ejecutar, capsys):
+    """'off' solo lo escribe --ocultar-directo: por --directo no pasa la forma."""
+    codigo, _base, youtube, escrituras = ejecutar(
+        "--evento", str(EVENTO), "--directo", "off", "--aplicar"
+    )
+
+    assert codigo == 1
+    assert escrituras == []
+    assert youtube.pedidas == []
+    assert "--ocultar-directo" in capsys.readouterr().out
+
+
+def test_careo_y_pesaje_siguen_sin_aceptar_urls(ejecutar):
+    """La URL solo se acepta en el directo; el careo sigue como estaba."""
+    codigo, _base, youtube, escrituras = ejecutar(
+        "--evento", str(EVENTO), "--careo", fijar.watch_url(CAREO), "--aplicar"
+    )
+
+    assert codigo == 1
+    assert escrituras == []
+    assert youtube.pedidas == []
+
+
+@pytest.mark.parametrize(
+    "juntas",
+    [
+        ["--directo", DIRECTO, "--quitar-directo"],
+        ["--directo", DIRECTO, "--ocultar-directo"],
+        ["--quitar-directo", "--ocultar-directo"],
+    ],
+)
+def test_las_palancas_del_directo_no_se_combinan(juntas):
+    with pytest.raises(SystemExit):
+        fijar.build_parser().parse_args(["--evento", "1090", *juntas])
+
+
+def test_por_defecto_el_directo_no_se_toca():
+    args = fijar.build_parser().parse_args(["--evento", "1090", "--careo", CAREO])
+
+    assert args.directo is None
+    assert args.quitar_directo is False
+    assert args.ocultar_directo is False
+
+
+def test_el_help_explica_las_tres_palancas():
+    ayuda = " ".join(fijar.build_parser().format_help().split())
+
+    for palanca in ("--directo", "--quitar-directo", "--ocultar-directo"):
+        assert palanca in ayuda
+    assert "'off'" in ayuda, "el interruptor tiene que verse en el --help"
+    assert "desplegar" in ayuda
+    assert "youtu.be" in ayuda and "/live/" in ayuda
+
+
+# --- 11. Un directo sin titulo no se escribe, ni con --forzar -------------
+def test_directo_sin_titulo_no_se_escribe_ni_con_forzar(ejecutar, capsys):
+    """Forzarlo era un --ocultar-directo disfrazado que ademas decia "ok".
+
+    La web no pinta un directo sin titulo (EventLiveEmbed devuelve null), y
+    como la columna manda, un id a mano sin titulo ademas apaga lo automatico:
+    ni se detecta el directo ni sale UFC TV en la portada.
+    """
+    codigo, base, _youtube, escrituras = ejecutar(
+        "--evento",
+        str(EVENTO),
+        "--directo",
+        DIRECTO,
+        "--aplicar",
+        "--forzar",
+        youtube=YouTubeFalso(sin_oembed={DIRECTO}),
+    )
+
+    salida = capsys.readouterr().out
+    assert codigo == 1
+    assert escrituras == []
+    assert base.commits == 0
+    assert base.fila["live_video_id"] is None
+    assert "--forzar no vale" in salida
+    assert "--ocultar-directo" in salida, "si lo que quiere es apagarlo, que lo diga"
+    assert base.revalidaciones == [], "sin escribir no hay nada que refrescar"
+
+
+def test_directo_sin_titulo_no_recomienda_forzar(ejecutar, capsys):
+    """El ABORTA de careo y pesaje sugiere --forzar; para el directo seria mentir."""
+    codigo, _base, _youtube, escrituras = ejecutar(
+        "--evento",
+        str(EVENTO),
+        "--directo",
+        DIRECTO,
+        "--aplicar",
+        youtube=YouTubeFalso(sin_oembed={DIRECTO}),
+    )
+
+    salida = capsys.readouterr().out
+    assert codigo == 1
+    assert escrituras == []
+    assert "SI se puede escribir con --forzar" not in salida
+
+
+def test_careo_sin_titulo_con_forzar_sigue_escribiendose(ejecutar):
+    """La otra mitad: el careo SI se pinta sin titulo, alli --forzar vale."""
+    codigo, base, _youtube, escrituras = ejecutar(
+        "--evento",
+        str(EVENTO),
+        "--careo",
+        SHORT,
+        "--aplicar",
+        "--forzar",
+        youtube=YouTubeFalso(sin_oembed={SHORT}),
+    )
+
+    assert codigo == 0
+    assert len(escrituras) == 1
+    assert base.fila["faceoff_video_id"] == SHORT
+    assert base.fila["faceoff_video_title"] is None
+
+
+# --- 12. El commit: sin el, el UPDATE se pierde callado -------------------
+@pytest.mark.parametrize(
+    "palanca, fila_inicial",
+    [
+        (("--directo", DIRECTO), FILA_1090_TRAS_EL_ARREGLO_A_MANO),
+        (("--quitar-directo",), FILA_CON_DIRECTO_FIJADO),
+        (("--ocultar-directo",), FILA_CON_DIRECTO_FIJADO),
+        (("--pesaje", PESAJE), FILA_1090_TRAS_EL_ARREGLO_A_MANO),
+    ],
+    ids=["directo", "quitar", "ocultar", "pesaje"],
+)
+def test_con_aplicar_hace_UN_commit_y_sin_aplicar_ninguno(
+    ejecutar, palanca, fila_inicial
+):
+    """psycopg2 no hace autocommit: un UPDATE sin commit desaparece al cerrar.
+
+    El dueno creeria que ha apagado el reproductor y seguiria encendido. El
+    comentario del script lo explica; esto es la red.
+    """
+    _codigo, simulada, _youtube, _escrituras = ejecutar(
+        "--evento", str(EVENTO), *palanca, base=BaseFalsa(fila_inicial)
+    )
+    assert simulada.commits == 0, "la simulacion no confirma nada"
+
+    codigo, base, _youtube, escrituras = ejecutar(
+        "--evento", str(EVENTO), *palanca, "--aplicar", base=BaseFalsa(fila_inicial)
+    )
+    assert codigo == 0
+    assert len(escrituras) == 1
+    assert base.commits == 1, "el UPDATE se escribio pero nadie lo confirmo"
+
+    _codigo, base, _youtube, segundas = ejecutar(
+        "--evento", str(EVENTO), *palanca, "--aplicar", base=base
+    )
+    assert segundas == []
+    assert base.commits == 1, "la pasada idempotente no confirma nada nuevo"
+
+
+# --- 13. La portada: sin desplegar no es al instante ----------------------
+@pytest.mark.parametrize(
+    "palanca, fila_inicial",
+    [
+        (("--directo", DIRECTO), FILA_1090_TRAS_EL_ARREGLO_A_MANO),
+        (("--quitar-directo",), FILA_CON_DIRECTO_FIJADO),
+        (("--ocultar-directo",), FILA_CON_DIRECTO_FIJADO),
+    ],
+    ids=["directo", "quitar", "ocultar"],
+)
+def test_tocar_el_directo_revalida_la_portada_si_hay_secreto(
+    ejecutar, capsys, palanca, fila_inicial
+):
+    """La portada lee la columna de una cache de 30 min: sin esto, el interruptor
+    'off' en plena velada dejaba el video malo media hora mas en la portada."""
+    codigo, base, _youtube, _escrituras = ejecutar(
+        "--evento",
+        str(EVENTO),
+        *palanca,
+        "--aplicar",
+        base=BaseFalsa(fila_inicial),
+        secreto="s3cr3t",
+    )
+
+    assert codigo == 0
+    assert base.revalidaciones == ["s3cr3t"]
+    assert "revalidada" in capsys.readouterr().out
+
+
+def test_sin_secreto_no_llama_y_avisa_del_retraso_con_el_curl(ejecutar, capsys):
+    codigo, base, _youtube, _escrituras = ejecutar(
+        "--evento",
+        str(EVENTO),
+        "--ocultar-directo",
+        "--aplicar",
+        base=BaseFalsa(FILA_CON_DIRECTO_FIJADO),
+    )
+
+    salida = capsys.readouterr().out
+    assert codigo == 0
+    assert base.revalidaciones == []
+    assert "%d min" % fijar.PORTADA_CACHE_MINUTOS in salida
+    assert "curl -X POST " + fijar.REVALIDATE_URL in salida
+
+
+@pytest.mark.parametrize("http", [None, 401, 503], ids=["sin-respuesta", "401", "503"])
+def test_si_la_revalidacion_falla_lo_dice(ejecutar, capsys, http):
+    codigo, base, _youtube, _escrituras = ejecutar(
+        "--evento",
+        str(EVENTO),
+        "--ocultar-directo",
+        "--aplicar",
+        base=BaseFalsa(FILA_CON_DIRECTO_FIJADO),
+        secreto="s3cr3t",
+        http_revalidate=http,
+    )
+
+    salida = capsys.readouterr().out
+    assert codigo == 0, "lo escrito en la base sigue escrito: no es un fallo del script"
+    assert base.revalidaciones == ["s3cr3t"]
+    assert "AVISO" in salida and "revalidada" not in salida
+
+
+def test_careo_simulacion_o_nada_que_cambiar_no_revalidan(ejecutar, capsys):
+    """Revalidar tambien vacia las caches de UFC TV: solo cuando hace falta."""
+    _codigo, pesaje, _youtube, _e = ejecutar(
+        "--evento", str(EVENTO), "--pesaje", PESAJE, "--aplicar", secreto="s3cr3t"
+    )
+    _codigo, simulacion, _youtube, _e = ejecutar(
+        "--evento",
+        str(EVENTO),
+        "--ocultar-directo",
+        base=BaseFalsa(FILA_CON_DIRECTO_FIJADO),
+        secreto="s3cr3t",
+    )
+    ya_apagado = BaseFalsa(
+        dict(FILA_CON_DIRECTO_FIJADO, live_video_id="off", live_video_title=None)
+    )
+    _codigo, idempotente, _youtube, _e = ejecutar(
+        "--evento",
+        str(EVENTO),
+        "--ocultar-directo",
+        "--aplicar",
+        base=ya_apagado,
+        secreto="s3cr3t",
+    )
+
+    assert pesaje.revalidaciones == []
+    assert simulacion.revalidaciones == []
+    assert idempotente.revalidaciones == []
+    assert "PORTADA" not in capsys.readouterr().out
+
+
+def test_el_secreto_sale_del_entorno_o_del_env_y_si_no_hay_es_none(
+    monkeypatch, tmp_path
+):
+    """Sin tocar el .env de verdad: RAIZ apunta a una carpeta temporal."""
+    monkeypatch.setattr(fijar, "RAIZ", str(tmp_path))
+    monkeypatch.delenv("REVALIDATE_SECRET", raising=False)
+    assert fijar.revalidate_secret() is None, "sin .env ni entorno: None"
+
+    (tmp_path / ".env").write_text(
+        'DATABASE_URL=postgresql://x\nREVALIDATE_SECRET="del-env"\n', encoding="utf-8"
+    )
+    assert fijar.revalidate_secret() == "del-env"
+
+    monkeypatch.setenv("REVALIDATE_SECRET", "del-entorno")
+    assert fijar.revalidate_secret() == "del-entorno", "el entorno manda sobre el .env"
+
+
+def test_el_help_avisa_de_la_espera_de_la_portada():
+    ayuda = " ".join(fijar.build_parser().format_help().split())
+
+    assert "REVALIDATE_SECRET" in ayuda
+    assert "%d min" % fijar.PORTADA_CACHE_MINUTOS in ayuda
