@@ -350,6 +350,25 @@ def test_forzar_no_escribe_si_en_ese_pase_ufc_com_da_otro_numero(fakedb, caplog,
     assert f"ufc-332: --forzar-evento esperaba 10 combates y ufc.com da {leidos}" in caplog.text
 
 
+def test_forzar_no_escribe_si_ufc_com_da_mas_de_los_que_se_vieron(fakedb, caplog):
+    """«Exactamente N» vale en los dos sentidos: con MÁS combates que N tampoco.
+
+    El 332 baja de 14 a 10 (la guarda salta: 4 de golpe) y alguien lo fuerza
+    con 9. No cuadra con lo que se vio, así que se retiene como siempre.
+    """
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        conn, counts, escrito = _escribe(
+            fakedb, _evento("ufc-332", 10), activos=14, cancelados_por_ufc=4,
+            forzar={"ufc-332": 9},
+        )
+
+    assert escrito is False
+    assert fakedb.mutating_statements(conn) == []
+    assert counts["cards_guarded"] == 1
+    assert counts["cards_forced"] == 0
+    assert "ufc-332: --forzar-evento esperaba 9 combates y ufc.com da 10" in caplog.text
+
+
 def test_forzar_nunca_escribe_una_cartelera_vacia(fakedb):
     """Ni pidiendolo con 0: una ficha sin combates es el fallo que la guarda para.
 

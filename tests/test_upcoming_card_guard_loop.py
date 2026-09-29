@@ -405,6 +405,8 @@ def test_forzar_no_escribe_el_332_si_su_ficha_esta_caida(pase):
 
     assert counts["events_skipped_detail"] == 1
     assert counts["cards_forced"] == 0
+    assert counts["write_errors"] == 0
+    assert counts["events_written"] == 2
     assert "ufc-332" not in base.eventos_escritos
     assert base.activos("ufc-332") == 14
 
@@ -419,4 +421,6 @@ def test_forzar_un_slug_que_no_esta_en_el_listado_lo_avisa_y_no_fuerza_nada(pase
     assert "--forzar-evento ufc-999" in caplog.text
     assert counts["cards_forced"] == 0
     assert counts["cards_guarded"] == 1
+    assert counts["write_errors"] == 0
+    assert counts["events_written"] == 2
     assert base.activos("ufc-332") == 14
