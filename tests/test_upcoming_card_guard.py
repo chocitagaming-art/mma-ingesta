@@ -122,7 +122,7 @@ def _base(activos: int, cancelados_por_ufc: int = 0, slug: str = "ufc-332"):
     return responder
 
 
-def _escribe(fakedb, evento, activos, cancelados_por_ufc=0, forzar=frozenset()):
+def _escribe(fakedb, evento, activos, cancelados_por_ufc=0, forzar=None):
     conn = fakedb.Connection(_base(activos, cancelados_por_ufc, evento.source_id))
     counts: Counter = Counter()
     escrito = ue._write_event(conn, lambda nombre: None, counts, evento, 1, forzar)
@@ -303,16 +303,20 @@ def test_una_baja_legitima_se_escribe_y_se_cancela_lo_que_falta(fakedb, slug, le
 
 
 def test_forzar_un_evento_solo_afecta_a_ese_slug(fakedb, caplog):
-    """Una bajada REAL que la guarda retiene se fuerza a mano, slug a slug."""
-    forzar = frozenset({"ufc-332"})
-    vacias = {"activos": 14, "cancelados_por_ufc": 14, "forzar": forzar}
+    """Una bajada REAL que la guarda retiene se fuerza a mano, slug a slug.
+
+    El 332 pierde 4 de 14 de verdad y se fuerza con los 10 que se ven en
+    ufc.com. El 333, con la misma bajada y sin forzar, sigue retenido.
+    """
+    forzar = {"ufc-332": 10}
+    bajada = {"activos": 14, "cancelados_por_ufc": 4, "forzar": forzar}
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
-        conn_332, counts_332, escrito_332 = _escribe(fakedb, _evento("ufc-332"), **vacias)
-        conn_333, counts_333, escrito_333 = _escribe(fakedb, _evento("ufc-333"), **vacias)
+        conn_332, counts_332, escrito_332 = _escribe(fakedb, _evento("ufc-332", 10), **bajada)
+        conn_333, counts_333, escrito_333 = _escribe(fakedb, _evento("ufc-333", 10), **bajada)
 
     assert escrito_332 is True
     assert any("SET status = 'cancelled'" in s for s in fakedb.mutating_statements(conn_332))
-    assert counts_332["bouts_cancelled"] == 14
+    assert counts_332["bouts_cancelled"] == 4
     assert counts_332["cards_forced"] == 1
     assert counts_332["cards_guarded"] == 0
 
@@ -323,10 +327,49 @@ def test_forzar_un_evento_solo_afecta_a_ese_slug(fakedb, caplog):
     assert "ufc-332" in caplog.text and "forzado" in caplog.text.lower()
 
 
+@pytest.mark.parametrize("leidos", [0, 4, 9])
+def test_forzar_no_escribe_si_en_ese_pase_ufc_com_da_otro_numero(fakedb, caplog, leidos):
+    """El forzado no se fia de la ficha de ESE pase: exige los combates que se vieron.
+
+    El caso del sabado: la guarda retiene una bajada real, el dueno la comprueba
+    en el navegador y lanza el dispatch con los 10 que ve... y justo en ese pase
+    ufc.com sirve la ficha vacia o a medias. Si el forzado escribiera lo que
+    llegase, cancelaria la cartelera entera, y en VERDE. Se retiene como
+    siempre, en rojo, y el WARNING dice que no cuadra.
+    """
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        conn, counts, escrito = _escribe(
+            fakedb, _evento("ufc-332", leidos), activos=14, cancelados_por_ufc=14 - leidos,
+            forzar={"ufc-332": 10},
+        )
+
+    assert escrito is False
+    assert fakedb.mutating_statements(conn) == []
+    assert counts["cards_guarded"] == 1
+    assert counts["cards_forced"] == 0
+    assert f"ufc-332: --forzar-evento esperaba 10 combates y ufc.com da {leidos}" in caplog.text
+
+
+def test_forzar_nunca_escribe_una_cartelera_vacia(fakedb):
+    """Ni pidiendolo con 0: una ficha sin combates es el fallo que la guarda para.
+
+    La linea de comandos ya no acepta N=0; esto cubre a quien llame a la funcion
+    directamente.
+    """
+    conn, counts, escrito = _escribe(
+        fakedb, _evento("ufc-332", 0), activos=14, cancelados_por_ufc=14, forzar={"ufc-332": 0}
+    )
+
+    assert escrito is False
+    assert fakedb.mutating_statements(conn) == []
+    assert counts["cards_guarded"] == 1
+    assert counts["cards_forced"] == 0
+
+
 def test_forzar_nunca_se_salta_la_guarda_del_detalle(fakedb):
     """Forzar es para una bajada real que ufc.com SI publica, no para una ficha caida."""
     conn, counts, escrito = _escribe(
-        fakedb, _evento(n_combates=0, detail_ok=False), activos=14, forzar=frozenset({"ufc-332"})
+        fakedb, _evento(n_combates=0, detail_ok=False), activos=14, forzar={"ufc-332": 14}
     )
 
     assert escrito is False

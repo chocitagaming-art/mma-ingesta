@@ -32,7 +32,7 @@ import logging
 import re
 import time
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from urllib.parse import urljoin
@@ -719,7 +719,7 @@ def _write_event(
     counts: Counter,
     event: ParsedEvent,
     promotion_id: int,
-    forzar_eventos: frozenset[str] = frozenset(),
+    forzar_eventos: Mapping[str, int] | None = None,
 ) -> bool:
     """Escribe un evento del listado, o no lo toca si ufc.com no da con que.
 
@@ -732,8 +732,10 @@ def _write_event(
          ni siquiera se pregunta a la base.
       2. La ficha parece rota frente a la base (`_card_looks_broken`). Una
          bajada REAL que esta guarda retenga se fuerza a mano con
-         `--forzar-evento <slug>` en refresh_upcoming, que se salta SOLO esta
-         guarda y solo para ese slug. La del detalle no se salta nunca.
+         `--forzar-evento <slug>=<N>` en refresh_upcoming, con N los combates
+         que se ven en ufc.com (`forzar_eventos`: slug -> N). Se salta SOLO
+         esta guarda, solo para ese slug y solo si ufc.com da justo N combates
+         en ese pase, nunca 0. La del detalle no se salta nunca.
 
     Cada salto deja un WARNING con los numeros y un contador
     (`events_skipped_detail`, `cards_guarded`) que pone el cron en rojo.
@@ -746,18 +748,31 @@ def _write_event(
     parsed = len(event.bouts)
     active = count_active_upcoming_fights(connection, SOURCE, event.source_id)
     if _card_looks_broken(parsed, active):
-        if event.source_id not in forzar_eventos:
+        esperados = (forzar_eventos or {}).get(event.source_id)
+        if esperados is None:
             counts["cards_guarded"] += 1
             LOGGER.warning(
                 "%s: ufc.com da %s combates y la base tiene %s activos; no se toca el evento",
                 event.source_id, parsed, active,
             )
             return False
+        # El forzado no se fia de la ficha de ESTE pase: exige los combates que
+        # se comprobaron a mano. Si justo ahora llega vacia o a medias, se
+        # retiene como siempre; si no, cancelaria la cartelera que la guarda
+        # protege, y el run acabaria en verde.
+        if parsed == 0 or parsed != esperados:
+            counts["cards_guarded"] += 1
+            LOGGER.warning(
+                "%s: --forzar-evento esperaba %s combates y ufc.com da %s (la base "
+                "tiene %s activos); no se toca el evento",
+                event.source_id, esperados, parsed, active,
+            )
+            return False
         counts["cards_forced"] += 1
         LOGGER.warning(
-            "%s: FORZADO a mano (--forzar-evento): ufc.com da %s combates y la base "
-            "tiene %s activos; se escribe igual",
-            event.source_id, parsed, active,
+            "%s: FORZADO a mano (--forzar-evento %s=%s): ufc.com da %s combates y la "
+            "base tiene %s activos; se escribe igual",
+            event.source_id, event.source_id, esperados, parsed, active,
         )
 
     record = EventMetaRecord(
@@ -783,7 +798,7 @@ def _write_event(
 
 
 def scrape_upcoming_events(
-    dry_run: bool = False, forzar_eventos: Iterable[str] = ()
+    dry_run: bool = False, forzar_eventos: Mapping[str, int] | None = None
 ) -> Counter:
     settings = get_settings()
     counts: Counter = Counter()
@@ -796,8 +811,8 @@ def scrape_upcoming_events(
 
     # Un slug forzado que no esta en el listado no fuerza nada. Se dice, para
     # que quien lanzo el dispatch no crea que su bajada se ha aplicado.
-    forzados = frozenset(forzar_eventos)
-    for slug in sorted(forzados - {e.source_id for e in events}):
+    forzados = dict(forzar_eventos or {})
+    for slug in sorted(set(forzados) - {e.source_id for e in events}):
         LOGGER.warning(
             "--forzar-evento %s: no esta en el listado de ufc.com; no se fuerza nada", slug
         )

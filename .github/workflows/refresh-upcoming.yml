@@ -7,14 +7,16 @@ name: Refresh upcoming events
 # The run turns RED (and notify-on-failure opens its Issue) when a step fails
 # or raises an alarm, e.g. cards_guarded: a ufc.com card that looks broken
 # against the DB is held back instead of cancelled. If that drop is REAL, run
-# this workflow by hand with `forzar_evento` set to the event's slug.
+# this workflow by hand with `forzar_evento` = SLUG=N, the event's slug and the
+# bouts ufc.com shows (e.g. ufc-332=10). It is applied only if ufc.com serves
+# exactly N bouts in that run; otherwise the card stays held and the run red.
 on:
   schedule:
     - cron: "0 6 * * *" # daily at 06:00 UTC
   workflow_dispatch: # manual "Run workflow" button
     inputs:
       forzar_evento:
-        description: "Slug del evento (p. ej. ufc-332) cuya bajada de cartelera retiene la guarda y es REAL. Vacio = pase normal"
+        description: "Bajada REAL que retiene la guarda, como slug=combates que ves en ufc.com (p. ej. ufc-332=10). Solo se aplica si ufc.com da justo esos combates. Vacio = pase normal"
         required: false
         default: ""
         type: string

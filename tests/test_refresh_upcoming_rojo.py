@@ -23,6 +23,7 @@ no serviria), o `_run_step` para que no ejecute ningun paso.
 
 import json
 import logging
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -198,14 +199,50 @@ def test_main_termina_en_verde_en_un_dia_normal(lanzar):
     lanzar(_resumen())  # sin SystemExit
 
 
+# ------------------------------------------------------ --forzar-evento SLUG=N
+
+
 def test_main_pasa_los_eventos_forzados_a_refresh(lanzar):
-    llamada = lanzar(_resumen(), "--forzar-evento", "ufc-332", "--forzar-evento", "ufc-333")
-    assert list(llamada["forzar_eventos"]) == ["ufc-332", "ufc-333"]
+    llamada = lanzar(_resumen(), "--forzar-evento", "ufc-332=10", "--forzar-evento", "ufc-333=9")
+    assert llamada["forzar_eventos"] == {"ufc-332": 10, "ufc-333": 9}
 
 
 def test_main_sin_forzar_no_fuerza_nada(lanzar):
     llamada = lanzar(_resumen())
-    assert list(llamada["forzar_eventos"]) == []
+    assert llamada["forzar_eventos"] == {}
+
+
+def test_forzar_tolera_los_espacios_del_formulario_de_github(lanzar):
+    llamada = lanzar(_resumen(), "--forzar-evento", " ufc-332 = 10 ")
+    assert llamada["forzar_eventos"] == {"ufc-332": 10}
+
+
+@pytest.mark.parametrize(
+    "valor",
+    ["ufc-332", "ufc-332=", "ufc-332=0", "ufc-332=-3", "ufc-332=diez", "=10", " "],
+)
+def test_forzar_sin_un_numero_de_combates_valido_no_arranca(lanzar, capsys, valor):
+    """Sin N no hay con que comprobar la ficha del pase forzado: no se corre nada.
+
+    N=0 tampoco vale: una ficha sin combates es justo el fallo que para la guarda.
+    """
+    with pytest.raises(SystemExit) as salida:
+        lanzar(_resumen(), "--forzar-evento", valor)
+
+    assert salida.value.code == 2
+    consola = capsys.readouterr()
+    assert "expected SLUG=N" in consola.err
+    assert consola.out == ""  # ni un paso: el resumen no llega a imprimirse
+
+
+def test_forzar_el_mismo_slug_dos_veces_no_arranca(lanzar, capsys):
+    with pytest.raises(SystemExit) as salida:
+        lanzar(_resumen(), "--forzar-evento", "ufc-332=10", "--forzar-evento", "ufc-332=9")
+
+    assert salida.value.code == 2
+    consola = capsys.readouterr()
+    assert "each slug only once" in consola.err
+    assert consola.out == ""
 
 
 def test_refresh_lleva_los_forzados_hasta_el_paso_de_ufc_com(monkeypatch):
@@ -230,12 +267,12 @@ def test_refresh_lleva_los_forzados_hasta_el_paso_de_ufc_com(monkeypatch):
     monkeypatch.setattr(ru, "_run_step", run_step_falso)
     monkeypatch.setattr(ru, "scrape_upcoming_events", scrape_falso)
 
-    ru.refresh(forzar_eventos=["ufc-332"])
+    ru.refresh(forzar_eventos={"ufc-332": 10})
     assert set(pasos) == set(PASOS)
     pasos["upcoming_events"]()
 
     assert llamada["dry_run"] is False
-    assert list(llamada["forzar_eventos"]) == ["ufc-332"]
+    assert llamada["forzar_eventos"] == {"ufc-332": 10}
 
 
 # ------------------------------------------------------ el workflow
@@ -254,6 +291,9 @@ def test_el_workflow_ofrece_forzar_evento_vacio_por_defecto():
     assert entrada["default"] == ""
     # El cron diario sigue ahi: la entrada es solo para el boton manual.
     assert "schedule" in disparadores
+    # El ejemplo que ve el dueno en el formulario tiene el formato de la CLI.
+    (ejemplo,) = re.findall(r"[a-z0-9-]+=\d+", entrada["description"])
+    assert ru._parse_forced_event(ejemplo) == ("ufc-332", 10)
 
 
 def test_el_workflow_solo_pasa_forzar_evento_si_no_esta_vacio():

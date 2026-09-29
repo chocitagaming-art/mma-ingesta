@@ -234,7 +234,7 @@ def pase(monkeypatch, fakedb):
     monkeypatch.setattr(psycopg2, "connect", _nunca("abre una base de verdad"))
     monkeypatch.setattr(requests.Session, "request", _nunca("sale a la red"))
 
-    def _pase(base: BaseEnMemoria, fichas: dict, forzar=()):
+    def _pase(base: BaseEnMemoria, fichas: dict, forzar=None):
         conn = fakedb.Connection(base)
 
         def _connect(url):
@@ -363,7 +363,7 @@ def test_forzar_el_332_aplica_una_bajada_real_que_la_guarda_retiene(pase, caplog
     base = _base_de_hoy()
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         counts, conn = pase(
-            base, _fichas_de_hoy(ufc_332=_ficha("ufc-332", 10)), forzar=["ufc-332"]
+            base, _fichas_de_hoy(ufc_332=_ficha("ufc-332", 10)), forzar={"ufc-332": 10}
         )
 
     assert counts["cards_forced"] == 1
@@ -376,10 +376,31 @@ def test_forzar_el_332_aplica_una_bajada_real_que_la_guarda_retiene(pase, caplog
     assert "FORZADO" in caplog.text
 
 
+@pytest.mark.parametrize("leidos", [0, 4])
+def test_forzar_el_332_no_escribe_si_en_ese_pase_ufc_com_da_otra_cosa(pase, caplog, leidos):
+    """El sabado: se fuerza con los 10 que se ven, y en ese pase la ficha llega rota."""
+    base = _base_de_hoy()
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        counts, conn = pase(
+            base, _fichas_de_hoy(ufc_332=_ficha("ufc-332", leidos)), forzar={"ufc-332": 10}
+        )
+
+    assert counts["cards_guarded"] == 1  # alarma: el run acaba en rojo
+    assert counts["cards_forced"] == 0
+    assert "ufc-332" not in base.eventos_escritos
+    assert base.activos("ufc-332") == 14
+    assert counts["bouts_cancelled"] == 0
+    assert counts["events_written"] == 2
+    assert conn.commits == 1 + 2
+    assert f"esperaba 10 combates y ufc.com da {leidos}" in caplog.text
+
+
 def test_forzar_no_escribe_el_332_si_su_ficha_esta_caida(pase):
     base = _base_de_hoy()
     counts, _ = pase(
-        base, _fichas_de_hoy(ufc_332=requests.HTTPError("503 Server Error")), forzar=["ufc-332"]
+        base,
+        _fichas_de_hoy(ufc_332=requests.HTTPError("503 Server Error")),
+        forzar={"ufc-332": 14},
     )
 
     assert counts["events_skipped_detail"] == 1
@@ -391,7 +412,9 @@ def test_forzar_no_escribe_el_332_si_su_ficha_esta_caida(pase):
 def test_forzar_un_slug_que_no_esta_en_el_listado_lo_avisa_y_no_fuerza_nada(pase, caplog):
     base = _base_de_hoy()
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
-        counts, _ = pase(base, _fichas_de_hoy(ufc_332=_ficha("ufc-332", 0)), forzar=["ufc-999"])
+        counts, _ = pase(
+            base, _fichas_de_hoy(ufc_332=_ficha("ufc-332", 0)), forzar={"ufc-999": 3}
+        )
 
     assert "--forzar-evento ufc-999" in caplog.text
     assert counts["cards_forced"] == 0

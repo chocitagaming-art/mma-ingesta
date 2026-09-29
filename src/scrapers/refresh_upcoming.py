@@ -25,7 +25,7 @@ Run whenever upcoming events change (new cards, passed dates):
     python -m src.scrapers.refresh_upcoming --dry-run        # full pipeline, no writes
     python -m src.scrapers.refresh_upcoming                  # writes to DB
     python -m src.scrapers.refresh_upcoming --records-limit 100
-    python -m src.scrapers.refresh_upcoming --forzar-evento ufc-332   # see --help
+    python -m src.scrapers.refresh_upcoming --forzar-evento ufc-332=10   # see --help
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ import json
 import logging
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping
 
 from .backfill_results import backfill
 from .enrich_records_espn import enrich_records
@@ -114,10 +114,32 @@ def _alarms(summary: dict) -> list[str]:
     return alarms
 
 
+def _parse_forced_event(text: str) -> tuple[str, int]:
+    """argparse type of --forzar-evento: 'ufc-332=10' -> ('ufc-332', 10).
+
+    N is the number of bouts checked by hand on ufc.com (the WARNING of the red
+    run says how many ufc.com gave). The drop is applied only if ufc.com serves
+    exactly N bouts in THAT run, so a page that comes back empty or half parsed
+    right then is held back as usual. Spaces from the GitHub form are fine.
+    """
+    slug, sep, number = text.partition("=")
+    slug = slug.strip()
+    try:
+        bouts = int(number)
+    except ValueError:
+        bouts = 0
+    if not sep or not slug or bouts < 1:
+        raise argparse.ArgumentTypeError(
+            f"{text!r}: expected SLUG=N, the event's slug and the bouts ufc.com "
+            "shows for it, N >= 1 (e.g. ufc-332=10)"
+        )
+    return slug, bouts
+
+
 def refresh(
     dry_run: bool = False,
     records_limit: int | None = None,
-    forzar_eventos: Sequence[str] = (),
+    forzar_eventos: Mapping[str, int] | None = None,
 ) -> dict:
     steps = [
         (
@@ -149,21 +171,25 @@ def main() -> None:
         "--forzar-evento",
         action="append",
         default=[],
-        type=str.strip,
-        metavar="SLUG",
+        type=_parse_forced_event,
+        metavar="SLUG=N",
         help=(
             "Apply a REAL card drop that the upcoming_events guard is holding back "
-            "(cards_guarded), e.g. ufc-332. Skips only the card-size guard and only "
-            "for that slug; an event whose detail page failed is never written. "
-            "Repeatable."
+            "(cards_guarded): the event's slug and the N bouts you have checked on "
+            "ufc.com, e.g. ufc-332=10. It applies only if ufc.com serves exactly N "
+            "bouts in this run, and skips only the card-size guard, only for that "
+            "slug; an event whose detail page failed is never written. Repeatable."
         ),
     )
     args = parser.parse_args()
+    forced = dict(args.forzar_evento)
+    if len(forced) < len(args.forzar_evento):
+        parser.error("--forzar-evento: each slug only once, with its own N")
 
     summary = refresh(
         dry_run=args.dry_run,
         records_limit=args.records_limit,
-        forzar_eventos=args.forzar_evento,
+        forzar_eventos=forced,
     )
     print(json.dumps(summary, indent=2, ensure_ascii=False))
 
