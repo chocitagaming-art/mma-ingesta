@@ -6,9 +6,12 @@ peleas NO-UFC se upsertan en la tabla APARTE fight_history_espn (migración
 016) que la ficha fusiona solo al pintar el historial. `fights` no se toca.
 
 GUARDAS (ver cabecera de la migración 016):
-  - La liga UFC de ESPN (l:3321) se SALTA SIEMPRE: esas peleas ya viven en
+  - La liga UFC de ESPN (l:3321) se SALTA: esas peleas ya viven en
     `fights` vía ufcstats y duplicarlas rompería stats/ML. Defensa extra: un
     evento cuyo nombre empiece por UFC/TUF se salta aunque venga con otra liga.
+  - EXCEPCIÓN: el Dana White's Contender Series va en l:3321 pero ufcstats no
+    lo tiene. Se guarda con promotion='Contender Series' y su liga real, y el
+    run acaba en rojo si en la tabla queda cualquier otra fila de l:3321.
   - Guard de identidad: si el displayName del atleta que devuelve ESPN no
     matchea el nombre en BD (umbral de identidad 0.92), NO se importa nada
     (un espn_id mal resuelto no puede inyectar la carrera de un extraño).
@@ -32,6 +35,7 @@ import argparse
 import json
 import logging
 import re
+import sys
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -66,6 +70,8 @@ US_EASTERN = ZoneInfo("America/New_York")
 
 LEAGUE_UFC = "3321"
 LEAGUE_LABELS = {"3323": "Bellator"}
+# Lo único de la liga UFC de ESPN que se guarda (ver is_contender_series).
+CONTENDER_SERIES = "Contender Series"
 _UID_RE = re.compile(r"l:(\d+)~e:(\d+)~c:(\d+)")
 _TRAILING_NUMBER_RE = re.compile(r"\s+\d+$")
 _PARENS_RE = re.compile(r"\(([^)]+)\)")
@@ -76,6 +82,21 @@ _PARENS_RE = re.compile(r"\(([^)]+)\)")
 # promoción regional real de Las Vegas y "UFCF" una noventera — sin \b ambas
 # se descartaban en silencio (hallazgo de la revisión adversarial).
 _UFC_NAME_RE = re.compile(r"^(?:UFC|THE ULTIMATE FIGHTER|TUF|DANA WHITE)\b", re.IGNORECASE)
+
+# Dana White's Contender Series (DWCS). ESPN cuelga sus 99 veladas
+# (2017-2026) de la liga UFC, pero ufcstats no las tiene: saltarlas con el
+# resto de la 3321 las perdía de todas partes. «...: Season 9, Week 6»,
+# «...: Brazil 2»; apóstrofo recto, curvo o ninguno. ANCLADA a propósito: sin
+# ancla, como la regla de la migración 028, se comería 3 filas regionales
+# reales («BFC Contender Series 7», «CBF MMA 1: Dana White Lookin' For A Fight»).
+_DWCS_NAME_RE = re.compile(
+    r"^Dana\s+White(?:['\u2019\u2018`\u00b4\u02bc]?s)?\s+"
+    r"(?:Tuesday\s+Night\s+)?Contender\s+Series\b",
+    re.IGNORECASE,
+)
+# «Contender Series» sin «Dana White» delante solo vale DENTRO de la liga UFC,
+# donde no hay regionales («Contender Series Brasil 1»).
+_DWCS_BARE_RE = re.compile(r"^(?:UFC\s+)?Contender\s+Series\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -126,6 +147,20 @@ def promotion_label(league_id: str, event_name: str | None, short_name: str | No
     base = base.split(" - ", 1)[0]
     base = _TRAILING_NUMBER_RE.sub("", base.strip()).strip()
     return base or "Regional"
+
+
+def is_contender_series(
+    league_id: str, event_name: str | None, short_name: str | None
+) -> bool:
+    """¿Es una velada del Dana White's Contender Series? Basta con que lo diga
+    name o shortName: ESPN a veces deja uno de los dos vacío."""
+    for raw in (event_name, short_name):
+        text = (raw or "").strip()
+        if _DWCS_NAME_RE.match(text):
+            return True
+        if league_id == LEAGUE_UFC and _DWCS_BARE_RE.match(text):
+            return True
+    return False
 
 
 def canonical_method(result_token: str | None, display_name: str | None) -> str | None:
@@ -212,15 +247,27 @@ def parse_career(payload: dict) -> tuple[list[ParsedBout], Counter]:
             counts["bad_uid"] += 1
             continue
         league_id, espn_event_id, espn_competition_id = uid_match.groups()
-        if league_id == LEAGUE_UFC:
-            counts["skipped_ufc"] += 1
-            continue
         event_name = str(entry.get("name") or "").strip() or None
         short_name = str(entry.get("shortName") or "").strip() or None
-        promotion = promotion_label(league_id, event_name, short_name)
-        if _UFC_NAME_RE.match(promotion) or _UFC_NAME_RE.match(event_name or ""):
-            counts["skipped_ufc_named"] += 1
+        is_dwcs = is_contender_series(league_id, event_name, short_name)
+        if is_dwcs:
+            # Se salta las DOS guardas: va en l:3321 y su nombre empieza por
+            # «Dana White», pero no está en `fights`. Conserva su liga real.
+            promotion = CONTENDER_SERIES
+        elif league_id == LEAGUE_UFC:
+            counts["skipped_ufc"] += 1
             continue
+        else:
+            promotion = promotion_label(league_id, event_name, short_name)
+            if _UFC_NAME_RE.match(promotion) or _UFC_NAME_RE.match(event_name or ""):
+                counts["skipped_ufc_named"] += 1
+                # Una línea por descarte: los 107 del barrido de julio pasaron
+                # sin que se supiera qué eventos eran.
+                LOGGER.info(
+                    "Skipped UFC-named event %r (league %s)",
+                    event_name or short_name, league_id,
+                )
+                continue
 
         status = entry.get("status") or {}
         result_obj = status.get("result") or {}
@@ -246,6 +293,9 @@ def parse_career(payload: dict) -> tuple[list[ParsedBout], Counter]:
         opponent_espn_id = str(opponent.get("id") or "").strip() or None
         opponent_name = str(opponent.get("displayName") or "").strip() or None
 
+        if is_dwcs:
+            # Aquí y no arriba: un DWCS programado cuenta en skipped_no_result.
+            counts["contender_series"] += 1
         bouts.append(
             ParsedBout(
                 espn_competition_id=espn_competition_id,
@@ -394,7 +444,10 @@ def backfill(
                 continue
 
         bouts, parse_counts = parse_career(payload)
-        for key in ("skipped_ufc", "skipped_ufc_named", "skipped_no_result", "missing_entry", "bad_uid"):
+        for key in (
+            "contender_series", "skipped_ufc", "skipped_ufc_named",
+            "skipped_no_result", "missing_entry", "bad_uid",
+        ):
             counts[key] += parse_counts[key]
 
         if dry_run:
@@ -451,6 +504,19 @@ def backfill(
     return counts
 
 
+def count_ufc_league_leaks(connection) -> int:
+    """Filas de la liga UFC (l:3321) que NO son del Contender Series. Tiene
+    que dar 0: cualquier otra es una pelea que ya vive en `fights` y saldría
+    duplicada en la ficha. Solo lectura; main() la mira tras cada run."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT count(*) FROM fight_history_espn "
+            "WHERE league_id = '3321' AND promotion IS DISTINCT FROM 'Contender Series'"
+        )
+        row = cursor.fetchone()
+    return int(row[0]) if row else 0
+
+
 def probe(espn_ids: list[str]) -> None:
     """Sin BD: descarga y parsea carreras y muestra el resultado (QA manual)."""
     from .resolve_espn_ids import get_settings_for_probe
@@ -468,6 +534,7 @@ def probe(espn_ids: list[str]) -> None:
                 "espn_id": espn_id,
                 "athlete": _athlete_page_name(payload),
                 "total_in_espn": len(payload.get("eventsMap") or {}),
+                "contender_series": counts["contender_series"],
                 "skipped_ufc": counts["skipped_ufc"] + counts["skipped_ufc_named"],
                 "skipped_no_result": counts["skipped_no_result"],
                 "non_ufc_bouts": [
@@ -512,15 +579,25 @@ def main() -> None:
             limit=args.limit,
             all_scope=args.all_scope,
         )
+        # También en dry-run: es solo lectura y vigila lo que ya hay escrito.
+        ufc_league_leaks = count_ufc_league_leaks(connection)
 
     keys = [
         "targets", "written", "would_write", "fighters_with_history", "no_page",
-        "skipped_ufc", "skipped_ufc_named", "skipped_no_result",
+        "contender_series", "skipped_ufc", "skipped_ufc_named", "skipped_no_result",
         "name_mismatch", "fetch_error", "missing_entry", "bad_uid",
     ]
     print(json.dumps({key: counts.get(key, 0) for key in keys}, indent=2))
     if args.dry_run:
         print("Dry-run: nothing was written. Re-run without --dry-run to persist.")
+    if ufc_league_leaks:
+        # En rojo para que notify-on-failure avise: son duplicados de `fights`.
+        LOGGER.error(
+            "fight_history_espn has %d rows in the UFC league (l:%s) that are not "
+            "Contender Series: UFC bouts leaked into the non-UFC table",
+            ufc_league_leaks, LEAGUE_UFC,
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

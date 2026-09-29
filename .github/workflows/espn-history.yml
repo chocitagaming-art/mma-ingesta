@@ -9,8 +9,10 @@ name: ESPN fight history (Bellator/regionales)
 # stats solo-UFC de la ficha). Escrituras aditivas e idempotentes: re-lanzar
 # siempre es seguro.
 # Scope del cron = luchadores nuevos (espn_id/sello NULL) + carteleras
-# próximas (~1-5 min). Dispatch con all=true para el barrido completo
-# (~2.8k búsquedas + ~2.4k carreras ≈ 60-75 min).
+# próximas (~1-5 min). Dispatch con all=true para el barrido completo, que
+# tarda 2 h 11-15 min (medido el 11-jul-2026: 2,2-2,9 s por luchador):
+# NUNCA de jueves a domingo, el fin de semana de velada. Por eso
+# timeout-minutes es 180 y no menos.
 # Cron semanal martes 05:00 UTC: día sin otros crons (los lunes van fullbody
 # 05:00 / photos 05:30 / facts 06:30 / standing 07:00 / bonuses 08:00).
 on:

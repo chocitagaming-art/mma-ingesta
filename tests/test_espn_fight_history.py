@@ -5,14 +5,23 @@ La forma de los payloads reproduce el endpoint real common/v3 (sondado el
 11-jul-2026 con Amosov 4275020 y Jim Miller 2335718): events = lista de uids
 `s:3301~l:<liga>~e:<evento>~c:<competición>` y eventsMap con gameDate,
 gameResult (W/L/D), opponent, status.{period,displayClock,result} y
-titleFight. La liga 3321 es UFC (SIEMPRE saltada), 3323 Bellator y el resto
+titleFight. La liga 3321 es UFC (saltada, salvo el Contender Series que ESPN
+también cuelga de ella: ver TestContenderSeries), 3323 Bellator y el resto
 regionales (3335, 3339, 3359...).
 """
 
 from __future__ import annotations
 
+import logging
+import sys
+from collections import Counter
+from contextlib import contextmanager
 from datetime import date
+from types import SimpleNamespace
 
+import pytest
+
+from src.scrapers import espn_fight_history
 from src.scrapers.espn_fight_history import (
     backfill,
     canonical_method,
@@ -391,3 +400,365 @@ class TestBackfill:
         assert fakedb.mutating_statements(conn) == []
         assert conn.commits == 0
         assert conn.rollbacks >= 1
+
+
+# Contender Series con datos REALES (sonda del 29-sep-2026): Tommy Gantt
+# sometió a Adam Livingston en la Season 9, Week 6. ESPN publica las 99
+# veladas del DWCS (2017-2026) bajo la liga UFC (l:3321) y ufcstats no las
+# tiene: saltarlas como UFC las perdía de todas partes.
+DWCS_UID = "s:3301~l:3321~e:600055031~c:401794769"
+DWCS_NAME = "Dana White's Contender Series: Season 9, Week 6"
+DWCS_SHORT = "Dana White's Contender Series"
+# Martes 16-sep-2025 por la noche en el Este: ESPN lo da ya en miércoles UTC.
+DWCS_GAME_DATE = "2025-09-17T00:00:00.000+00:00"
+
+
+def dwcs_entry(uid: str = DWCS_UID, **overrides) -> dict:
+    """entry() con la velada real de Gantt; cada test cambia solo lo suyo."""
+    fields: dict = {
+        "name": DWCS_NAME,
+        "short_name": DWCS_SHORT,
+        "result_token": "submission",
+        "result_display": "Submission",
+        "opponent_name": "Adam Livingston",
+        "game_date": DWCS_GAME_DATE,
+    }
+    fields.update(overrides)
+    return entry(uid, **fields)
+
+
+class TestContenderSeries:
+    """El DWCS va en l:3321 pero NO está en `fights`: se guarda con
+    promotion='Contender Series' y su liga real. El resto de la 3321 se sigue
+    saltando y las regionales de nombre parecido no cambian."""
+
+    def test_dwcs_in_ufc_league_is_kept_as_contender_series(self):
+        payload = career(
+            entry(UFC_UID, name="UFC Fight Night: Allen vs. Costa",
+                  short_name="UFC Fight Night"),
+            dwcs_entry(),
+            entry(BELLATOR_UID),
+        )
+        bouts, counts = parse_career(payload)
+        assert [bout.promotion for bout in bouts] == ["Contender Series", "Bellator"]
+        assert counts["skipped_ufc"] == 1
+        assert counts["contender_series"] == 1
+        dwcs = bouts[0]
+        # Conserva su liga REAL: la alarma post-run la distingue por promotion.
+        assert dwcs.league_id == "3321"
+        assert dwcs.espn_event_id == "600055031"
+        assert dwcs.espn_competition_id == "401794769"
+        assert dwcs.event_name == DWCS_NAME
+        assert dwcs.event_date == date(2025, 9, 16)
+        assert (dwcs.result, dwcs.method) == ("win", "SUB")
+
+    def test_brazil_edition_is_recognized(self):
+        # Las 3 veladas de Brasil (ago-2018) no siguen el «Season N, Week M».
+        # Johnny Walker salió de la Brazil 2.
+        payload = career(
+            dwcs_entry(
+                "s:3301~l:3321~e:401074497~c:265434",
+                name="Dana White's Contender Series: Brazil 2",
+                result_token="decision---unanimous",
+                result_display="Decision - Unanimous",
+                opponent_name="Henrique da Silva",
+                game_date="2018-08-12T01:00:00.000+00:00",
+            )
+        )
+        (bout,), counts = parse_career(payload)
+        assert bout.promotion == "Contender Series"
+        assert bout.event_name == "Dana White's Contender Series: Brazil 2"
+        assert bout.event_date == date(2018, 8, 11)
+        assert counts["contender_series"] == 1
+
+    def test_curly_apostrophe_in_name_and_in_short_name(self):
+        # Una entrada con el apóstrofo curvo solo en name y otra solo en
+        # shortName: cada campo tiene que bastar por sí mismo.
+        payload = career(
+            dwcs_entry(name=DWCS_NAME.replace("'", "\u2019"), short_name=""),
+            dwcs_entry(
+                "s:3301~l:3321~e:600055031~c:401819852",
+                name="",
+                short_name=DWCS_SHORT.replace("'", "\u2019"),
+            ),
+        )
+        bouts, counts = parse_career(payload)
+        assert [bout.promotion for bout in bouts] == ["Contender Series"] * 2
+        assert counts["skipped_ufc"] == 0
+        assert counts["contender_series"] == 2
+
+    def test_recognized_by_short_name_alone_or_by_name_alone(self):
+        payload = career(
+            dwcs_entry(name="", short_name=DWCS_SHORT),
+            dwcs_entry("s:3301~l:3321~e:600055031~c:401819852", short_name=""),
+        )
+        bouts, counts = parse_career(payload)
+        assert [bout.promotion for bout in bouts] == ["Contender Series"] * 2
+        assert bouts[0].event_name is None
+        assert bouts[1].event_name == DWCS_NAME
+        assert counts["contender_series"] == 2
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Dana White's Tuesday Night Contender Series: Week 1",
+            "DANA WHITE'S CONTENDER SERIES: SEASON 2, WEEK 1",
+            "Dana Whites Contender Series: Season 3, Week 1",
+            "Dana White Contender Series 2018: Week 1",
+            "Contender Series Brasil 1",
+        ],
+    )
+    def test_name_variants_in_ufc_league(self, name):
+        # shortName vacío: el nombre tiene que bastar por sí solo.
+        (bout,), counts = parse_career(career(dwcs_entry(name=name, short_name="")))
+        assert bout.promotion == "Contender Series"
+        assert bout.league_id == "3321"
+        assert counts["skipped_ufc"] == 0
+
+    def test_dwcs_under_another_league_passes_the_name_guard(self):
+        # Fuera de l:3321 lo tiraba la guarda de NOMBRE (_UFC_NAME_RE incluye
+        # DANA WHITE): el DWCS tiene que saltarse las dos guardas, no solo la
+        # de liga.
+        payload = career(dwcs_entry("s:3301~l:3359~e:600055031~c:401794769"))
+        (bout,), counts = parse_career(payload)
+        assert bout.promotion == "Contender Series"
+        assert bout.league_id == "3359"
+        assert counts["skipped_ufc_named"] == 0
+        assert counts["contender_series"] == 1
+
+    def test_loss_and_no_contest(self):
+        # Belgaroui perdió a los puntos en la Season 7, Week 4; Holobaugh hizo
+        # un no contest en la Season 1, Week 1.
+        payload = career(
+            dwcs_entry(
+                "s:3301~l:3321~e:600036494~c:401581402",
+                name="Dana White's Contender Series: Season 7, Week 4",
+                game_result="L",
+                result_token="decision---unanimous",
+                result_display="Decision - Unanimous",
+                game_date="2023-08-30T00:00:00.000+00:00",
+            ),
+            dwcs_entry(
+                "s:3301~l:3321~e:400961602~c:237192",
+                name="Dana White's Contender Series: Season 1, Week 1",
+                game_result="D",
+                result_token="no-contest",
+                result_display="No Contest",
+                game_date="2017-07-11T19:00:00.000+00:00",
+            ),
+        )
+        bouts, counts = parse_career(payload)
+        assert [bout.result for bout in bouts] == ["loss", "nc"]
+        assert bouts[0].method == "U-DEC"
+        assert bouts[1].method == "CNC"
+        assert counts["contender_series"] == 2
+
+    def test_scheduled_dwcs_without_result_is_not_counted(self):
+        # contender_series cuenta peleas GUARDADAS: una programada cae antes,
+        # en el filtro de resultado.
+        payload = career(
+            dwcs_entry(game_result=None, result_token="", result_display="")
+        )
+        bouts, counts = parse_career(payload)
+        assert bouts == []
+        assert counts["skipped_no_result"] == 1
+        assert counts["contender_series"] == 0
+
+    @pytest.mark.parametrize(
+        ("name", "short_name"),
+        [
+            ("UFC 290: Volkanovski vs. Rodriguez", "UFC 290"),
+            ("UFC Fight Night: Allen vs. Costa", "UFC Fight Night"),
+            ("Noche UFC: Silva vs. Delgado", "Noche UFC"),
+            ("UFC 306 \u2013 Riyadh Season Noche UFC: O\u2019Malley vs. Dvalishvili",
+             "UFC 306"),
+            ("UFC Freedom 250: Topuria vs. Gaethje", "UFC Freedom 250"),
+            ("The Ultimate Fighter 31 Semifinal: McGregor vs. Chandler",
+             "The Ultimate Fighter 31"),
+            ("The Ultimate Fighter 25 Finale", "The Ultimate Fighter 25 Finale"),
+            # «Aldana» lleva «dana» dentro: una búsqueda sin anclar picaría.
+            ("UFC Fight Night: Holm vs. Aldana", "UFC Fight Night"),
+        ],
+    )
+    def test_real_ufc_events_in_ufc_league_are_still_skipped(self, name, short_name):
+        payload = career(entry(UFC_UID, name=name, short_name=short_name))
+        bouts, counts = parse_career(payload)
+        assert bouts == []
+        assert counts["skipped_ufc"] == 1
+        assert counts["contender_series"] == 0
+
+    def test_road_to_ufc_keeps_its_current_label(self):
+        payload = career(
+            entry(REGIONAL_UID, name="Road to UFC: Season 3, Episode 6",
+                  short_name="Road to UFC")
+        )
+        (bout,), counts = parse_career(payload)
+        assert bout.promotion == "Road to UFC"
+        assert counts["skipped_ufc_named"] == 0
+        assert counts["contender_series"] == 0
+
+    # Regionales REALES de la tabla, con la etiqueta que tienen hoy (consultada
+    # el 29-sep-2026). La BFC (2 filas) y la CBF (1) son las 3 filas que la
+    # regex SIN anclar de la migración 028 habría tomado por el DWCS.
+    @pytest.mark.parametrize(
+        ("league_id", "name", "short_name", "expected"),
+        [
+            ("3359", "BFC Contender Series 7: Belarusian Fighting Championship",
+             "BFC Contender Series 7", "BFC Contender Series"),
+            ("3359", "Caged Steel Contenders 2", "", "Caged Steel Contenders"),
+            ("3359", "100% Fight: Contenders 33", "100% Fight", "100% Fight"),
+            ("3359", "Contenders 31: Contenders London", "Contenders 31", "Contenders"),
+            ("3359", "FCC 40: Full Contact Contender 40", "FCC 40", "FCC"),
+            ("3327", "TPF 9: The Contenders", "TPF 9", "TPF"),
+            ("3359", "CBF MMA 1: Dana White Lookin' For A Fight",
+             "CBF MMA 1", "CBF MMA"),
+        ],
+    )
+    def test_regional_lookalikes_keep_their_label(
+        self, league_id, name, short_name, expected
+    ):
+        uid = f"s:3301~l:{league_id}~e:600000020~c:400000020"
+        payload = career(entry(uid, name=name, short_name=short_name))
+        (bout,), counts = parse_career(payload)
+        assert bout.promotion == expected
+        assert bout.league_id == league_id
+        assert counts["skipped_ufc_named"] == 0
+        assert counts["contender_series"] == 0
+
+    @pytest.mark.parametrize(
+        ("league_id", "event_name", "short_name", "expected"),
+        [
+            # Fuera de la liga UFC, «Contender Series» a secas puede ser
+            # cualquier regional.
+            ("3359", "Contender Series 5: Regional Night", "Contender Series 5", False),
+            # «Dana White» sin «Contender Series» detrás no es el DWCS.
+            ("3359", "Dana White's Lookin' for a Fight", None, False),
+            # Dentro de la 3321 no hay regionales: ahí sí basta.
+            ("3321", "Contender Series Brasil 1", None, True),
+            # El nombre completo vale bajo cualquier liga.
+            ("3359", DWCS_NAME, None, True),
+            # Vacíos fuera, y el ancla se aplica después de quitar espacios.
+            ("3321", None, None, False),
+            ("3321", "  " + DWCS_NAME + "  ", "", True),
+        ],
+    )
+    def test_is_contender_series(self, league_id, event_name, short_name, expected):
+        is_dwcs = espn_fight_history.is_contender_series
+        assert is_dwcs(league_id, event_name, short_name) is expected
+
+    def test_backfill_writes_the_dwcs_row(self, fakedb, monkeypatch):
+        monkeypatch.setenv("DATABASE_URL", "postgresql://test/test")
+        conn = fakedb.Connection(_Responder([(9080, "Tommy Gantt", "5307814", False)]))
+        payload = career(
+            entry(UFC_UID, name="UFC Fight Night: Allen vs. Costa",
+                  short_name="UFC Fight Night"),
+            dwcs_entry(),  # rival 5088766 -> 777 en el fake
+            entry(BELLATOR_UID),
+        )
+        payload["athlete"] = {"displayName": "Tommy Gantt"}
+
+        counts = backfill(
+            conn,
+            fetcher=lambda session, espn_id: payload,
+            sleeper=lambda seconds: None,
+        )
+
+        assert counts["written"] == 2
+        assert counts["skipped_ufc"] == 1
+        assert counts["contender_series"] == 1
+        dwcs_inserts = [
+            params for cur in conn.cursors for sql, params in cur.executed
+            if "INSERT INTO fight_history_espn" in sql and params[1] == "401794769"
+        ]
+        assert len(dwcs_inserts) == 1
+        # Posiciones del INSERT de repositories/espn_history.py.
+        params = dwcs_inserts[0]
+        assert params[0] == 9080  # fighter_id
+        assert params[3] == "3321"  # league_id real
+        assert params[4] == "Contender Series"  # promotion
+        assert params[5] == DWCS_NAME  # event_name
+        assert params[6] == date(2025, 9, 16)  # event_date
+        assert params[9] == 777  # opponent_fighter_id enlazado por espn_id
+        assert params[10] == "win"  # result
+        mutations = fakedb.mutating_statements(conn)
+        assert any("espn_history_checked_at" in s for s in mutations)
+
+    def test_backfill_dry_run_counts_dwcs_but_never_writes(self, fakedb, monkeypatch):
+        monkeypatch.setenv("DATABASE_URL", "postgresql://test/test")
+        conn = fakedb.Connection(_Responder([(9080, "Tommy Gantt", "5307814", False)]))
+        payload = career(dwcs_entry(), entry(BELLATOR_UID))
+        payload["athlete"] = {"displayName": "Tommy Gantt"}
+
+        counts = backfill(
+            conn,
+            dry_run=True,
+            fetcher=lambda session, espn_id: payload,
+            sleeper=lambda seconds: None,
+        )
+
+        assert counts["would_write"] == 2
+        assert counts["contender_series"] == 1
+        assert fakedb.mutating_statements(conn) == []
+        assert conn.commits == 0
+
+    def test_count_ufc_league_leaks(self, fakedb):
+        conn = fakedb.Connection(lambda sql, params: [(3,)])
+        assert espn_fight_history.count_ufc_league_leaks(conn) == 3
+        (sql,) = fakedb.executed_statements(conn)
+        flat = " ".join(sql.split())
+        assert "FROM fight_history_espn" in flat
+        assert "league_id = '3321'" in flat
+        assert "IS DISTINCT FROM 'Contender Series'" in flat
+        assert fakedb.mutating_statements(conn) == []
+
+    @staticmethod
+    def _prepare_main(monkeypatch, fakedb, *, leaks: int, argv: list[str]):
+        """main() con la base y el backfill falsos: la consulta de la alarma
+        responde `leaks` y el resumen trae un DWCS."""
+        conn = fakedb.Connection(
+            lambda sql, params: [(leaks,)] if "fight_history_espn" in sql else []
+        )
+
+        @contextmanager
+        def fake_connect(database_url):
+            yield conn
+
+        settings = SimpleNamespace(database_url="x")
+        monkeypatch.setattr(espn_fight_history, "get_settings", lambda: settings)
+        monkeypatch.setattr(espn_fight_history, "connect", fake_connect)
+        monkeypatch.setattr(espn_fight_history, "configure_logging", lambda: None)
+        monkeypatch.setattr(
+            espn_fight_history,
+            "backfill",
+            lambda connection, **kwargs: Counter(
+                targets=1, would_write=1, contender_series=1
+            ),
+        )
+        monkeypatch.setattr(sys, "argv", ["espn_fight_history", *argv])
+        return conn
+
+    def test_main_goes_red_when_ufc_rows_leak_even_in_dry_run(
+        self, fakedb, monkeypatch, capsys, caplog
+    ):
+        conn = self._prepare_main(
+            monkeypatch, fakedb, leaks=2, argv=["--dry-run"]
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            espn_fight_history.main()
+
+        # Código 1 para que el workflow se ponga en rojo y avise.
+        assert excinfo.value.code == 1
+        # El resumen sale igual que siempre, antes de la alarma.
+        assert '"contender_series": 1' in capsys.readouterr().out
+        errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) == 1 and " 2 " in errors[0]
+        assert fakedb.mutating_statements(conn) == []
+
+    def test_main_stays_green_without_leaks(self, fakedb, monkeypatch, capsys):
+        conn = self._prepare_main(monkeypatch, fakedb, leaks=0, argv=[])
+
+        espn_fight_history.main()  # sin SystemExit
+
+        assert '"contender_series": 1' in capsys.readouterr().out
+        assert any("fight_history_espn" in s for s in fakedb.executed_statements(conn))
