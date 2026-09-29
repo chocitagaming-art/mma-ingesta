@@ -7,9 +7,9 @@ linescores}, status {period, displayClock, type} y details[] con el
 "Unofficial Winner <X>". Sin red y sin BD real (fakedb).
 
 Contrato de calidad: ESPN solo RELLENA NULLs (COALESCE con el valor almacenado
-ganando), escribe códigos provisionales ('Decision'/'Submission'/'KO/TKO') que
-el frontend formatea y agrupa bien, y nunca escribe nada sin ganador (empates/
-NC quedan para ufcstats).
+ganando), escribe códigos provisionales ('Decision'/'Submission'/'KO/TKO'/'DQ')
+que el frontend formatea y agrupa bien, y nunca escribe nada sin ganador
+(empates/NC quedan para ufcstats).
 """
 
 from collections import Counter
@@ -18,6 +18,8 @@ from datetime import date, datetime, timezone
 from src.scrapers.espn import _build_exact_name_index, _build_normalized_name_index
 from src.scrapers.espn_live_results import (
     ESPN_PROVISIONAL_METHODS,
+    METHOD_BY_DETAIL,
+    _METHOD_BY_STATUS_PREFIX,
     LiveEvent,
     _resolve_fighter,
     candidate_event_dates,
@@ -180,8 +182,35 @@ def test_method_from_details_ignores_noise_and_logs_unknown():
     assert method_from_details([{"type": {"text": "Unofficial Winner Doctor Stoppage"}}]) is None
 
 
-def test_espn_provisional_methods_are_the_three_written_codes():
-    assert set(ESPN_PROVISIONAL_METHODS) == {"Decision", "Submission", "KO/TKO"}
+def test_espn_provisional_methods_are_the_four_written_codes():
+    assert set(ESPN_PROVISIONAL_METHODS) == {"Decision", "Submission", "KO/TKO", "DQ"}
+
+
+def test_every_code_this_module_writes_is_provisional():
+    """LA VALLA QUE FALTABA. Dos caminos escriben método: details[]
+    (METHOD_BY_DETAIL) y el leaf `status` del plan B (_METHOD_BY_STATUS_PREFIX).
+    ESPN_PROVISIONAL_METHODS solo se calculaba desde el primero, así que un
+    código que entrara solo por el segundo —el 'DQ' del 26-sep— se escribiría
+    CONGELADO: backfill_results._fill_event solo reescribe un método NULL o
+    provisional, y ese mismo UPDATE es el único que corrige también el ganador,
+    el asalto y el tiempo aproximado del directo.
+    """
+    written = set(METHOD_BY_DETAIL.values()) | {m for _, m in _METHOD_BY_STATUS_PREFIX}
+    missing = written - set(ESPN_PROVISIONAL_METHODS)
+    assert not missing, f"{sorted(missing)} se escribirían congelados"
+
+
+def test_post_event_review_does_not_flag_a_dq_as_unrefined():
+    """'DQ' es provisional, pero ufcstats también lo escribe TAL CUAL, igual que
+    'KO/TKO': las 23 'DQ' de la base (29-sep-2026) las puso él. Si entrara en
+    NEVER_FROM_UFCSTATS, la revisión post-evento avisaría de «método sin afinar»
+    con cada descalificación legítima, y una alerta que grita siempre no avisa
+    nunca.
+    """
+    from scripts.post_event_review import NEVER_FROM_UFCSTATS
+
+    assert "DQ" in ESPN_PROVISIONAL_METHODS  # sin esto el test no mide nada
+    assert "DQ" not in NEVER_FROM_UFCSTATS
 
 
 # -------------------------------------------------------------------- dates
@@ -660,6 +689,10 @@ def test_en_ensayo_no_se_escribe_latido(monkeypatch):
 # leaf .../competitions/{id}/status (444-476 bytes contra los 165 KB del
 # fightcenter). Los tres tokens que ESPN usó en las 12: submission, kotko y
 # decision---unanimous.
+#
+# El 26-sep-2026 llegó el cuarto: 'dq' (401914465, Akylbek Uulu gana a Osmanli
+# en R1). El mapa no lo conocía, la pelea se selló con method NULL y lo rellenó
+# ufcstats a la mañana siguiente. Su leaf va abajo entero.
 
 
 def test_method_from_status_maps_the_three_real_espn_tokens():
@@ -675,6 +708,39 @@ def test_method_from_status_maps_the_three_real_espn_tokens():
     ) == "Decision"
 
 
+# El leaf `status` REAL de la DQ del 26-sep-2026, tal cual lo sirve ESPN
+# (evento 600061266, competición 401914465; bajado el 29-sep-2026). A
+# diferencia de los de arriba no trae 'description': solo id, name,
+# displayName y shortDisplayName.
+DQ_STATUS_401914465 = {
+    "$ref": (
+        "http://sports.core.api.espn.com/v2/sports/mma/leagues/ufc/events/600061266"
+        "/competitions/401914465/status?lang=en&region=us"
+    ),
+    "clock": 139.0,
+    "displayClock": "2:19",
+    "period": 1,
+    "type": {
+        "id": "3",
+        "name": "STATUS_FINAL",
+        "state": "post",
+        "completed": True,
+        "description": "Final",
+        "detail": "Final",
+        "shortDetail": "Final",
+    },
+    "result": {"id": 264, "name": "dq", "displayName": "DQ", "shortDisplayName": "DQ"},
+    "featured": False,
+}
+
+
+def test_method_from_status_maps_the_real_dq():
+    assert method_from_status(DQ_STATUS_401914465) == "DQ"
+    # El token largo no está medido en el directo, pero
+    # espn_fight_history.canonical_method ya trata los dos como 'DQ'.
+    assert method_from_status({"result": {"name": "disqualification"}}) == "DQ"
+
+
 def test_method_from_status_writes_nothing_before_the_fight():
     # Pre-evento REAL del 1086 (comp 401887543, 367 B): STATUS_SCHEDULED y sin
     # `result`. Es el guard que impide sellar un método antes de la campana.
@@ -685,9 +751,9 @@ def test_method_from_status_writes_nothing_before_the_fight():
 
 
 def test_method_from_status_ignores_tokens_it_does_not_know():
-    # Una descalificación NO es un KO/TKO. Ante un token que no está en la lista
-    # blanca se calla y lo deja para ufcstats, en vez de adivinar una familia.
-    assert method_from_status({"result": {"name": "dq"}}) is None
+    # Ante un token que no está en la lista blanca se calla y lo deja para
+    # ufcstats, en vez de adivinar una familia: un combate sin resultado o un
+    # empate escritos como 'KO/TKO' serían un dato falso con cara de bueno.
     assert method_from_status({"result": {"name": "no-contest"}}) is None
     assert method_from_status({"result": {"name": "draw"}}) is None
 
@@ -695,15 +761,17 @@ def test_method_from_status_ignores_tokens_it_does_not_know():
 def test_method_from_status_only_ever_writes_provisional_codes():
     """El contrato que impide el fallo caro.
 
-    ufcstats solo puede corregir un método si vale NULL o uno de los tres
-    códigos de ESPN_PROVISIONAL_METHODS (backfill_results.py:557). Si este
-    camino escribiera el detalle ('SUB - Twister', 'U-DEC'), ese valor quedaría
-    CONGELADO para siempre: el UPDATE de consolidación no lo tocaría y
-    post_event_review tampoco lo vería. Este test es la valla.
+    ufcstats solo puede corregir un método si vale NULL o uno de los códigos
+    de ESPN_PROVISIONAL_METHODS (el UPDATE de backfill_results._fill_event,
+    `WHERE method IS NULL OR method = ANY(...)`). Si este camino escribiera el
+    detalle ('SUB - Twister', 'U-DEC'), ese valor quedaría CONGELADO para
+    siempre: el UPDATE de consolidación no lo tocaría y post_event_review
+    tampoco lo vería. Este test es la valla.
     """
     tokens = [
         "submission", "kotko", "ko", "tko",
         "decision---unanimous", "decision---split", "decision---majority",
+        "dq", "disqualification",
     ]
     for token in tokens:
         method = method_from_status({"result": {"name": token, "description": "Twister"}})
@@ -757,7 +825,7 @@ def _completed_fight_without_method():
     return parse_scoreboard(scoreboard)[0].fights[0]
 
 
-def _process_one(fight, session, fakedb):
+def _process_one(fight, session, fakedb, event_espn_id="600059185"):
     from src.scrapers.espn_live_results import _process_fight
 
     conn = fakedb.Connection(_responder)
@@ -767,7 +835,7 @@ def _process_one(fight, session, fakedb):
         conn, 5, fight,
         _build_exact_name_index(fighters), _build_normalized_name_index(fighters),
         counts, dry_run=False,
-        status_session=session, event_espn_id="600059185",
+        status_session=session, event_espn_id=event_espn_id,
     )
     return conn, counts
 
@@ -789,6 +857,51 @@ def test_completed_fight_without_details_falls_back_to_the_status_leaf(fakedb):
     # Se escribe el código GENÉRICO, que ufcstats podrá sustituir esa misma
     # noche por 'SUB - Twister'.
     assert "Submission" in updates[0]
+    assert counts["fights_updated"] == 1
+
+
+def test_the_real_dq_reaches_the_db_through_the_status_leaf(fakedb):
+    """La 16352 del 26-sep-2026: el marcador trae sus 10 details[] y ninguno
+    es el "Unofficial Winner", así que el método solo está en el leaf. Esa
+    noche el leaf decía 'dq', el mapa no lo conocía y la pelea se selló con
+    method NULL.
+
+    Los luchadores son los del fixture: lo que se prueba es el leaf, no el
+    emparejamiento.
+    """
+    competition = _competition(
+        "401914465",
+        _competitor("4350812", "Ilia Topuria", True),
+        _competitor("2504169", "Charles Oliveira", False),
+        None, 1, "2:19",
+    )
+    # Los 10 details REALES de esa pelea en el marcador (bajado el 29-sep-2026),
+    # en su orden.
+    competition["details"] = [
+        {"type": {"text": text}}
+        for text in (
+            "Results", "Fight Over", "Round End", "Pause Reason Generic", "Round Pause",
+            "Takedown", "Takedown Attempt", "Takedown Attempt", "Round Start", "Staredown",
+        )
+    ]
+    scoreboard = {"events": [{"id": "600061266", "competitions": [competition]}]}
+    fight = parse_scoreboard(scoreboard)[0].fights[0]
+    assert fight.method is None, "sin 'Unofficial Winner' el marcador no da método"
+
+    session = _FakeStatusSession({"401914465": DQ_STATUS_401914465})
+    conn, counts = _process_one(fight, session, fakedb, event_espn_id="600061266")
+
+    assert len(session.requested) == 1
+    assert "/events/600061266/competitions/401914465/status" in session.requested[0]
+    updates = [
+        params for cur in conn.cursors for sql, params in cur.executed
+        if sql.strip().upper().startswith("UPDATE")
+    ]
+    assert len(updates) == 1
+    # fill_fight_result: (winner_id, method, end_round, end_time, fight_id, ...)
+    winner_id, method, end_round = updates[0][:3]
+    assert (winner_id, method, end_round) == (101, "DQ", 1)
+    assert counts["methods_from_status_leaf"] == 1
     assert counts["fights_updated"] == 1
 
 

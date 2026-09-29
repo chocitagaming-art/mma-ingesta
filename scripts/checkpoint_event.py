@@ -3,10 +3,11 @@ land?" report to run the morning after a card (e.g. UFC 329 / event 1060 on
 Sun 12-jul, or any event by id).
 
 For each non-cancelled bout it shows what the pipeline has filled so far:
-winner, method (flagging the 'Decision'/'Submission'/'KO/TKO' PROVISIONAL codes
-ESPN writes live, which backfill_results later upgrades from ufcstats), round +
-time, referee, judges' scorecards and per-fighter stats rows. A summary line
-tells you at a glance how complete the event is.
+winner, method (flagging the PROVISIONAL codes ESPN writes live,
+espn_live_results.ESPN_PROVISIONAL_METHODS, which backfill_results later
+upgrades from ufcstats), round + time, referee, judges' scorecards and
+per-fighter stats rows. A summary line tells you at a glance how complete the
+event is.
 
 STRICTLY READ-ONLY. Run with the ingesta venv and DATABASE_URL (.env loaded):
 
@@ -21,14 +22,16 @@ import os
 
 import psycopg2
 
+# The live loop's own list, imported rather than copied: the hand-kept tuple
+# that lived here fell behind the day 'DQ' became provisional.
+from src.scrapers.espn_live_results import ESPN_PROVISIONAL_METHODS
+
 try:
     from dotenv import load_dotenv
 
     load_dotenv()
 except Exception:  # pragma: no cover
     pass
-
-PROVISIONAL = ("Decision", "Submission", "KO/TKO")
 
 EVENT_SQL = "SELECT id, name, event_date, start_time, status FROM events WHERE id = %s"
 
@@ -85,7 +88,7 @@ def main() -> None:
     cancelled = len(rows) - len(active)
     with_winner = sum(1 for r in active if r[4])
     with_method = sum(1 for r in active if r[5])
-    provisional = sum(1 for r in active if r[5] in PROVISIONAL)
+    provisional = sum(1 for r in active if r[5] in ESPN_PROVISIONAL_METHODS)
     with_ref = sum(1 for r in active if r[8])
     with_cards = sum(1 for r in active if r[9])
     with_stats = sum(1 for r in active if r[10] >= 2)
@@ -100,7 +103,7 @@ def main() -> None:
 
     for (order, st, red, blue, winner, method, rnd, etime, ref, cards, stats) in active:
         res = f"{winner} def." if winner else "— (no result)"
-        meth = f"{method}{'*' if method in PROVISIONAL else ''}" if method else "—"
+        meth = f"{method}{'*' if method in ESPN_PROVISIONAL_METHODS else ''}" if method else "—"
         # bout_order is NULL for fights ingested via ufcstats (upsert_fight never
         # sets it), so guard the width format like the other nullable fields below.
         ord_s = f"{order}" if order is not None else "-"

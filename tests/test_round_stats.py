@@ -326,6 +326,37 @@ def test_fill_event_upgrades_provisional_espn_method(fakedb):
     assert counts["bouts_filled"] == 1
 
 
+def test_fill_event_upgrades_a_live_dq_too(fakedb):
+    """La 16352 a la mañana siguiente: el directo dejó 'DQ' y ufcstats dice lo
+    mismo. El UPDATE tiene que salir IGUAL aunque el texto del método no
+    cambie: es el único que corrige el ganador, el asalto y el tiempo, y el
+    tiempo del directo es una aproximación del reloj de ESPN (o NULL si no
+    hubo serie). Con 'DQ' fuera de los provisionales, needs_result() diría que
+    no y todo eso se quedaría congelado para siempre.
+    """
+    dq_event_html = EVENT_HTML.replace(
+        "<td><p>KO/TKO</p><p>Punches</p></td>", "<td><p>DQ</p><p></p></td>"
+    )
+    conn = fakedb.Connection(lambda sql, params=None: [(1,)])
+    client = _FakeClient({EVENT_URL: dq_event_html, FIGHT_URL: FIGHT_HTML})
+    counts: Counter = Counter()
+    bouts = [_bout(method="DQ", has_round_stats=True)]
+    _fill_event(conn, client, None, 5, bouts, EVENT_URL, counts, False)
+    updates = [
+        params
+        for cur in conn.cursors
+        for sql, params in cur.executed
+        if sql.strip().startswith("UPDATE fights")
+    ]
+    assert len(updates) == 1
+    params = updates[0]
+    assert params[0] == 201                       # ganador por nombre (W en red)
+    assert params[1] == "DQ"                      # el método que da ufcstats
+    assert (params[2], params[3]) == (2, "0:15")  # asalto y tiempo oficiales
+    assert "DQ" in params[-1]                     # el WHERE deja pasar la DQ
+    assert counts["bouts_filled"] == 1
+
+
 def test_fill_event_reprocesa_un_combate_con_el_desglose_a_medias(fakedb):
     """El bout 14895 (UFC 330): 3 asaltos disputados, solo el R1 guardado.
 
