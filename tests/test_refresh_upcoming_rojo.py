@@ -304,7 +304,12 @@ def test_el_workflow_solo_pasa_forzar_evento_si_no_esta_vacio():
     assert paso["env"]["FORZAR_EVENTO"] == "${{ inputs.forzar_evento }}"
     assert "inputs.forzar_evento" not in paso["run"]
     assert '[ -n "$FORZAR_EVENTO" ]' in paso["run"]
-    assert "--forzar-evento" in paso["run"]
+    # La rama que fuerza es la de la entrada NO vacia, y la otra no fuerza: con
+    # las ramas al reves, el cron diario pasaria --forzar-evento "" y el
+    # dispatch forzado correria sin forzar nada.
+    con_entrada, sin_entrada = paso["run"].split("else", 1)
+    assert '--forzar-evento "$FORZAR_EVENTO"' in con_entrada
+    assert "--forzar-evento" not in sin_entrada
     # Y el run sin forzar sigue siendo el de siempre.
-    assert "python -m src.scrapers.refresh_upcoming" in paso["run"]
+    assert "python -m src.scrapers.refresh_upcoming" in sin_entrada
     assert paso["env"]["DATABASE_URL"] == "${{ secrets.DATABASE_URL }}"
