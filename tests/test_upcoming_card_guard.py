@@ -17,12 +17,15 @@ Aqui NO se toca `cancel_missing_upcoming_fights` ni su [-1] (lo fija
 test_title_and_cancelled.py): la guarda va una capa por encima, en `_write_event`.
 
 Todo offline: HTML en linea, `_get_soup` sustituido con monkeypatch y el `fakedb`
-de conftest.py. Nunca se llama a `scrape_upcoming_events`: abre su propia
+de conftest.py. Aqui nunca se llama a `scrape_upcoming_events`: abre su propia
 conexion y, con el DATABASE_URL que exporta el megatest, escribiria en PRODUCCION.
+Su bucle se prueba aparte, en test_upcoming_card_guard_loop.py, con la conexion
+y la red sustituidas.
 """
 
 import json
 import logging
+import re
 from collections import Counter
 
 import pytest
@@ -90,19 +93,24 @@ def _evento_del_listado(slug: str) -> ue.ParsedEvent:
     )
 
 
-def _base(activos: int, cancelados_por_ufc: int = 0):
-    """Responder del fakedb: la base tiene `activos` combates vivos en el evento.
+def _base(activos: int, cancelados_por_ufc: int = 0, slug: str = "ufc-332"):
+    """Responder del fakedb: la base tiene `activos` combates vivos en el evento `slug`.
 
     🪤 Tiene que distinguir el COUNT del resto: `RecordingCursor.rowcount` es
     `len(resultado)`, asi que la cancelacion devuelve una fila por combate que
     Postgres pasaria a 'cancelled'.
+
+    🪤 Y el COUNT solo da `activos` si pregunta por ESE evento de ufc.com; con
+    otro slug, con el nombre del evento o con otra fuente da 0, como la base de
+    verdad. Si contestara a cualquier pregunta, una guarda que contara el evento
+    equivocado pasaria estos tests y en produccion no retendria nunca nada.
     """
     ids = iter(range(100, 200))
 
     def responder(sql, params=None):
         plano = " ".join(sql.split())
         if "COUNT(*)" in plano:
-            return [(activos,)]
+            return [(activos,)] if params == ("ufc.com", slug, "ufc.com") else [(0,)]
         if plano.startswith("SELECT id FROM events"):
             return [(1092,)]  # el evento ya existe: rama UPDATE de upsert_event_meta
         if plano.startswith("INSERT INTO fights"):
@@ -115,7 +123,7 @@ def _base(activos: int, cancelados_por_ufc: int = 0):
 
 
 def _escribe(fakedb, evento, activos, cancelados_por_ufc=0, forzar=frozenset()):
-    conn = fakedb.Connection(_base(activos, cancelados_por_ufc))
+    conn = fakedb.Connection(_base(activos, cancelados_por_ufc, evento.source_id))
     counts: Counter = Counter()
     escrito = ue._write_event(conn, lambda nombre: None, counts, evento, 1, forzar)
     return conn, counts, escrito
@@ -377,8 +385,25 @@ def test_el_recuento_usa_el_mismo_where_que_la_cancelacion(fakedb):
         "status IS DISTINCT FROM 'cancelled'",
     ):
         assert filtro in cancel and filtro in cuenta, filtro
+    # El filtro de fuente de los COMBATES, no solo el del evento: "e.source = %s"
+    # tambien contiene "source = %s", asi que sin esto un COUNT que perdiera el
+    # filtro de fuera seguiria pasando el bucle de arriba.
+    fuente_de_los_combates = re.compile(r"(?<![.\w])source = %s")
+    assert fuente_de_los_combates.search(cancel) and fuente_de_los_combates.search(cuenta)
     assert "NOT (id = ANY" not in cuenta
     assert params == ("ufc.com", "ufc-332", "ufc.com")
+
+
+def test_la_guarda_cuenta_los_activos_por_el_slug_y_la_fuente_de_ufc_com(fakedb):
+    """Ni por el nombre del evento, que no es clave, ni con otra fuente.
+
+    Las dos preguntas darian 0 en la base de verdad, y con 0 activos la guarda
+    no retiene nunca: se apagaria sin que ningun otro test se enterase.
+    """
+    conn, _, _ = _escribe(fakedb, _evento("ufc-332", n_combates=14), activos=14)
+
+    cuentas = [p for cur in conn.cursors for sql, p in cur.executed if "COUNT(*)" in sql]
+    assert cuentas == [("ufc.com", "ufc-332", "ufc.com")]
 
 
 def test_un_evento_que_no_esta_en_la_base_tiene_cero_activos(fakedb):
