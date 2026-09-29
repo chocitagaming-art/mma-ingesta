@@ -75,6 +75,36 @@ def cancel_missing_upcoming_fights(
         return cursor.rowcount
 
 
+def count_active_upcoming_fights(
+    connection: PgConnection, source: str, event_source_id: str
+) -> int:
+    """Count the bouts of the (source, source_id) event that are still live.
+
+    Same WHERE as cancel_missing_upcoming_fights (minus the kept ids), i.e.
+    exactly the rows a re-scrape could flip to 'cancelled'. upcoming_events
+    compares it with the scraped card BEFORE touching the event: an empty or
+    half-parsed ufc.com page must not cancel a whole card. The event is looked
+    up by its ufc.com slug because its id is only known after
+    upsert_event_meta, which the guard must not run. An event not in the DB
+    yet has 0 live bouts.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT COUNT(*) FROM fights
+            WHERE event_id = (
+                SELECT e.id FROM events e WHERE e.source = %s AND e.source_id = %s
+            )
+              AND source = %s
+              AND winner_id IS NULL AND method IS NULL
+              AND status IS DISTINCT FROM 'cancelled'
+            """,
+            (source, event_source_id, source),
+        )
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+
 def reconcile_upcoming_fight_source_id(
     connection: PgConnection,
     event_id: int,
