@@ -2,8 +2,8 @@ name: Live results (ESPN)
 
 # Casi-en-vivo (fase 6 / BE1): fills winner/method/round/time onto our bouts
 # from ESPN's public scoreboard minutes after each fight ends. Results are
-# PROVISIONAL ('Decision'/'Submission'/'KO/TKO') and only ever fill NULLs; the
-# daily backfill_results upgrades them with ufcstats detail afterwards.
+# PROVISIONAL (espn_live_results.ESPN_PROVISIONAL_METHODS) and only ever fill
+# NULLs; the daily backfill_results upgrades them with ufcstats detail afterwards.
 #
 # Schedule: every 10 min ONLY during the typical event windows —
 #   - Sun 00:00-08:59 UTC = Saturday night US (numbered cards / fight nights)

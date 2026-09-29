@@ -17,18 +17,21 @@ competition.details[] entries whose type.text is "Unofficial Winner Decision" |
 "Unofficial Winner Submission" | "Unofficial Winner Kotko" (sic, = KO/TKO).
 
 Method codes written (PROVISIONAL, see below): 'Decision' / 'Submission' /
-'KO/TKO'. Chosen against the frontend's formatMethod + win-method buckets
-(mma-app src/lib/format.ts, fighters.detail.ts): all three render a proper
+'KO/TKO' / 'DQ'. Chosen against the frontend's formatMethod + win-method buckets
+(mma-app src/lib/format.ts, fighters.detail.ts): all four render a proper
 Spanish label AND bucket correctly ('SUB' or 'U-DEC' would fall to raw text /
-'other'). ESPN never distinguishes unanimous/split, so the honest generic
-'Decision' is used even when linescores exist.
+'other'; 'DQ' belongs in 'other'). ESPN never distinguishes unanimous/split, so
+the honest generic 'Decision' is used even when linescores exist. 'DQ' only
+ever comes from the core API `status` leaf (the plan B in _process_fight):
+no "Unofficial Winner" detail for a disqualification has been seen.
 
 Data-quality contract with ufcstats (the better source):
   - fill_fight_result COALESCEs with the STORED value winning, so ESPN can
     never overwrite anything ufcstats already wrote;
-  - conversely backfill_results treats these three provisional codes as
-    upgradeable, so the next daily run replaces them with ufcstats detail
-    ('U-DEC', 'KO/TKO - Punches', ...). Draws/NCs are skipped here entirely
+  - conversely backfill_results treats these provisional codes
+    (ESPN_PROVISIONAL_METHODS) as upgradeable, so the next daily run replaces
+    them with ufcstats detail ('U-DEC', 'KO/TKO - Punches', ...) and fixes the
+    winner, round and time along the way. Draws/NCs are skipped here entirely
     (no winner flag -> nothing written) and left to ufcstats.
 
 Cheap guard for the 10-minute cron: the scoreboard is fetched FIRST and the
@@ -111,16 +114,24 @@ METHOD_BY_DETAIL = {
 }
 _UNOFFICIAL_WINNER_PREFIX = "unofficial winner"
 
-# result.name del leaf `status` -> el MISMO código provisional de arriba. ESPN
-# usa aquí otros tokens que en details[]: 'submission', 'kotko' y
-# 'decision---unanimous' son los tres que mandó en las 12 peleas del
-# 15-ago-2026. Se mapea por prefijo porque la decisión lleva el subtipo pegado
-# con tres guiones (y hay 'decision---split' / '---majority').
+# result.name del leaf `status` -> código provisional, el MISMO de arriba para
+# las tres familias de details[]. ESPN usa aquí otros tokens que en details[]:
+# 'submission', 'kotko' y 'decision---unanimous' son los tres que mandó en las
+# 12 peleas del 15-ago-2026. Se mapea por prefijo porque la decisión lleva el
+# subtipo pegado con tres guiones (y hay 'decision---split' / '---majority').
+#
+# La descalificación solo se escribe desde aquí. El 26-sep-2026 (401914465) el
+# leaf mandó 'dq' y el marcador no traía ningún "Unofficial Winner" para esa
+# pelea; como 'dq' no estaba en la lista, se selló con method NULL. No está en
+# METHOD_BY_DETAIL porque ese texto no se ha visto nunca, y si llegara,
+# method_from_details devuelve None y este plan B la recoge igual. 'DQ' es el
+# mismo literal que escribe ufcstats. 'disqualification' no está medido en el
+# directo, pero espn_fight_history ya trata los dos tokens como 'DQ'.
 #
 # DELIBERADAMENTE se tira el detalle: el leaf trae description='Twister' y con
 # él saldría 'SUB - Twister', mejor dato y tres horas antes. Pero ese literal NO
 # está en ESPN_PROVISIONAL_METHODS, y backfill_results solo corrige un método
-# que valga NULL o uno de esos tres (backfill_results.py:557). Escribir el
+# que valga NULL o uno de esos códigos (el UPDATE de _fill_event). Escribir el
 # detalle CONGELARÍA el dato para siempre: ufcstats no podría tocarlo y
 # post_event_review no vería la diferencia entre un 'U-DEC' bueno y uno malo.
 # Para escribir el detalle hace falta antes una columna que diga quién puso el
@@ -131,11 +142,22 @@ _METHOD_BY_STATUS_PREFIX = (
     ("kotko", "KO/TKO"),
     ("ko", "KO/TKO"),
     ("tko", "KO/TKO"),
+    ("dq", "DQ"),
+    ("disqualification", "DQ"),
 )
 
 # The provisional codes this module writes; backfill_results treats a stored
-# method equal to one of these as still-fillable from ufcstats.
-ESPN_PROVISIONAL_METHODS = tuple(sorted(set(METHOD_BY_DETAIL.values())))
+# method equal to one of these as still-fillable from ufcstats. Built from BOTH
+# maps on purpose: a code only the status leaf writes ('DQ') and missing here
+# would be written FROZEN, and the ufcstats UPDATE that could no longer touch
+# it is also the only one that fixes the winner, the round and the approximate
+# live end_time. Guarded by test_every_code_this_module_writes_is_provisional.
+ESPN_PROVISIONAL_METHODS = tuple(
+    sorted(
+        set(METHOD_BY_DETAIL.values())
+        | {method for _, method in _METHOD_BY_STATUS_PREFIX}
+    )
+)
 
 # ESPN marca una pelea cancelada/aplazada a mitad de evento con state='post'
 # (completed=False) y un status_type.name como STATUS_CANCELED/STATUS_POSTPONED.
@@ -385,9 +407,12 @@ def method_from_status(payload: dict[str, Any] | None) -> str | None:
     no puede sellar nada antes de tiempo.
 
     Lista blanca estricta: un token que no reconocemos devuelve None y lo
-    rellena ufcstats. Adivinar la familia sería peor que no escribir — una
-    descalificación mapeada a 'KO/TKO' además dejaría la pelea sin las tarjetas
-    de los jueces (backfill_results._is_decision decide si se piden).
+    rellena ufcstats. Adivinar la familia sería peor que no escribir, porque el
+    código decide más que la etiqueta: 'Decision' sella 5:00 como hora de fin
+    (elapsed_end_time) y pide las tarjetas de los jueces
+    (backfill_results._is_decision). Cada token de la lista tiene su porqué en
+    el comentario de _METHOD_BY_STATUS_PREFIX, y todos van a un código de
+    ESPN_PROVISIONAL_METHODS.
     """
     result = (payload or {}).get("result") or {}
     name = str(result.get("name") or "").strip().lower()
