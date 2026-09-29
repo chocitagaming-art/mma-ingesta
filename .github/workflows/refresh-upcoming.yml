@@ -3,10 +3,23 @@ name: Refresh upcoming events
 # Keeps "Próximos" in sync with ufc.com (events + cards) and enriches the new
 # fighters (photo / record / nationality). Idempotent — see
 # src/scrapers/refresh_upcoming.py. Writes to the production Neon DB.
+#
+# The run turns RED (and notify-on-failure opens its Issue) when a step fails
+# or raises an alarm, e.g. cards_guarded: a ufc.com card that looks broken
+# against the DB is held back instead of cancelled. If that drop is REAL, run
+# this workflow by hand with `forzar_evento` = SLUG=N, the event's slug and the
+# bouts ufc.com shows (e.g. ufc-332=10). It is applied only if ufc.com serves
+# exactly N bouts in that run; otherwise the card stays held and the run red.
 on:
   schedule:
     - cron: "0 6 * * *" # daily at 06:00 UTC
-  workflow_dispatch: {} # manual "Run workflow" button
+  workflow_dispatch: # manual "Run workflow" button
+    inputs:
+      forzar_evento:
+        description: "Bajada REAL que retiene la guarda, como slug=combates que ves en ufc.com (p. ej. ufc-332=10). Solo se aplica si ufc.com da justo esos combates. Vacio = pase normal"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: refresh-upcoming
@@ -25,6 +38,14 @@ jobs:
           cache-dependency-path: requirements-scrapers.txt
       - run: pip install -r requirements-scrapers.txt
       - name: Run refresh pipeline
-        run: python -m src.scrapers.refresh_upcoming
+        # The input reaches the script through env, never pasted into it: it is
+        # free text. Empty (and always on the daily cron) = the usual run.
+        run: |
+          if [ -n "$FORZAR_EVENTO" ]; then
+            python -m src.scrapers.refresh_upcoming --forzar-evento "$FORZAR_EVENTO"
+          else
+            python -m src.scrapers.refresh_upcoming
+          fi
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FORZAR_EVENTO: ${{ inputs.forzar_evento }}

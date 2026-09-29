@@ -20,6 +20,8 @@ Idempotent: events upsert by (source, source_id); each event's bouts upsert by
 their ufc.com fmid, bouts that dropped off the card are marked status='cancelled'
 (never deleted — a reappearing bout is reactivated by the upsert), and upcoming
 events that have dropped off the ufc.com list are completed once their date passes.
+An event whose detail page failed, or whose scraped card looks broken against the
+DB (_card_looks_broken), is left untouched for the day instead (see _write_event).
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ import logging
 import re
 import time
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from urllib.parse import urljoin
@@ -47,6 +50,7 @@ from .repositories.events import EventMetaRecord, upsert_event_meta
 from .repositories.fights import (
     UpcomingFightRecord,
     cancel_missing_upcoming_fights,
+    count_active_upcoming_fights,
     reconcile_upcoming_fight_source_id,
     upsert_upcoming_fight,
 )
@@ -152,6 +156,11 @@ class ParsedEvent:
     # overwrite a stored value (COALESCE in upsert_event_meta).
     prelims_time: datetime | None = None
     early_prelims_time: datetime | None = None
+    # True SOLO si `_parse_detail` termino sin excepcion (lo pone
+    # `_fetch_details`). Con False el evento no se escribe ese dia: sin ficha,
+    # `bouts` queda vacio, y escribirlo cancelaria la cartelera entera y le
+    # pondria de nombre el cartel pelado. Ver `_write_event`.
+    detail_ok: bool = False
 
 
 # --------------------------------------------------------------------------- fetch
@@ -319,7 +328,33 @@ def _parse_card_ticket(card) -> str | None:
 # ------------------------------------------------------------------------- detail
 
 
+def _fetch_details(session, settings, events: list[ParsedEvent], counts: Counter) -> None:
+    """Descarga y parsea la ficha de cada evento, y marca cuales salieron bien.
+
+    Un fallo (HTTP, timeout, ficha sin og:title o una excepcion a mitad del
+    parseo) suma `detail_errors` y deja `detail_ok=False`, y `_write_event` no
+    tocara ese evento. Antes el fallo solo se contaba: el evento se escribia
+    igual, con la cartelera vacia, y se cancelaba entera.
+    """
+    for event in events:
+        try:
+            detail = _get_soup(session, event.detail_url, settings)
+            _parse_detail(detail, event)
+            event.detail_ok = True
+            counts["details_fetched"] += 1
+            counts["bouts_parsed"] += len(event.bouts)
+        except Exception as exc:
+            counts["detail_errors"] += 1
+            LOGGER.warning("Failed to fetch/parse detail for %s: %s", event.source_id, exc)
+
+
 def _parse_detail(soup: BeautifulSoup, event: ParsedEvent) -> None:
+    # Sin og:title no es la ficha de un evento: es un muro anti-bot o una
+    # pagina rota servida con un 200. Se lanza ANTES de tocar el evento. En 38
+    # eventos no ha faltado nunca, ni en los anunciados sin combates (ufc-335
+    # lo trae el 29-sep-2026), asi que no deja fuera nada legitimo.
+    if _meta_content(soup, "og:title") is None:
+        raise ValueError(f"la ficha de {event.source_id} no trae og:title")
     event.name = _build_event_name(soup, event.headliner)
     event.tagline = _meta_content(soup, "og:description")
     event.image_url = _parse_detail_image(soup)
@@ -651,7 +686,120 @@ def _write_event_bouts(connection, match, counts: Counter, event: ParsedEvent, e
     )
 
 
-def scrape_upcoming_events(dry_run: bool = False) -> Counter:
+# LA GUARDA DE LA CARTELERA (29-sep-2026). Una ficha de ufc.com vacia o a medias
+# da `bouts` corto, y `cancel_missing_upcoming_fights` cancela todo lo que falta:
+# con 0 combates, la cartelera ENTERA (su centinela [-1]). Lo legitimo, medido en
+# la base: 16 filas canceladas en 10 eventos, como mucho 2 por evento y dia, en
+# carteleras de 15-16 combates. Se dejan pasar hasta 3 de golpe, uno mas que el
+# maximo visto; 4 o mas se retienen.
+MAX_BOUTS_DROPPED_AT_ONCE = 3
+
+
+def _card_looks_broken(parsed: int, active: int) -> bool:
+    """True si la cartelera que da ufc.com parece rota frente a la de la base.
+
+    `parsed` son los combates de la ficha y `active` los vivos en la base
+    (`count_active_upcoming_fights`). Salta si la base tiene algo que perder y
+    ufc.com da 0 combates, menos de la mitad, o mas de
+    MAX_BOUTS_DROPPED_AT_ONCE menos de golpe. Con 0 y 0 no salta: es un evento
+    recien anunciado ('TBD vs. TBD'). Un Road To UFC que pasa de 2 a 1, tampoco.
+    """
+    if active <= 0:
+        return False
+    return (
+        parsed == 0
+        or 2 * parsed < active
+        or active - parsed > MAX_BOUTS_DROPPED_AT_ONCE
+    )
+
+
+def _write_event(
+    connection,
+    match,
+    counts: Counter,
+    event: ParsedEvent,
+    promotion_id: int,
+    forzar_eventos: Mapping[str, int] | None = None,
+) -> bool:
+    """Escribe un evento del listado, o no lo toca si ufc.com no da con que.
+
+    Devuelve True si ha escrito (el bucle hace commit y lo cuenta) y False si
+    se ha saltado el evento ENTERO: ni `upsert_event_meta` ni combates, asi que
+    la base conserva su nombre, sus horas y su cartelera hasta el siguiente
+    pase. Dos guardas, por orden:
+
+      1. El detalle fallo (`detail_ok=False`): no hay ficha con que escribir, y
+         ni siquiera se pregunta a la base.
+      2. La ficha parece rota frente a la base (`_card_looks_broken`). Una
+         bajada REAL que esta guarda retenga se fuerza a mano con
+         `--forzar-evento <slug>=<N>` en refresh_upcoming, con N los combates
+         que se ven en ufc.com (`forzar_eventos`: slug -> N). Se salta SOLO
+         esta guarda, solo para ese slug y solo si ufc.com da justo N combates
+         en ese pase, nunca 0. La del detalle no se salta nunca.
+
+    Cada salto deja un WARNING con los numeros y un contador
+    (`events_skipped_detail`, `cards_guarded`) que pone el cron en rojo.
+    """
+    if not event.detail_ok:
+        counts["events_skipped_detail"] += 1
+        LOGGER.warning("%s: fallo el detalle de ufc.com; no se toca el evento", event.source_id)
+        return False
+
+    parsed = len(event.bouts)
+    active = count_active_upcoming_fights(connection, SOURCE, event.source_id)
+    if _card_looks_broken(parsed, active):
+        esperados = (forzar_eventos or {}).get(event.source_id)
+        if esperados is None:
+            counts["cards_guarded"] += 1
+            LOGGER.warning(
+                "%s: ufc.com da %s combates y la base tiene %s activos; no se toca el evento",
+                event.source_id, parsed, active,
+            )
+            return False
+        # El forzado no se fia de la ficha de ESTE pase: exige los combates que
+        # se comprobaron a mano. Si justo ahora llega vacia o a medias, se
+        # retiene como siempre; si no, cancelaria la cartelera que la guarda
+        # protege, y el run acabaria en verde.
+        if parsed == 0 or parsed != esperados:
+            counts["cards_guarded"] += 1
+            LOGGER.warning(
+                "%s: --forzar-evento esperaba %s combates y ufc.com da %s (la base "
+                "tiene %s activos); no se toca el evento",
+                event.source_id, esperados, parsed, active,
+            )
+            return False
+        counts["cards_forced"] += 1
+        LOGGER.warning(
+            "%s: FORZADO a mano (--forzar-evento %s=%s): ufc.com da %s combates y la "
+            "base tiene %s activos; se escribe igual",
+            event.source_id, event.source_id, esperados, parsed, active,
+        )
+
+    record = EventMetaRecord(
+        name=event.name or event.headliner or event.source_id,
+        event_date=event.event_date,
+        start_time=event.start_time,
+        location=event.location,
+        promotion_id=promotion_id,
+        status="upcoming",
+        image_url=event.image_url,
+        tagline=event.tagline,
+        broadcast=event.broadcast,
+        ticket_url=event.ticket_url,
+        headliner=event.headliner,
+        source=SOURCE,
+        source_id=event.source_id,
+        prelims_time=event.prelims_time,
+        early_prelims_time=event.early_prelims_time,
+    )
+    event_id = upsert_event_meta(connection, record)
+    _write_event_bouts(connection, match, counts, event, event_id)
+    return True
+
+
+def scrape_upcoming_events(
+    dry_run: bool = False, forzar_eventos: Mapping[str, int] | None = None
+) -> Counter:
     settings = get_settings()
     counts: Counter = Counter()
     session = _new_session()
@@ -659,16 +807,15 @@ def scrape_upcoming_events(dry_run: bool = False) -> Counter:
 
     events = _parse_all_listing_pages(session, settings, counts)
     counts["events_found"] = len(events)
+    _fetch_details(session, settings, events, counts)
 
-    for event in events:
-        try:
-            detail = _get_soup(session, event.detail_url, settings)
-            _parse_detail(detail, event)
-            counts["details_fetched"] += 1
-            counts["bouts_parsed"] += len(event.bouts)
-        except Exception as exc:
-            counts["detail_errors"] += 1
-            LOGGER.warning("Failed to fetch/parse detail for %s: %s", event.source_id, exc)
+    # Un slug forzado que no esta en el listado no fuerza nada. Se dice, para
+    # que quien lanzo el dispatch no crea que su bajada se ha aplicado.
+    forzados = dict(forzar_eventos or {})
+    for slug in sorted(set(forzados) - {e.source_id for e in events}):
+        LOGGER.warning(
+            "--forzar-evento %s: no esta en el listado de ufc.com; no se fuerza nada", slug
+        )
 
     with connect(settings.database_url) as connection:
         fighters = get_all_fighters(connection)
@@ -708,28 +855,12 @@ def scrape_upcoming_events(dry_run: bool = False) -> Counter:
 
         for event in events:
             try:
-                record = EventMetaRecord(
-                    name=event.name or event.headliner or event.source_id,
-                    event_date=event.event_date,
-                    start_time=event.start_time,
-                    location=event.location,
-                    promotion_id=settings.promotion_id_ufc,
-                    status="upcoming",
-                    image_url=event.image_url,
-                    tagline=event.tagline,
-                    broadcast=event.broadcast,
-                    ticket_url=event.ticket_url,
-                    headliner=event.headliner,
-                    source=SOURCE,
-                    source_id=event.source_id,
-                    prelims_time=event.prelims_time,
-                    early_prelims_time=event.early_prelims_time,
-                )
-                event_id = upsert_event_meta(connection, record)
-                _write_event_bouts(connection, match, counts, event, event_id)
-                connection.commit()
-                counts["events_written"] += 1
-                counts["bouts_written"] += len(event.bouts)
+                if _write_event(
+                    connection, match, counts, event, settings.promotion_id_ufc, forzados
+                ):
+                    connection.commit()
+                    counts["events_written"] += 1
+                    counts["bouts_written"] += len(event.bouts)
             except Exception:
                 connection.rollback()
                 counts["write_errors"] += 1
@@ -757,6 +888,8 @@ def _build_summary(counts: Counter) -> str:
         "fighters_in_db", "bouts_red_matched", "bouts_blue_matched",
         "stale_completed", "stale_skipped", "events_written", "bouts_written",
         "bouts_cancelled", "standing_photos_updated", "write_errors",
+        # La guarda de la cartelera: eventos que hoy NO se han tocado, y por que.
+        "events_skipped_detail", "cards_guarded", "cards_forced",
     ]
     return json.dumps({key: counts.get(key, 0) for key in keys}, indent=2)
 
