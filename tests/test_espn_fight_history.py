@@ -460,6 +460,27 @@ class TestBackfillIdentityGuard:
         assert counts["name_mismatch"] == 0
         assert counts["written"] == 1
 
+    def test_birth_date_read_from_date_of_birth_when_there_is_no_display_dob(
+        self, fakedb, monkeypatch
+    ):
+        # Si ESPN sirve solo dateOfBirth (ISO), la regla de la fecha tiene que
+        # leerla igual: Spohn entra, y con otra fecha no.
+        conn, counts = self._run(
+            fakedb, monkeypatch,
+            (8219, "Daniel Spohn", "3024141", False, date(1984, 10, 12)),
+            {"displayName": "Dan Spohn", "dateOfBirth": "1984-10-12T07:00Z"},
+        )
+        assert counts["name_mismatch"] == 0
+        assert counts["written"] == 1
+
+        conn, counts = self._run(
+            fakedb, monkeypatch,
+            (8219, "Daniel Spohn", "3024141", False, date(1984, 10, 12)),
+            {"displayName": "Dan Spohn", "dateOfBirth": "1984-10-13T07:00Z"},
+        )
+        assert counts["name_mismatch"] == 1
+        assert fakedb.mutating_statements(conn) == []
+
     def test_shared_word_without_espn_birth_date_is_rejected(self, fakedb, monkeypatch):
         conn, counts = self._run(
             fakedb, monkeypatch,

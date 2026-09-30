@@ -38,7 +38,7 @@ nada y sale en 0.
 
 QUE ESCRIBE, en UNA transaccion: fighters.espn_id con set_fighter_espn_id
 (el helper del repo: solo escribe si espn_id IS NULL y no toca el sello) y
-    UPDATE fight_history_espn SET opponent_fighter_id = <ficha>
+    UPDATE fight_history_espn SET opponent_fighter_id = <ficha>, updated_at = NOW()
      WHERE opponent_espn_id = <id> AND opponent_fighter_id IS NULL
 Si una escritura de fighters no entra (alguien la relleno entre medias), se
 deshace TODO y sale en 1.
@@ -100,10 +100,17 @@ ENLACES: tuple[Enlace, ...] = (
            "2 votos del marcador ESPN frente a sus rivales UFC; DWCS 2019"),
     Enlace(7866, "3991049", "Henrique da Silva", date(1989, 9, 1), 1,
            "2 votos del marcador ESPN frente a sus rivales UFC; DWCS 2018"),
+    # La carrera ESPN de 4252258 trae ademas un combate del 28-may-2026 en
+    # 'Road to UFC Season 5' contra Rongzhu (fila 83439 de Rongzhu, ficha
+    # 6848) que puede ser ESPN mezclando a dos personas. Es posterior a su
+    # debut UFC, asi que el corte estricto del modelo lo ignora. PENDIENTE de
+    # comprobarlo a mano.
     Enlace(1336, "4252258", "Victor Martinez", date(1991, 7, 17), 1,
-           "carrera ESPN con su rival UFC Leavitt 4686565; DWCS 22-sep-2021"),
+           "carrera ESPN con sus rivales UFC Leavitt 4686565 y Nolan 5144007 "
+           "(18-may-2024); DWCS 22-sep-2021"),
     Enlace(9075, "5310564", "Victor Valenzuela", date(1994, 2, 9), 1,
-           "carrera ESPN con sus rivales UFC Nolan 5144007 y Griffin 3040385; DWCS 15-oct-2025"),
+           "carrera ESPN con su rival UFC Griffin 3040385 (25-abr-2026); nacido "
+           "9/2/1994 y 14-4-0 en ESPN; DWCS 15-oct-2025"),
     # --- Grupo 2: prueba por id, pero ESPN escribe otro nombre -------------
     Enlace(9084, "5080485", "Jose Souza", date(2002, 5, 23), 2,
            "ESPN 'Jose Henrique'; rival UFC Ding Meng 4813565; nacido 23-05-2002 en los dos lados"),
@@ -150,7 +157,7 @@ SQL_RIVALES_PENDIENTES = (
     "WHERE opponent_espn_id = %s AND opponent_fighter_id IS NULL"
 )
 SQL_REENLAZAR_RIVALES = (
-    "UPDATE fight_history_espn SET opponent_fighter_id = %s "
+    "UPDATE fight_history_espn SET opponent_fighter_id = %s, updated_at = NOW() "
     "WHERE opponent_espn_id = %s AND opponent_fighter_id IS NULL"
 )
 

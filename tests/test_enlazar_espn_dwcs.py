@@ -91,6 +91,85 @@ def test_la_prueba_de_bittencourt_no_afirma_que_el_duplicado_sea_otro():
     assert "NO es el" not in (mod.__doc__ or "")
 
 
+def test_las_pruebas_de_los_dos_victor_no_se_cruzan():
+    """Tom Nolan (5144007, 18-may-2024) y Leavitt fueron rivales UFC de Victor
+    Martinez; a Valenzuela lo prueban Griffin (3040385, 25-abr-2026), su fecha
+    de nacimiento 9/2/1994 y su 14-4-0. La revisión encontró a Nolan en la
+    prueba de Valenzuela."""
+    por_ficha = {e.fighter_id: e for e in mod.ENLACES}
+    valenzuela, martinez = por_ficha[9075], por_ficha[1336]
+    assert "Nolan" not in valenzuela.prueba and "5144007" not in valenzuela.prueba
+    assert "3040385" in valenzuela.prueba
+    assert "9/2/1994" in valenzuela.prueba and "14-4-0" in valenzuela.prueba
+    assert "5144007" in martinez.prueba and "4686565" in martinez.prueba
+
+
+# --- El SQL: el doble de la base casa las sentencias por PREFIJO, así que las
+# cláusulas que importan se fijan aquí, sobre las constantes que ejecuta main().
+
+
+def test_el_reenlace_solo_toca_filas_sin_rival_y_de_ese_id():
+    sql = _flat(mod.SQL_REENLAZAR_RIVALES)
+    set_clause, where = sql.split(" WHERE ")
+    assert "opponent_fighter_id IS NULL" in where
+    assert "opponent_espn_id = %s" in where
+    assert " OR " not in where
+    # Como el upsert del repo (repositories/espn_history.py).
+    assert "updated_at = NOW()" in set_clause
+
+
+def test_el_recuento_de_rivales_usa_el_mismo_filtro_que_el_reenlace():
+    where_cuenta = _flat(mod.SQL_RIVALES_PENDIENTES).split(" WHERE ")[1]
+    where_update = _flat(mod.SQL_REENLAZAR_RIVALES).split(" WHERE ")[1]
+    assert where_cuenta == where_update
+
+
+def test_otras_fichas_con_el_id_mira_espn_id_y_las_sembradas_y_excluye_la_propia():
+    where = _flat(mod.SQL_OTRAS_CON_EL_ID).split(" WHERE ")[1]
+    assert where.startswith("id <> %s AND (")
+    assert "espn_id = %s" in where
+    assert "(source = 'espn' AND source_id = %s)" in where
+    assert where.count("%s") == 3
+
+
+# --- La lista inválida aborta ANTES de abrir la base ---------------------------
+
+
+def _con_extra(extra):
+    return mod.ENLACES + (extra,)
+
+
+@pytest.mark.parametrize(
+    "lista",
+    [
+        # Joey Gomez, ficha prohibida.
+        lambda: _con_extra(mod.Enlace(7963, "3947130", "Joey Gomez", date(1990, 1, 1), 1, "x")),
+        # El Joey Gomez del DWCS, id prohibido, en una ficha cualquiera.
+        lambda: _con_extra(mod.Enlace(1, "4357555", "Nadie", date(1990, 1, 1), 1, "x")),
+        # Ficha repetida.
+        lambda: _con_extra(mod.Enlace(6302, "1111111", "Josh Hokit", date(1997, 11, 12), 1, "x")),
+        # Id de ESPN repetido.
+        lambda: _con_extra(mod.Enlace(2, "4049391", "Otro", date(1990, 1, 1), 1, "x")),
+    ],
+)
+def test_una_lista_invalida_sale_en_2_sin_abrir_ninguna_conexion(monkeypatch, capsys, lista):
+    monkeypatch.setattr(mod, "ENLACES", lista())
+    abiertas = []
+
+    def _prohibido(*args, **kwargs):
+        abiertas.append(args)
+        raise AssertionError("no se puede abrir la base con una lista inválida")
+
+    monkeypatch.setattr(mod, "_open_connection", _prohibido)
+    monkeypatch.setattr(mod.psycopg2, "connect", _prohibido)
+    monkeypatch.setattr(mod, "get_settings", _prohibido)
+
+    assert mod.main(["--aplicar"]) == 2
+    assert mod.main([]) == 2
+    assert abiertas == []
+    assert "ABORTA" in capsys.readouterr().out
+
+
 # --- La conexión: el solo lectura de la simulación ----------------------------
 
 
@@ -272,6 +351,12 @@ def test_aplicar_escribe_exactamente_los_19_y_reenlaza_rivales(lanzar, fakedb, b
     for sentencia in fakedb.mutating_statements(conn):
         assert sentencia.startswith(("UPDATE fighters SET espn_id", "UPDATE fight_history_espn"))
         assert "espn_history_checked_at" not in sentencia
+    # Lo que se ejecuta es la constante que fijan los tests del SQL.
+    reenlaces = [
+        _flat(sql) for cur in conn.cursors for sql, _ in cur.executed
+        if _flat(sql).startswith("UPDATE fight_history_espn")
+    ]
+    assert reenlaces and set(reenlaces) == {_flat(mod.SQL_REENLAZAR_RIVALES)}
     salida = capsys.readouterr().out
     assert "rivales reenlazados: 25" in salida  # 17 x 1 + 8 de Spohn
 

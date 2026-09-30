@@ -74,6 +74,11 @@ class TestBirthKey:
             ("", None),
             ("unknown", None),
             ("31/31/2002", None),
+            # Día o mes 0: imposible.
+            ("0/5/2002", None),
+            ("5/0/2002", None),
+            # Texto detrás de la fecha: el patrón va anclado al final.
+            ("12/10/1984 extra", None),
         ],
     )
     def test_birth_key(self, value, expected):
@@ -119,6 +124,10 @@ class TestHistoryIdentityOk:
             # Si falta la fecha en un lado, la regla del año no aplica.
             ("Michael Aswell Jr.", "Michael Aswell", date(1960, 1, 1), None, True),
             ("Michael Aswell Jr.", "Michael Aswell", None, "1/1/1990", True),
+            # c'. Solo la regla de la base sin sufijo: el nombre entero se
+            # queda en 0,818 y las palabras no son las mismas (Jon / John).
+            ("Jon Smith Jr.", "John Smith", None, None, True),
+            ("John Smith", "Jon Smith Jr.", None, None, True),
             # d. Mismas palabras en otro orden.
             ("Xiong Jingnan", "Jingnan Xiong", None, None, True),
             ("Xiong Jingnan", "Jingnan Xiong", date(1988, 5, 1), "1/5/1988", True),
@@ -139,6 +148,9 @@ class TestHistoryIdentityOk:
             # e. Una palabra corta o una partícula en común no bastan.
             ("Al Iaquinta", "Al Brown", date(1987, 4, 30), "30/4/1987", False),
             ("Juan del Rio", "Pedro del Toro", date(1990, 1, 2), "2/1/1990", False),
+            # e. Tampoco una palabra de 2 letras que NO es partícula: «Li» es
+            # un apellido chino muy común, no la misma persona.
+            ("Li Jingliang", "Li Wei", date(1988, 1, 20), "20/1/1988", False),
             # e. Gemelos y gente distinta de NUESTRA base con la misma fecha:
             # comparten apellido o nombre, pero el otro nombre no es un
             # diminutivo. Tienen que quedar fuera.
@@ -172,5 +184,6 @@ class TestHistoryIdentityOk:
         assert fold_ratio("Xiong Jingnan", "Jingnan Xiong") < IDENTITY_THRESHOLD
         assert fold_ratio("Daniel Spohn", "Dan Spohn") < IDENTITY_THRESHOLD
         assert fold_ratio("Jose Souza", "Jose Henrique") < IDENTITY_THRESHOLD
+        assert fold_ratio("Jon Smith Jr.", "John Smith") < IDENTITY_THRESHOLD
         # Y este lo aceptaba la vieja siendo dos personas.
         assert fold_ratio("Michael Aswell Jr.", "Michael Aswell Sr.") >= IDENTITY_THRESHOLD
