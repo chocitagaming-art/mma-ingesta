@@ -12,7 +12,8 @@ guarda del metodo mira quien gano en `fights`, no el target.
 
 La guarda va en `main()` de los dos generadores, ANTES de escribir: si salta, el
 CSV viejo se queda como estaba. Todo con datos sinteticos: aqui no se abre la
-base (`load_*` y `get_settings` sustituidos) ni se escribe fuera de tmp_path.
+base (`load_*` y `get_settings` sustituidos), no se escribe fuera de tmp_path y
+el reloj de la guarda se congela en HOY.
 """
 
 from datetime import date
@@ -20,6 +21,7 @@ from datetime import date
 import pandas as pd
 import pytest
 
+import src.prediction.features.dataset_guard as dataset_guard
 import src.prediction.features.method_output as method_output
 import src.prediction.features.output as output
 from src.prediction.features.dataset_guard import (
@@ -35,6 +37,16 @@ from src.prediction.features.types import FEATURE_COLUMNS
 HOY = date(2026, 9, 30)
 # Ids de luchador: la esquina roja de la pelea N es ROJO + N, la azul AZUL + N.
 ROJO, AZUL = 10_000, 20_000
+
+
+class _HoyCongelado(date):
+    """`date` con `today()` clavado en HOY. main() llama a la guarda sin `today`:
+    sin esto, los tests de main() dependerían del reloj del ordenador, porque los
+    datos sintéticos llegan hasta el 2026-09-27."""
+
+    @classmethod
+    def today(cls) -> date:
+        return HOY
 
 
 def _filas(por_ano: dict[int, tuple[int, int]]) -> list[dict]:
@@ -127,6 +139,7 @@ def ganador(monkeypatch, tmp_path):
             excluded_missing_stats=0,
         )
 
+    monkeypatch.setattr(dataset_guard, "date", _HoyCongelado)
     monkeypatch.setattr(output, "get_settings", lambda: _Settings())
     monkeypatch.setattr(output, "load_base_dataframe", lambda _url: pd.DataFrame())
     monkeypatch.setattr(output, "load_rankings_dataframe", lambda _url: pd.DataFrame())
@@ -156,6 +169,7 @@ def metodo(monkeypatch, tmp_path):
             excluded_missing_stats=0,
         )
 
+    monkeypatch.setattr(dataset_guard, "date", _HoyCongelado)
     monkeypatch.setattr(method_output, "get_settings", lambda: _Settings())
     monkeypatch.setattr(
         method_output, "load_base_dataframe", lambda _url: estado["peleas"]
