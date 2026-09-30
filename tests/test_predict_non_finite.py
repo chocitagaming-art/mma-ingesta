@@ -470,38 +470,42 @@ def test_a_numpy_float32_nan_is_not_a_500(boundary):
     }
 
 
-def test_non_finite_floats_anywhere_go_out_as_null_and_are_logged(boundary, caplog):
-    client = boundary(
-        _payload(
-            topFeatures=[
-                {
-                    "name": "age_diff",
-                    "value": math.nan,
-                    "contribution": 0.2,
-                    "direction": "red",
-                }
-            ],
-            featureContributions={"age_diff": 0.2, "pre_ufc_diff": math.inf},
-            featureValues={"age_diff": math.nan, "reach_cm_diff": None},
-            methodPrediction={
-                "probabilities": {"decision": 0.5, "ko": math.nan, "submission": 0.2},
-                "predicted": "decision",
-                "trainedAt": TRAINED_AT,
+def _non_finite_payload() -> dict:
+    """A non-finite float in every block (Python and numpy ones), plus a finite
+    numpy float32, the type XGBoost hands out."""
+    return _payload(
+        topFeatures=[
+            {
+                "name": "age_diff",
+                "value": math.nan,
+                "contribution": 0.2,
+                "direction": "red",
+            }
+        ],
+        featureContributions={"age_diff": 0.2, "pre_ufc_diff": math.inf},
+        featureValues={"age_diff": math.nan, "reach_cm_diff": None},
+        methodPrediction={
+            "probabilities": {"decision": 0.5, "ko": math.nan, "submission": 0.2},
+            "predicted": "decision",
+            "trainedAt": TRAINED_AT,
+        },
+        context={
+            "lowConfidence": True,
+            "redHistory": {
+                "avg_opponent_prior_win_rate": -math.inf,
+                "win_streak": 2,
             },
-            context={
-                "lowConfidence": True,
-                "redHistory": {
-                    "avg_opponent_prior_win_rate": -math.inf,
-                    "win_streak": 2,
-                },
-                "blueHistory": None,
-            },
-            fighters={
-                "red": {"id": 1, "reach_cm": np.float64("nan")},
-                "blue": {"id": 2},
-            },
-        )
+            "blueHistory": None,
+        },
+        fighters={
+            "red": {"id": 1, "reach_cm": np.float64("nan")},
+            "blue": {"id": 2, "reach_cm": np.float32(180.5)},
+        },
     )
+
+
+def test_non_finite_floats_anywhere_go_out_as_null_and_are_logged(boundary, caplog):
+    client = boundary(_non_finite_payload())
 
     with caplog.at_level(logging.WARNING, logger="prediction.service"):
         response = client.post("/predict", json={"red": 1, "blue": 2})
@@ -534,6 +538,29 @@ def test_non_finite_floats_anywhere_go_out_as_null_and_are_logged(boundary, capl
         "fighters.red.reach_cm",
     ):
         assert path in caplog.text
+
+
+def test_non_finite_floats_are_none_before_any_serializer_runs(boundary):
+    """The wire above cannot tell who wrote each null: pydantic writes a Python
+    NaN or Infinity as null on its own. So read what the endpoint returns, before
+    any serializer: None for every non-finite float, plain floats elsewhere, and
+    nothing that Starlette's strict JSONResponse would reject."""
+    boundary(_non_finite_payload())
+
+    payload = service.predict_endpoint(
+        service.PredictRequest(red=1, blue=2), x_api_key=None
+    )
+
+    assert isinstance(payload, dict), payload
+    JSONResponse(content=payload)  # raises on NaN / Infinity, and on a numpy float
+    assert payload["topFeatures"][0]["value"] is None
+    assert payload["featureContributions"]["pre_ufc_diff"] is None
+    assert payload["featureValues"]["age_diff"] is None
+    assert payload["methodPrediction"]["probabilities"]["ko"] is None
+    assert payload["context"]["redHistory"]["avg_opponent_prior_win_rate"] is None
+    assert payload["fighters"]["red"]["reach_cm"] is None
+    reach = payload["fighters"]["blue"]["reach_cm"]
+    assert type(reach) is float and reach == 180.5
 
 
 # --- Regression: finite rows go out exactly as computed --------------------------
