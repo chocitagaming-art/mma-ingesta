@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.prediction.bundle_io import discard_stale_calibrators
 from src.prediction.features import (
     DEFAULT_SCHEDULED_ROUNDS,
     FEATURE_COLUMNS,
@@ -69,6 +70,12 @@ def _load_model_bundle() -> dict[str, Any]:
     bundle = joblib.load(MODEL_PATH)
     if not isinstance(bundle, dict):
         raise RuntimeError("Unexpected model bundle format.")
+    # A calibrator carries its OWN copy of the model it was fitted on, and the
+    # predict paths serve `calibrator or model`: one left over from an older model
+    # would silently serve THAT model. Drop any calibrator that does not wrap the
+    # model next to it, so the raw model is served instead (logged as an ERROR).
+    # Checked here, once per load, never per prediction.
+    discard_stale_calibrators(bundle)
     return bundle
 
 

@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import src.prediction.service as service
+from src.prediction.bundle_io import DISCARDED_CALIBRATORS_KEY
 
 
 def _fake_predict(low_confidence: bool = False):
@@ -149,6 +150,30 @@ def test_shallow_health_never_touches_the_database(client, monkeypatch):
     response = client.get("/health")
     assert response.status_code == 200
     # "skipped" y no "up": el 200 superficial no afirma nada sobre Neon.
+    assert response.json() == {"status": "ok", "db": "skipped"}
+
+
+def test_health_tells_when_a_calibrator_was_discarded(client, monkeypatch):
+    """Si al cargar el bundle se descarto un calibrador que envolvia OTRO modelo,
+    el servicio sigue prediciendo (200: con el modelo correcto, sin calibrar),
+    pero /health lo cuenta en vez de callarselo."""
+    monkeypatch.setattr(
+        service, "_get_bundle", lambda: {DISCARDED_CALIBRATORS_KEY: ["calibrator"]}
+    )
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "db": "skipped",
+        "discardedCalibrators": ["calibrator"],
+    }
+
+
+def test_health_body_unchanged_when_nothing_was_discarded(client, monkeypatch):
+    # Lo normal: la carga no descarto nada y /health responde como siempre.
+    monkeypatch.setattr(service, "_get_bundle", lambda: {DISCARDED_CALIBRATORS_KEY: []})
+    response = client.get("/health")
+    assert response.status_code == 200
     assert response.json() == {"status": "ok", "db": "skipped"}
 
 

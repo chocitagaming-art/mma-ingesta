@@ -55,6 +55,7 @@ from src.prediction.api import (
     model_trained_at,
     predict,
 )
+from src.prediction.bundle_io import DISCARDED_CALIBRATORS_KEY
 from src.prediction.features import (
     build_fighter_history_dataframe,
     load_base_dataframe,
@@ -231,9 +232,15 @@ def health(deep: bool = False) -> JSONResponse:
     autosuspend: el keep-alive, el solo, mantenia la base viva el mes entero.
     Ahora el ping barato mantiene Render despierto sin costar ni una conexion, y
     el chequeo profundo va una vez por hora.
+
+    Si al cargar el bundle se descarto un calibrador porque envolvia OTRO modelo
+    (ver api._load_model_bundle), sigue siendo 200 -- el servicio predice, con el
+    modelo correcto y sin calibrar -- pero lo dice en `discardedCalibrators`. El
+    campo solo aparece entonces: el cuerpo normal es el de siempre.
     """
     try:
-        if _get_bundle() is None:
+        bundle = _get_bundle()
+        if bundle is None:
             raise RuntimeError("model bundle is not loaded")
         if deep:
             _db_ping()
@@ -242,10 +249,11 @@ def health(deep: bool = False) -> JSONResponse:
         return JSONResponse(status_code=503, content={"status": "unhealthy"})
     # `db` declara explicitamente que se ha comprobado, para que un 200 superficial
     # no se lea nunca como "Neon va bien".
-    return JSONResponse(
-        status_code=200,
-        content={"status": "ok", "db": "up" if deep else "skipped"},
-    )
+    content: dict[str, Any] = {"status": "ok", "db": "up" if deep else "skipped"}
+    discarded = isinstance(bundle, dict) and bundle.get(DISCARDED_CALIBRATORS_KEY)
+    if discarded:
+        content["discardedCalibrators"] = list(discarded)
+    return JSONResponse(status_code=200, content=content)
 
 
 @app.post("/predict")
