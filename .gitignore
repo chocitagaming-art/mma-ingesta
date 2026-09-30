@@ -19,6 +19,10 @@ build/
 # `python -m src.prediction.features` y `python -m src.prediction.features.method_output`.
 training_dataset.csv
 method_training_dataset.csv
+# Y sus copias de seguridad fechadas (training_dataset.2026-06-27.csv...), que
+# son el mismo dato: tampoco viajan.
+training_dataset.*.csv
+method_training_dataset.*.csv
 
 # Scrape cache (reproducible artifact from recover_winners_eventpage.py)
 winners_scraped.json
