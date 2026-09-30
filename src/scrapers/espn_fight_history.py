@@ -13,7 +13,8 @@ GUARDAS (ver cabecera de la migración 016):
     lo tiene. Se guarda con promotion='Contender Series' y su liga real, y el
     run acaba en rojo si en la tabla queda cualquier otra fila de l:3321.
   - Guard de identidad: si el displayName del atleta que devuelve ESPN no
-    matchea el nombre en BD (umbral de identidad 0.92), NO se importa nada
+    es el luchador de la BD (matching.history_identity_ok: umbral 0.92 más
+    Jr./Sr., orden de palabras y fecha de nacimiento), NO se importa nada
     (un espn_id mal resuelto no puede inyectar la carrera de un extraño).
   - Solo entran peleas con resultado (W/L/D o no-contest); las programadas o
     sin datos se ignoran.
@@ -49,7 +50,7 @@ from .config import get_settings
 from .db import connect
 from .enrich_ranked import _build_session
 from .logging_config import configure_logging
-from .matching import IDENTITY_THRESHOLD, fold_ratio
+from .matching import history_identity_ok
 from .repositories.espn_history import (
     EspnHistoryRecord,
     get_espn_id_to_fighter_map,
@@ -121,12 +122,13 @@ class ParsedBout:
 # fetcher(session, espn_id) -> payload dict | None (404). Inyectable en tests.
 Fetcher = Callable[[requests.Session, str], "dict | None"]
 
-# Target: (fighter_id, name, espn_id, seeded). seeded=True cuando el espn_id
-# proviene del source_id de una fila source='espn': el enlace id->atleta es
-# correcto POR CONSTRUCCIÓN, así que el guard de nombre no aplica (ESPN
-# renombra atletas — caso real "Zachary Reese" -> "Zach Reese" — y el guard
-# solo puede producir falsos positivos ahí).
-Target = tuple[int, str, str, bool]
+# Target: (fighter_id, name, espn_id, seeded, birth_date). seeded=True cuando
+# el espn_id proviene del source_id de una fila source='espn': el enlace
+# id->atleta es correcto POR CONSTRUCCIÓN, así que el guard de nombre no aplica
+# (ESPN renombra atletas — caso real "Zachary Reese" -> "Zach Reese" — y el
+# guard solo puede producir falsos positivos ahí). birth_date (fighters.
+# birth_date, puede ser None) alimenta las reglas de fecha del guard.
+Target = tuple[int, str, str, bool, "date | None"]
 
 
 def promotion_label(league_id: str, event_name: str | None, short_name: str | None) -> str:
@@ -333,6 +335,15 @@ def _athlete_page_name(payload: dict) -> str | None:
     return name or None
 
 
+def _athlete_page_birth(payload: dict) -> str | None:
+    """Fecha de nacimiento tal cual la sirve ESPN. common/v3 trae displayDOB
+    ('12/10/1984'; el orden día/mes depende de lang/region, por eso
+    matching.birth_key la compara sin orden); dateOfBirth (ISO) si viniera."""
+    athlete = payload.get("athlete") or {}
+    value = str(athlete.get("displayDOB") or athlete.get("dateOfBirth") or "").strip()
+    return value or None
+
+
 def _get_target_fighters(
     connection, limit: int | None = None, all_scope: bool = False
 ) -> list[Target]:
@@ -342,7 +353,8 @@ def _get_target_fighters(
     if all_scope:
         sql = """
             SELECT f.id, f.name, f.espn_id,
-                (f.source = 'espn' AND f.espn_id = f.source_id) AS seeded
+                (f.source = 'espn' AND f.espn_id = f.source_id) AS seeded,
+                f.birth_date
             FROM fighters f
             WHERE f.espn_id IS NOT NULL
             ORDER BY
@@ -363,7 +375,8 @@ def _get_target_fighters(
     else:
         sql = """
             SELECT f.id, f.name, f.espn_id,
-                (f.source = 'espn' AND f.espn_id = f.source_id) AS seeded
+                (f.source = 'espn' AND f.espn_id = f.source_id) AS seeded,
+                f.birth_date
             FROM fighters f
             WHERE f.espn_id IS NOT NULL
               AND (
@@ -384,7 +397,7 @@ def _get_target_fighters(
     with connection.cursor() as cursor:
         cursor.execute(sql, tuple(params))
         return [
-            (int(row[0]), str(row[1]), str(row[2]), bool(row[3]))
+            (int(row[0]), str(row[1]), str(row[2]), bool(row[3]), row[4])
             for row in cursor.fetchall()
         ]
 
@@ -408,7 +421,7 @@ def backfill(
     )
     espn_to_fighter = get_espn_id_to_fighter_map(connection)
 
-    for idx, (fighter_id, name, espn_id, seeded) in enumerate(targets, 1):
+    for idx, (fighter_id, name, espn_id, seeded, birth_date) in enumerate(targets, 1):
         try:
             payload = fetcher(session, espn_id)
         except (requests.RequestException, ValueError) as exc:
@@ -426,7 +439,14 @@ def backfill(
             continue
 
         page_name = _athlete_page_name(payload)
-        if page_name is not None and fold_ratio(name, page_name) < IDENTITY_THRESHOLD:
+        # Guard de identidad (matching.history_identity_ok): el ratio de
+        # siempre más Jr./Sr., orden de palabras y fecha de nacimiento. NO
+        # volver al fold_ratio a secas: rechazaba a Aswell Jr. y Spohn y
+        # aceptaba Jr. contra Sr. (tests TestBackfillIdentityGuard).
+        if page_name is not None and not history_identity_ok(
+            name, page_name,
+            our_birth=birth_date, espn_birth=_athlete_page_birth(payload),
+        ):
             if seeded:
                 # El id vino del source_id de la propia fila ESPN: el enlace es
                 # correcto por construcción y la divergencia es un renombrado

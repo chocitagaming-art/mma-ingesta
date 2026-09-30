@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from datetime import date
 from difflib import SequenceMatcher
 
 __all__ = [
@@ -53,6 +54,9 @@ __all__ = [
     "fuzzy_match",
     "token_subset_match",
     "given_name_diminutive_match",
+    "split_generational_suffix",
+    "birth_key",
+    "history_identity_ok",
 ]
 
 # Canonical compromise cutoff for general-purpose name comparison.
@@ -271,5 +275,130 @@ def plausibly_same_person(name: str, candidates, nicknames=()) -> bool:
         if sorted(fold(nickname).split()) == words:
             return True
         if fuzzy_match(name, nickname, DEFAULT_THRESHOLD):
+            return True
+    return False
+
+
+# --- Identity guard of the ESPN history import (t4-9-2) ---------------------
+
+# Generational suffixes, folded (fold() already turns "Jr." into "jr"). The
+# long forms map to the short one so "Junior" and "Jr." are the same suffix.
+# "Neto" and "Filho" are deliberately NOT here: in Brazil they are surnames.
+_GENERATIONAL_SUFFIXES = {
+    "jr": "jr", "junior": "jr",
+    "sr": "sr", "senior": "sr",
+    "ii": "ii", "iii": "iii", "iv": "iv",
+}
+
+# Minimum length of the shared word in the same-birth-date rule: "Spohn" and
+# "Jose" count, "Al" or "da" never do.
+_MIN_BIRTH_SHARED_TOKEN_LEN = 3
+
+# How far apart two known birth years may be before the names are taken to be
+# two people (father and son). One year of slack absorbs time zones and typos.
+_MAX_BIRTH_YEAR_GAP = 1
+
+_NUMERIC_DATE_RE = re.compile(r"^(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4})$")
+_ISO_DATE_RE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})")
+
+BirthKey = tuple[int, tuple[int, int]]
+
+
+def split_generational_suffix(name: str) -> tuple[str, str | None]:
+    """Split a trailing generational suffix off a folded name.
+
+    Returns ``(base, suffix)`` where ``base`` is the folded name without the
+    suffix and ``suffix`` is the canonical form ("jr", "sr", "ii", "iii", "iv")
+    or None. Only the LAST word counts, and only when at least two words remain
+    ("Aswell Jr." keeps its "jr": a bare surname is not a name). "Neto" and
+    "Filho" are surnames, never suffixes.
+    """
+    tokens = fold(name).split()
+    if len(tokens) >= 3 and tokens[-1] in _GENERATIONAL_SUFFIXES:
+        return " ".join(tokens[:-1]), _GENERATIONAL_SUFFIXES[tokens[-1]]
+    return " ".join(tokens), None
+
+
+def birth_key(value: date | str | None) -> BirthKey | None:
+    """``(year, (low, high))`` of a birth date, with day and month UNORDERED.
+
+    ESPN's ``displayDOB`` puts day and month in an order that depends on the
+    request's lang/region ("12/10/1984", "23/5/2002"), so the only safe
+    comparison is the year plus the unordered pair {day, month}. Accepts a
+    ``date``, that ``d/m/yyyy``-or-``m/d/yyyy`` text, or an ISO date/datetime.
+    Anything else, or an impossible date, is None.
+    """
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value.year, tuple(sorted((value.month, value.day)))
+    text = str(value).strip()
+    match = _NUMERIC_DATE_RE.match(text)
+    if match:
+        first, second, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    else:
+        match = _ISO_DATE_RE.match(text)
+        if not match:
+            return None
+        year, first, second = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    low, high = sorted((first, second))
+    # At least one of the two must be a month, and neither can pass 31.
+    if low < 1 or low > 12 or high > 31:
+        return None
+    return year, (low, high)
+
+
+def history_identity_ok(
+    our_name: str,
+    espn_name: str,
+    *,
+    our_birth: date | str | None = None,
+    espn_birth: date | str | None = None,
+) -> bool:
+    """Whether the ESPN athlete page ``espn_name`` is our fighter ``our_name``.
+
+    The guard of the ESPN history import (espn_fight_history.backfill): a
+    wrong yes injects a stranger's career into a fighter card, a wrong no only
+    leaves a card without its regional history. In order:
+
+    * both names carry a generational suffix and they differ (Jr. vs Sr.,
+      II vs III) -> NO;
+    * both birth years are known and more than one year apart (father and
+      son with the same name) -> NO;
+    * the whole names reach IDENTITY_THRESHOLD -> yes (the old guard);
+    * the names without the suffix reach it -> yes ("Michael Aswell Jr." /
+      "Michael Aswell");
+    * the same words in another order -> yes ("Xiong Jingnan" /
+      "Jingnan Xiong");
+    * exactly the same birth date (year and the unordered {day, month}) AND
+      a shared word of 3+ letters that is not a particle -> yes ("Daniel
+      Spohn" / "Dan Spohn", "Jose Souza" / "Jose Henrique").
+
+    A date missing on either side simply disables the rules that use it.
+    """
+    our_base, our_suffix = split_generational_suffix(our_name)
+    espn_base, espn_suffix = split_generational_suffix(espn_name)
+    if our_suffix and espn_suffix and our_suffix != espn_suffix:
+        return False
+
+    our_key = birth_key(our_birth)
+    espn_key = birth_key(espn_birth)
+    if our_key and espn_key and abs(our_key[0] - espn_key[0]) > _MAX_BIRTH_YEAR_GAP:
+        return False
+
+    if fold_ratio(our_name, espn_name) >= IDENTITY_THRESHOLD:
+        return True
+    if ratio(our_base, espn_base) >= IDENTITY_THRESHOLD:
+        return True
+    our_tokens = our_base.split()
+    espn_tokens = espn_base.split()
+    if our_tokens and sorted(our_tokens) == sorted(espn_tokens):
+        return True
+    if our_key and our_key == espn_key:
+        shared = {
+            token for token in set(our_tokens) & set(espn_tokens)
+            if len(token) >= _MIN_BIRTH_SHARED_TOKEN_LEN and token not in _PARTICLE_TOKENS
+        }
+        if shared:
             return True
     return False
