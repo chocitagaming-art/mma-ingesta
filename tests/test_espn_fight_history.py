@@ -410,7 +410,8 @@ class TestBackfillIdentityGuard:
     IDENTITY_THRESHOLD` a secas, los tres primeros tests fallan (Aswell Jr.
     da 0,903 y Spohn 0,857, que la vieja rechazaba; Jr. contra Sr. da 0,941,
     que la vieja aceptaba). Si se deja de leer la fecha de alguno de los dos
-    lados, falla el de Spohn.
+    lados, falla el de Spohn. Si el veto del año vuelve a ir antes del ratio,
+    falla el de Nicoll; si se quita la lista de pares verificados, el de Souza.
     """
 
     @staticmethod
@@ -468,11 +469,67 @@ class TestBackfillIdentityGuard:
         assert counts["name_mismatch"] == 1
         assert fakedb.mutating_statements(conn) == []
 
-    def test_father_and_son_are_rejected(self, fakedb, monkeypatch):
+    def test_identical_name_with_another_birth_year_still_imports(self, fakedb, monkeypatch):
+        # Caso real: Stewart Nicoll, en activo. UFCStats dice 11-04-1996 y
+        # ESPN '4/11/1994'. La guarda vieja lo aceptaba; si el veto del año
+        # lo tumba, su historial deja de actualizarse sin ningún aviso.
         conn, counts = self._run(
             fakedb, monkeypatch,
-            (6191, "Yaroslav Amosov", "4275020", False, date(1993, 9, 4)),
-            {"displayName": "Yaroslav Amosov", "displayDOB": "4/9/1963"},
+            (7000, "Stewart Nicoll", "4410000", False, date(1996, 4, 11)),
+            {"displayName": "Stewart Nicoll", "displayDOB": "4/11/1994"},
+        )
+        assert counts["name_mismatch"] == 0
+        assert counts["written"] == 1
+
+    def test_father_and_son_through_a_relaxed_rule_are_rejected(self, fakedb, monkeypatch):
+        # «Aswell Jr.» contra «Aswell» solo pasa por la regla nueva del
+        # sufijo, y ahí 30 años de diferencia son padre e hijo.
+        conn, counts = self._run(
+            fakedb, monkeypatch,
+            (6534, "Michael Aswell Jr.", "5212738", False, date(2000, 9, 27)),
+            {"displayName": "Michael Aswell", "displayDOB": "27/9/1970"},
+        )
+        assert counts["name_mismatch"] == 1
+        assert fakedb.mutating_statements(conn) == []
+
+    def test_twins_with_the_same_birth_date_are_rejected(self, fakedb, monkeypatch):
+        # Los Ellenberger están los dos en nuestra base, nacidos el
+        # 28-03-1985: un espn_id cruzado no puede meter la carrera del otro.
+        conn, counts = self._run(
+            fakedb, monkeypatch,
+            (1500, "Joe Ellenberger", "2500000", False, date(1985, 3, 28)),
+            {"displayName": "Jake Ellenberger", "displayDOB": "28/3/1985"},
+        )
+        assert counts["name_mismatch"] == 1
+        assert fakedb.mutating_statements(conn) == []
+
+    def test_verified_pair_imports_despite_another_name(self, fakedb, monkeypatch):
+        # Caso real: 9084 «Jose Souza» es el ESPN 5080485 «Jose Henrique»
+        # (rival UFC Ding Meng 4813565, nacido 23-05-2002 en los dos lados).
+        # Ninguna regla general lo separa de MacDonald/Lambert: va por la
+        # lista de pares verificados a mano.
+        assert (9084, "5080485") in espn_fight_history.VERIFIED_IDENTITY_PAIRS
+        conn, counts = self._run(
+            fakedb, monkeypatch,
+            (9084, "Jose Souza", "5080485", False, date(2002, 5, 23)),
+            {"displayName": "Jose Henrique", "displayDOB": "23/5/2002"},
+        )
+        assert counts["name_mismatch"] == 0
+        assert counts["written"] == 1
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            # La misma pareja de nombres, pero otra ficha o otro id: fuera.
+            (9085, "Jose Souza", "5080485", False, date(2002, 5, 23)),
+            (9084, "Jose Souza", "5080486", False, date(2002, 5, 23)),
+        ],
+    )
+    def test_the_verified_pair_is_by_both_ids(self, fakedb, monkeypatch, target):
+        conn, counts = self._run(
+            fakedb, monkeypatch,
+            target,
+            {"displayName": "Jose Henrique", "displayDOB": "23/5/2002"},
         )
         assert counts["name_mismatch"] == 1
         assert fakedb.mutating_statements(conn) == []

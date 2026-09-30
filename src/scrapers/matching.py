@@ -164,7 +164,9 @@ def token_subset_match(left: str, right: str) -> bool:
 _MIN_DIMINUTIVE_LEN = 4
 
 
-def given_name_diminutive_match(left: str, right: str) -> bool:
+def given_name_diminutive_match(
+    left: str, right: str, *, min_len: int = _MIN_DIMINUTIVE_LEN
+) -> bool:
     """True cuando dos nombres solo se diferencian en el DIMINUTIVO del pila.
 
     Tercer nivel, después de la igualdad exacta y de
@@ -185,6 +187,10 @@ def given_name_diminutive_match(left: str, right: str) -> bool:
     grupo de candidatos mantiene su propia guarda (``corner_for`` rechaza un
     nombre que reclame las dos esquinas, y ``_match_fight`` exige candidato
     único).
+
+    ``min_len`` baja el suelo solo donde otra señal fuerte acompaña: la guarda
+    del historial ESPN usa 3 ("Dan"/"Daniel") y exige además la MISMA fecha de
+    nacimiento exacta (:func:`history_identity_ok`).
     """
     left_tokens = fold(left).split()
     right_tokens = fold(right).split()
@@ -196,7 +202,7 @@ def given_name_diminutive_match(left: str, right: str) -> bool:
     corto, largo = sorted((left_tokens[0], right_tokens[0]), key=len)
     if corto == largo:
         return False  # Idénticos: eso ya lo resuelve el nivel exacto.
-    return len(corto) >= _MIN_DIMINUTIVE_LEN and largo.startswith(corto)
+    return len(corto) >= min_len and largo.startswith(corto)
 
 
 def ratio(left: str, right: str) -> float:
@@ -290,12 +296,18 @@ _GENERATIONAL_SUFFIXES = {
     "ii": "ii", "iii": "iii", "iv": "iv",
 }
 
-# Minimum length of the shared word in the same-birth-date rule: "Spohn" and
-# "Jose" count, "Al" or "da" never do.
-_MIN_BIRTH_SHARED_TOKEN_LEN = 3
+# Minimum length of the shorter given name in the same-birth-date rule: "Dan"
+# (Daniel) counts. Lower than the general _MIN_DIMINUTIVE_LEN because the rule
+# also demands the exact same birth date and the same surname.
+_MIN_BIRTH_DIMINUTIVE_LEN = 3
 
-# How far apart two known birth years may be before the names are taken to be
-# two people (father and son). One year of slack absorbs time zones and typos.
+# How far apart two known birth years may be before a RELAXED match is taken
+# to be two people (father and son). One year of slack absorbs time zones and
+# typos. It never vetoes a match the whole-name ratio already accepts: an
+# identical name with dates that disagree is, in our data, always one person
+# with a wrong date in one source (16 cases measured on 30-sep-2026 over the
+# 2,551 fighters with espn_id, among them the active Stewart Nicoll and Ethyn
+# Ewing; 0 real father/son pairs).
 _MAX_BIRTH_YEAR_GAP = 1
 
 _NUMERIC_DATE_RE = re.compile(r"^(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4})$")
@@ -362,17 +374,27 @@ def history_identity_ok(
     leaves a card without its regional history. In order:
 
     * both names carry a generational suffix and they differ (Jr. vs Sr.,
-      II vs III) -> NO;
-    * both birth years are known and more than one year apart (father and
-      son with the same name) -> NO;
-    * the whole names reach IDENTITY_THRESHOLD -> yes (the old guard);
-    * the names without the suffix reach it -> yes ("Michael Aswell Jr." /
-      "Michael Aswell");
+      II vs III) -> NO, even when the ratio passes;
+    * the whole names reach IDENTITY_THRESHOLD -> yes (the old guard). The
+      birth dates are NOT checked here: whatever the old guard accepted is
+      still accepted, because an identical name with dates that disagree is
+      one person with a wrong date in UFCStats or ESPN (Stewart Nicoll:
+      1996-04-11 here, '4/11/1994' on ESPN);
+    * from here on, the RELAXED rules. If both birth years are known and more
+      than one year apart -> NO (father and son);
+    * the names without the suffix reach the threshold -> yes ("Michael
+      Aswell Jr." / "Michael Aswell");
     * the same words in another order -> yes ("Xiong Jingnan" /
       "Jingnan Xiong");
     * exactly the same birth date (year and the unordered {day, month}) AND
-      a shared word of 3+ letters that is not a particle -> yes ("Daniel
-      Spohn" / "Dan Spohn", "Jose Souza" / "Jose Henrique").
+      the same surname AND a given name that is a diminutive of the other
+      (given_name_diminutive_match with a floor of 3 letters) -> yes
+      ("Daniel Spohn" / "Dan Spohn"). Twins share the date and the surname
+      but not the given name (Matt/Mark Hughes, Joe/Jake Ellenberger), so
+      they stay out. A shared first name alone never passes: "Jose Souza" /
+      "Jose Henrique" is the same pattern as "Jason MacDonald" / "Jason
+      Lambert", two people born the same day in our own table, and goes
+      through espn_fight_history.VERIFIED_IDENTITY_PAIRS instead.
 
     A date missing on either side simply disables the rules that use it.
     """
@@ -381,13 +403,14 @@ def history_identity_ok(
     if our_suffix and espn_suffix and our_suffix != espn_suffix:
         return False
 
+    if fold_ratio(our_name, espn_name) >= IDENTITY_THRESHOLD:
+        return True
+
     our_key = birth_key(our_birth)
     espn_key = birth_key(espn_birth)
     if our_key and espn_key and abs(our_key[0] - espn_key[0]) > _MAX_BIRTH_YEAR_GAP:
         return False
 
-    if fold_ratio(our_name, espn_name) >= IDENTITY_THRESHOLD:
-        return True
     if ratio(our_base, espn_base) >= IDENTITY_THRESHOLD:
         return True
     our_tokens = our_base.split()
@@ -395,10 +418,7 @@ def history_identity_ok(
     if our_tokens and sorted(our_tokens) == sorted(espn_tokens):
         return True
     if our_key and our_key == espn_key:
-        shared = {
-            token for token in set(our_tokens) & set(espn_tokens)
-            if len(token) >= _MIN_BIRTH_SHARED_TOKEN_LEN and token not in _PARTICLE_TOKENS
-        }
-        if shared:
-            return True
+        return given_name_diminutive_match(
+            our_base, espn_base, min_len=_MIN_BIRTH_DIMINUTIVE_LEN
+        )
     return False

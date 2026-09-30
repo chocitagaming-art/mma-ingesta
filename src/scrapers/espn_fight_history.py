@@ -16,6 +16,8 @@ GUARDAS (ver cabecera de la migración 016):
     es el luchador de la BD (matching.history_identity_ok: umbral 0.92 más
     Jr./Sr., orden de palabras y fecha de nacimiento), NO se importa nada
     (un espn_id mal resuelto no puede inyectar la carrera de un extraño).
+    Salvo las fichas sembradas desde ESPN y los pares verificados a mano de
+    VERIFIED_IDENTITY_PAIRS.
   - Solo entran peleas con resultado (W/L/D o no-contest); las programadas o
     sin datos se ignoran.
   - Métodos normalizados al formato canónico de ufcstats que ya viaja por la
@@ -61,6 +63,18 @@ from .repositories.espn_history import (
 LOGGER = logging.getLogger(__name__)
 
 ATHLETE_CAREER_URL = "https://site.web.api.espn.com/apis/common/v3/sports/mma/athletes/{espn_id}"
+# (fighters.id, espn_id) pairs checked BY HAND whose names no general rule of
+# matching.history_identity_ok can accept without also accepting two different
+# people. Keyed by BOTH ids: the same pair of names on another card or another
+# ESPN id still goes through the guard. Each entry carries its proof.
+VERIFIED_IDENTITY_PAIRS: dict[tuple[int, str], str] = {
+    # ESPN names him 'Jose Henrique'. Proof (t4-9-1, 30-sep-2026): his UFC
+    # opponent Ding Meng is ESPN 4813565 on both sides, and both sources give
+    # 23-05-2002. Only the first name is shared, the same pattern as "Jason
+    # MacDonald" / "Jason Lambert" (two people born the same day), so no rule.
+    (9084, "5080485"): "Jose Souza = ESPN 'Jose Henrique' (rival Ding Meng 4813565, 23-05-2002)",
+}
+
 REQUEST_DELAY_SECONDS = 0.35
 PROGRESS_EVERY = 50
 
@@ -454,6 +468,13 @@ def backfill(
                 LOGGER.info(
                     "Seeded id=%d %r renamed on ESPN to %r — importing anyway",
                     fighter_id, name, page_name,
+                )
+            elif (fighter_id, espn_id) in VERIFIED_IDENTITY_PAIRS:
+                # Par comprobado a mano (ver VERIFIED_IDENTITY_PAIRS): la
+                # guarda general no puede aceptarlo sin aceptar a extraños.
+                LOGGER.info(
+                    "Verified pair id=%d %r = ESPN %s %r — importing",
+                    fighter_id, name, espn_id, page_name,
                 )
             else:
                 counts["name_mismatch"] += 1
