@@ -71,6 +71,58 @@ def test_los_casos_de_la_prueba_por_nombre_distinto_estan():
     assert por_ficha[8219].nacimiento == date(1984, 10, 12)
 
 
+def test_jose_souza_esta_en_los_pares_verificados_de_la_guarda():
+    """Ninguna regla general de la guarda acepta «Jose Souza» contra «Jose
+    Henrique» (es el patrón de dos personas distintas): si se enlaza y el par
+    no está en la lista de verificados, el cron del martes lo salta."""
+    from src.scrapers.espn_fight_history import VERIFIED_IDENTITY_PAIRS
+
+    souza = next(e for e in mod.ENLACES if e.fighter_id == 9084)
+    assert (souza.fighter_id, souza.espn_id) in VERIFIED_IDENTITY_PAIRS
+
+
+def test_la_prueba_de_bittencourt_no_afirma_que_el_duplicado_sea_otro():
+    """El 4835138 es un perfil ESPN DUPLICADO de la misma persona (misma
+    fecha, altura, peso y país; 14-6 más la derrota del DWCS da el 14-7 del
+    otro), no un homónimo."""
+    caio = next(e for e in mod.ENLACES if e.fighter_id == 639)
+    assert "NO es el" not in caio.prueba
+    assert "4835138" in caio.prueba and "duplicado" in caio.prueba
+    assert "NO es el" not in (mod.__doc__ or "")
+
+
+# --- La conexión: el solo lectura de la simulación ----------------------------
+
+
+class _ConexionEspia:
+    def __init__(self):
+        self.sesiones = []
+
+    def set_session(self, **kwargs):
+        self.sesiones.append(kwargs)
+
+
+def _abrir_con_espia(monkeypatch, readonly):
+    espia = _ConexionEspia()
+    monkeypatch.setattr(mod.psycopg2, "connect", lambda dsn: espia)
+    assert mod._open_connection("postgresql://x/y", readonly=readonly) is espia
+    return espia
+
+
+def test_la_simulacion_abre_la_sesion_en_solo_lectura(monkeypatch):
+    espia = _abrir_con_espia(monkeypatch, readonly=True)
+    assert espia.sesiones == [{"readonly": True}]
+
+
+def test_aplicar_no_pide_nunca_una_sesion_de_escritura(monkeypatch):
+    """set_session(readonly=False) emite BEGIN READ WRITE y eso se salta el
+    PGOPTIONS='-c default_transaction_read_only=on' de la red de seguridad:
+    con --aplicar la sesión se queda con el valor por defecto del servidor."""
+    espia = _abrir_con_espia(monkeypatch, readonly=False)
+    assert all(s.get("readonly") is not False for s in espia.sesiones)
+    assert espia.sesiones == []
+
+
 # --- El doble de la base ----------------------------------------------------
 
 

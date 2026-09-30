@@ -13,9 +13,15 @@ LA LISTA ES CERRADA. Cada par lleva su prueba (una linea):
   grupo 1: el mismo id de ESPN aparece enfrente de NUESTROS rivales en sus
            combates UFC (marcador de ESPN, +-1 dia) o en su carrera common/v3;
   grupo 2: la prueba es por id, pero ESPN escribe el nombre de otra forma
-           (la guarda t4-9-2 ya los acepta);
+           (la guarda t4-9-2 acepta a Marcio Alexandre Junior y a Spohn; a
+           Jose Souza, por la lista de pares verificados
+           espn_fight_history.VERIFIED_IDENTITY_PAIRS);
   grupo 3: sin combates en `fights`; prueba por fecha de nacimiento + record
-           + apodo, y cada uno tiene un homonimo en ESPN que NO es el.
+           + apodo. Los dos tienen un SEGUNDO perfil en ESPN con el mismo
+           nombre: el de Bennett (5093794) esta vacio, sin fecha y 0-0-0, asi
+           que no se puede saber si es el; el de Bittencourt (4835138) es un
+           DUPLICADO de la misma persona, y se enlaza el otro a sabiendas
+           (ver su linea).
 FUERA a proposito: 7963 Joey Gomez (el 4357555 del DWCS es otro, nacido en
 1989; el suyo es 3947131 y se deja para otra decision), 6358/7250 Jose Delgado
 (el 5223435 ya lo tiene 7250: es una fusion, frente t4-3) y 6534 Michael
@@ -107,9 +113,20 @@ ENLACES: tuple[Enlace, ...] = (
            "ESPN 'Dan Spohn'; TUF 19 contra Walsh 3112019; nacido 12-10-1984 en los dos lados"),
     # --- Grupo 3: sin combates en fights; nacimiento + record + apodo ------
     Enlace(602, "5218815", "Benjamin Bennett", date(1994, 5, 8), 3,
-           "8-5-1994, 7-1-0, apodo 'Mr. Alaska'; el homonimo ESPN 5093794 NO es el"),
+           "8-5-1994, 7-1-0, apodo 'Mr. Alaska', 8 combates; el otro perfil "
+           "ESPN 5093794 esta vacio (sin fecha, 0-0-0, 0 combates): no se "
+           "puede saber si es el, y no trae nada que importar"),
+    # 4835138 es la MISMA persona (sondado el 30-sep-2026: mismo nombre,
+    # 22/5/1991, 6'0", 185 lb, BRA; 14-6-0 con 20 regionales de 2008 a 2018,
+    # y 14-6 mas la derrota del DWCS da el 14-7 de 3120454). Se enlaza
+    # 3120454 porque trae el DWCS, que es la derrota que t4-9 viene a
+    # recuperar, y porque es el id que ya figura como rival en
+    # fight_history_espn (1 fila; 4835138, 0). Las 20 regionales del
+    # duplicado quedan PENDIENTES: importarlas es tarea aparte.
     Enlace(639, "3120454", "Caio Bittencourt", date(1991, 5, 22), 3,
-           "22-5-1991, 14-7-0, apodo 'Leao'; el homonimo ESPN 4835138 NO es el"),
+           "22-5-1991, 14-7-0, apodo 'Leao', solo el DWCS 2021 contra Duraev; "
+           "ESPN tiene un perfil duplicado de el mismo, 4835138 (misma fecha, "
+           "altura y peso; 14-6-0 con sus 20 regionales), que queda sin enlazar"),
 )
 
 # Nunca pueden entrar en la lista (ver la cabecera). main() aborta si entran.
@@ -148,9 +165,16 @@ class Veredicto:
 
 def _open_connection(dsn: str, readonly: bool):
     """Sin --aplicar la SESION es de solo lectura: es Postgres quien rechaza
-    cualquier escritura, no la disciplina del codigo."""
+    cualquier escritura, no la disciplina del codigo.
+
+    Con --aplicar NO se llama a set_session: set_session(readonly=False)
+    emite BEGIN READ WRITE, que se impone a un
+    PGOPTIONS='-c default_transaction_read_only=on' y se saltaria esa red de
+    seguridad. Sin llamarlo manda el valor por defecto de la sesion, asi que
+    lanzar --aplicar con ese PGOPTIONS falla en la base, como debe."""
     connection = psycopg2.connect(dsn)
-    connection.set_session(readonly=readonly)
+    if readonly:
+        connection.set_session(readonly=True)
     return connection
 
 
