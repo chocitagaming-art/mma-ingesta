@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from datetime import date
 from difflib import SequenceMatcher
 
 __all__ = [
@@ -53,6 +54,9 @@ __all__ = [
     "fuzzy_match",
     "token_subset_match",
     "given_name_diminutive_match",
+    "split_generational_suffix",
+    "birth_key",
+    "history_identity_ok",
 ]
 
 # Canonical compromise cutoff for general-purpose name comparison.
@@ -160,7 +164,9 @@ def token_subset_match(left: str, right: str) -> bool:
 _MIN_DIMINUTIVE_LEN = 4
 
 
-def given_name_diminutive_match(left: str, right: str) -> bool:
+def given_name_diminutive_match(
+    left: str, right: str, *, min_len: int = _MIN_DIMINUTIVE_LEN
+) -> bool:
     """True cuando dos nombres solo se diferencian en el DIMINUTIVO del pila.
 
     Tercer nivel, después de la igualdad exacta y de
@@ -181,6 +187,10 @@ def given_name_diminutive_match(left: str, right: str) -> bool:
     grupo de candidatos mantiene su propia guarda (``corner_for`` rechaza un
     nombre que reclame las dos esquinas, y ``_match_fight`` exige candidato
     único).
+
+    ``min_len`` baja el suelo solo donde otra señal fuerte acompaña: la guarda
+    del historial ESPN usa 3 ("Dan"/"Daniel") y exige además la MISMA fecha de
+    nacimiento exacta (:func:`history_identity_ok`).
     """
     left_tokens = fold(left).split()
     right_tokens = fold(right).split()
@@ -192,7 +202,7 @@ def given_name_diminutive_match(left: str, right: str) -> bool:
     corto, largo = sorted((left_tokens[0], right_tokens[0]), key=len)
     if corto == largo:
         return False  # Idénticos: eso ya lo resuelve el nivel exacto.
-    return len(corto) >= _MIN_DIMINUTIVE_LEN and largo.startswith(corto)
+    return len(corto) >= min_len and largo.startswith(corto)
 
 
 def ratio(left: str, right: str) -> float:
@@ -272,4 +282,143 @@ def plausibly_same_person(name: str, candidates, nicknames=()) -> bool:
             return True
         if fuzzy_match(name, nickname, DEFAULT_THRESHOLD):
             return True
+    return False
+
+
+# --- Identity guard of the ESPN history import (t4-9-2) ---------------------
+
+# Generational suffixes, folded (fold() already turns "Jr." into "jr"). The
+# long forms map to the short one so "Junior" and "Jr." are the same suffix.
+# "Neto" and "Filho" are deliberately NOT here: in Brazil they are surnames.
+_GENERATIONAL_SUFFIXES = {
+    "jr": "jr", "junior": "jr",
+    "sr": "sr", "senior": "sr",
+    "ii": "ii", "iii": "iii", "iv": "iv",
+}
+
+# Minimum length of the shorter given name in the same-birth-date rule: "Dan"
+# (Daniel) counts. Lower than the general _MIN_DIMINUTIVE_LEN because the rule
+# also demands the exact same birth date and the same surname.
+_MIN_BIRTH_DIMINUTIVE_LEN = 3
+
+# How far apart two known birth years may be before a RELAXED match is taken
+# to be two people (father and son). One year of slack absorbs time zones and
+# typos. It never vetoes a match the whole-name ratio already accepts: an
+# identical name with dates that disagree is, in our data, always one person
+# with a wrong date in one source (16 cases measured on 30-sep-2026 over the
+# 2,551 fighters with espn_id, among them the active Stewart Nicoll and Ethyn
+# Ewing; 0 real father/son pairs).
+_MAX_BIRTH_YEAR_GAP = 1
+
+_NUMERIC_DATE_RE = re.compile(r"^(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4})$")
+_ISO_DATE_RE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})")
+
+BirthKey = tuple[int, tuple[int, int]]
+
+
+def split_generational_suffix(name: str) -> tuple[str, str | None]:
+    """Split a trailing generational suffix off a folded name.
+
+    Returns ``(base, suffix)`` where ``base`` is the folded name without the
+    suffix and ``suffix`` is the canonical form ("jr", "sr", "ii", "iii", "iv")
+    or None. Only the LAST word counts, and only when at least two words remain
+    ("Aswell Jr." keeps its "jr": a bare surname is not a name). "Neto" and
+    "Filho" are surnames, never suffixes.
+    """
+    tokens = fold(name).split()
+    if len(tokens) >= 3 and tokens[-1] in _GENERATIONAL_SUFFIXES:
+        return " ".join(tokens[:-1]), _GENERATIONAL_SUFFIXES[tokens[-1]]
+    return " ".join(tokens), None
+
+
+def birth_key(value: date | str | None) -> BirthKey | None:
+    """``(year, (low, high))`` of a birth date, with day and month UNORDERED.
+
+    ESPN's ``displayDOB`` puts day and month in an order that depends on the
+    request's lang/region ("12/10/1984", "23/5/2002"), so the only safe
+    comparison is the year plus the unordered pair {day, month}. Accepts a
+    ``date``, that ``d/m/yyyy``-or-``m/d/yyyy`` text, or an ISO date/datetime.
+    Anything else, or an impossible date, is None.
+    """
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value.year, tuple(sorted((value.month, value.day)))
+    text = str(value).strip()
+    match = _NUMERIC_DATE_RE.match(text)
+    if match:
+        first, second, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    else:
+        match = _ISO_DATE_RE.match(text)
+        if not match:
+            return None
+        year, first, second = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    low, high = sorted((first, second))
+    # At least one of the two must be a month, and neither can pass 31.
+    if low < 1 or low > 12 or high > 31:
+        return None
+    return year, (low, high)
+
+
+def history_identity_ok(
+    our_name: str,
+    espn_name: str,
+    *,
+    our_birth: date | str | None = None,
+    espn_birth: date | str | None = None,
+) -> bool:
+    """Whether the ESPN athlete page ``espn_name`` is our fighter ``our_name``.
+
+    The guard of the ESPN history import (espn_fight_history.backfill): a
+    wrong yes injects a stranger's career into a fighter card, a wrong no only
+    leaves a card without its regional history. In order:
+
+    * both names carry a generational suffix and they differ (Jr. vs Sr.,
+      II vs III) -> NO, even when the ratio passes;
+    * the whole names reach IDENTITY_THRESHOLD -> yes (the old guard). The
+      birth dates are NOT checked here: whatever the old guard accepted is
+      still accepted, because an identical name with dates that disagree is
+      one person with a wrong date in UFCStats or ESPN (Stewart Nicoll:
+      1996-04-11 here, '4/11/1994' on ESPN);
+    * from here on, the RELAXED rules. If both birth years are known and more
+      than one year apart -> NO (father and son);
+    * the names without the suffix reach the threshold -> yes ("Michael
+      Aswell Jr." / "Michael Aswell");
+    * the same words in another order -> yes ("Xiong Jingnan" /
+      "Jingnan Xiong");
+    * exactly the same birth date (year and the unordered {day, month}) AND
+      the same surname AND a given name that is a diminutive of the other
+      (given_name_diminutive_match with a floor of 3 letters) -> yes
+      ("Daniel Spohn" / "Dan Spohn"). Twins share the date and the surname
+      but not the given name (Matt/Mark Hughes, Joe/Jake Ellenberger), so
+      they stay out. A shared first name alone never passes: "Jose Souza" /
+      "Jose Henrique" is the same pattern as "Jason MacDonald" / "Jason
+      Lambert", two people born the same day in our own table, and goes
+      through espn_fight_history.VERIFIED_IDENTITY_PAIRS instead.
+
+    A date missing on either side simply disables the rules that use it.
+    """
+    our_base, our_suffix = split_generational_suffix(our_name)
+    espn_base, espn_suffix = split_generational_suffix(espn_name)
+    if our_suffix and espn_suffix and our_suffix != espn_suffix:
+        return False
+
+    if fold_ratio(our_name, espn_name) >= IDENTITY_THRESHOLD:
+        return True
+
+    our_key = birth_key(our_birth)
+    espn_key = birth_key(espn_birth)
+    if our_key and espn_key and abs(our_key[0] - espn_key[0]) > _MAX_BIRTH_YEAR_GAP:
+        return False
+
+    if ratio(our_base, espn_base) >= IDENTITY_THRESHOLD:
+        return True
+    our_tokens = our_base.split()
+    espn_tokens = espn_base.split()
+    if our_tokens and sorted(our_tokens) == sorted(espn_tokens):
+        return True
+    if our_key and our_key == espn_key:
+        return given_name_diminutive_match(
+            our_base, espn_base, min_len=_MIN_BIRTH_DIMINUTIVE_LEN
+        )
     return False

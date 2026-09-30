@@ -326,7 +326,7 @@ class _Responder:
 class TestBackfill:
     def test_backfill_writes_non_ufc_rows_links_opponent_and_stamps(self, fakedb, monkeypatch):
         monkeypatch.setenv("DATABASE_URL", "postgresql://test/test")
-        conn = fakedb.Connection(_Responder([(6191, "Yaroslav Amosov", "4275020", False)]))
+        conn = fakedb.Connection(_Responder([(6191, "Yaroslav Amosov", "4275020", False, None)]))
         payload = career(entry(UFC_UID, name="UFC 328: X vs Y", short_name="UFC 328"), entry(BELLATOR_UID))
 
         counts = backfill(
@@ -351,7 +351,7 @@ class TestBackfill:
 
     def test_backfill_identity_mismatch_writes_nothing_and_does_not_stamp(self, fakedb, monkeypatch):
         monkeypatch.setenv("DATABASE_URL", "postgresql://test/test")
-        conn = fakedb.Connection(_Responder([(6191, "Yaroslav Amosov", "4275020", False)]))
+        conn = fakedb.Connection(_Responder([(6191, "Yaroslav Amosov", "4275020", False, None)]))
         payload = career(entry(BELLATOR_UID))
         payload["athlete"] = {"displayName": "Someone Else Entirely"}
 
@@ -370,7 +370,7 @@ class TestBackfill:
         # con espn_id sembrado desde source_id el enlace es correcto por
         # construcción, así que el guard de nombre no bloquea el import.
         monkeypatch.setenv("DATABASE_URL", "postgresql://test/test")
-        conn = fakedb.Connection(_Responder([(9027, "Zachary Reese", "5143223", True)]))
+        conn = fakedb.Connection(_Responder([(9027, "Zachary Reese", "5143223", True, None)]))
         payload = career(entry(BELLATOR_UID))
         payload["athlete"] = {"displayName": "Zach Reese"}
 
@@ -386,7 +386,7 @@ class TestBackfill:
 
     def test_backfill_dry_run_never_writes(self, fakedb, monkeypatch):
         monkeypatch.setenv("DATABASE_URL", "postgresql://test/test")
-        conn = fakedb.Connection(_Responder([(6191, "Yaroslav Amosov", "4275020", False)]))
+        conn = fakedb.Connection(_Responder([(6191, "Yaroslav Amosov", "4275020", False, None)]))
         payload = career(entry(BELLATOR_UID), entry(REGIONAL_UID, name="CFFC 5: X", short_name="CFFC 5"))
 
         counts = backfill(
@@ -400,6 +400,178 @@ class TestBackfill:
         assert fakedb.mutating_statements(conn) == []
         assert conn.commits == 0
         assert conn.rollbacks >= 1
+
+
+class TestBackfillIdentityGuard:
+    """La guarda de identidad EN SU SITIO (t4-9-2): backfill() tiene que usar
+    history_identity_ok con las fechas de nacimiento de los dos lados.
+
+    Guarda de mutación: si la condición vuelve al `fold_ratio(...) <
+    IDENTITY_THRESHOLD` a secas, los tres primeros tests fallan (Aswell Jr.
+    da 0,903 y Spohn 0,857, que la vieja rechazaba; Jr. contra Sr. da 0,941,
+    que la vieja aceptaba). Si se deja de leer la fecha de alguno de los dos
+    lados, falla el de Spohn. Si el veto del año vuelve a ir antes del ratio,
+    falla el de Nicoll; si se quita la lista de pares verificados, el de Souza.
+    """
+
+    @staticmethod
+    def _run(fakedb, monkeypatch, target, athlete, *, dry_run=False):
+        monkeypatch.setenv("DATABASE_URL", "postgresql://test/test")
+        conn = fakedb.Connection(_Responder([target]))
+        payload = career(entry(BELLATOR_UID))
+        payload["athlete"] = athlete
+        counts = backfill(
+            conn,
+            dry_run=dry_run,
+            fetcher=lambda session, espn_id: payload,
+            sleeper=lambda seconds: None,
+        )
+        return conn, counts
+
+    def test_jr_on_our_side_only_imports(self, fakedb, monkeypatch):
+        # Caso real: 6534 es «Michael Aswell Jr.» y ESPN 5212738 «Michael Aswell».
+        conn, counts = self._run(
+            fakedb, monkeypatch,
+            (6534, "Michael Aswell Jr.", "5212738", False, date(2000, 9, 27)),
+            {"displayName": "Michael Aswell", "displayDOB": "27/9/2000"},
+        )
+        assert counts["name_mismatch"] == 0
+        assert counts["written"] == 1
+        assert any("espn_history_checked_at" in s for s in fakedb.mutating_statements(conn))
+
+    def test_jr_against_sr_is_rejected(self, fakedb, monkeypatch):
+        conn, counts = self._run(
+            fakedb, monkeypatch,
+            (6534, "Michael Aswell Jr.", "5212738", False, None),
+            {"displayName": "Michael Aswell Sr."},
+        )
+        assert counts["name_mismatch"] == 1
+        assert counts["written"] == 0
+        assert fakedb.mutating_statements(conn) == []
+
+    def test_same_birth_date_and_a_shared_word_imports(self, fakedb, monkeypatch):
+        # Caso real: 8219 «Daniel Spohn», ESPN 3024141 «Dan Spohn», los dos
+        # nacidos el 12-10-1984 (ESPN lo sirve como '12/10/1984').
+        conn, counts = self._run(
+            fakedb, monkeypatch,
+            (8219, "Daniel Spohn", "3024141", False, date(1984, 10, 12)),
+            {"displayName": "Dan Spohn", "displayDOB": "12/10/1984"},
+        )
+        assert counts["name_mismatch"] == 0
+        assert counts["written"] == 1
+
+    def test_birth_date_read_from_date_of_birth_when_there_is_no_display_dob(
+        self, fakedb, monkeypatch
+    ):
+        # Si ESPN sirve solo dateOfBirth (ISO), la regla de la fecha tiene que
+        # leerla igual: Spohn entra, y con otra fecha no.
+        conn, counts = self._run(
+            fakedb, monkeypatch,
+            (8219, "Daniel Spohn", "3024141", False, date(1984, 10, 12)),
+            {"displayName": "Dan Spohn", "dateOfBirth": "1984-10-12T07:00Z"},
+        )
+        assert counts["name_mismatch"] == 0
+        assert counts["written"] == 1
+
+        conn, counts = self._run(
+            fakedb, monkeypatch,
+            (8219, "Daniel Spohn", "3024141", False, date(1984, 10, 12)),
+            {"displayName": "Dan Spohn", "dateOfBirth": "1984-10-13T07:00Z"},
+        )
+        assert counts["name_mismatch"] == 1
+        assert fakedb.mutating_statements(conn) == []
+
+    def test_shared_word_without_espn_birth_date_is_rejected(self, fakedb, monkeypatch):
+        conn, counts = self._run(
+            fakedb, monkeypatch,
+            (8219, "Daniel Spohn", "3024141", False, date(1984, 10, 12)),
+            {"displayName": "Dan Spohn"},
+        )
+        assert counts["name_mismatch"] == 1
+        assert fakedb.mutating_statements(conn) == []
+
+    def test_identical_name_with_another_birth_year_still_imports(self, fakedb, monkeypatch):
+        # Caso real: Stewart Nicoll, en activo. UFCStats dice 11-04-1996 y
+        # ESPN '4/11/1994'. La guarda vieja lo aceptaba; si el veto del año
+        # lo tumba, su historial deja de actualizarse sin ningún aviso.
+        conn, counts = self._run(
+            fakedb, monkeypatch,
+            (7000, "Stewart Nicoll", "4410000", False, date(1996, 4, 11)),
+            {"displayName": "Stewart Nicoll", "displayDOB": "4/11/1994"},
+        )
+        assert counts["name_mismatch"] == 0
+        assert counts["written"] == 1
+
+    def test_father_and_son_through_a_relaxed_rule_are_rejected(self, fakedb, monkeypatch):
+        # «Aswell Jr.» contra «Aswell» solo pasa por la regla nueva del
+        # sufijo, y ahí 30 años de diferencia son padre e hijo.
+        conn, counts = self._run(
+            fakedb, monkeypatch,
+            (6534, "Michael Aswell Jr.", "5212738", False, date(2000, 9, 27)),
+            {"displayName": "Michael Aswell", "displayDOB": "27/9/1970"},
+        )
+        assert counts["name_mismatch"] == 1
+        assert fakedb.mutating_statements(conn) == []
+
+    def test_twins_with_the_same_birth_date_are_rejected(self, fakedb, monkeypatch):
+        # Los Ellenberger están los dos en nuestra base, nacidos el
+        # 28-03-1985: un espn_id cruzado no puede meter la carrera del otro.
+        conn, counts = self._run(
+            fakedb, monkeypatch,
+            (1500, "Joe Ellenberger", "2500000", False, date(1985, 3, 28)),
+            {"displayName": "Jake Ellenberger", "displayDOB": "28/3/1985"},
+        )
+        assert counts["name_mismatch"] == 1
+        assert fakedb.mutating_statements(conn) == []
+
+    def test_verified_pair_imports_despite_another_name(self, fakedb, monkeypatch):
+        # Caso real: 9084 «Jose Souza» es el ESPN 5080485 «Jose Henrique»
+        # (rival UFC Ding Meng 4813565, nacido 23-05-2002 en los dos lados).
+        # Ninguna regla general lo separa de MacDonald/Lambert: va por la
+        # lista de pares verificados a mano.
+        assert (9084, "5080485") in espn_fight_history.VERIFIED_IDENTITY_PAIRS
+        conn, counts = self._run(
+            fakedb, monkeypatch,
+            (9084, "Jose Souza", "5080485", False, date(2002, 5, 23)),
+            {"displayName": "Jose Henrique", "displayDOB": "23/5/2002"},
+        )
+        assert counts["name_mismatch"] == 0
+        assert counts["written"] == 1
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            # La misma pareja de nombres, pero otra ficha o otro id: fuera.
+            (9085, "Jose Souza", "5080485", False, date(2002, 5, 23)),
+            (9084, "Jose Souza", "5080486", False, date(2002, 5, 23)),
+        ],
+    )
+    def test_the_verified_pair_is_by_both_ids(self, fakedb, monkeypatch, target):
+        conn, counts = self._run(
+            fakedb, monkeypatch,
+            target,
+            {"displayName": "Jose Henrique", "displayDOB": "23/5/2002"},
+        )
+        assert counts["name_mismatch"] == 1
+        assert fakedb.mutating_statements(conn) == []
+
+    def test_seeded_rows_are_imported_exactly_as_before(self, fakedb, monkeypatch):
+        # Sembrada (source='espn'): se importa aunque la guarda nueva rechace.
+        conn, counts = self._run(
+            fakedb, monkeypatch,
+            (9027, "Michael Aswell Jr.", "5143223", True, date(1993, 9, 4)),
+            {"displayName": "Michael Aswell Sr.", "displayDOB": "4/9/1963"},
+        )
+        assert counts["name_mismatch"] == 0
+        assert counts["written"] == 1
+
+    @pytest.mark.parametrize("all_scope", [False, True])
+    def test_target_query_selects_our_birth_date(self, fakedb, all_scope):
+        conn = fakedb.Connection(lambda sql, params: [])
+        espn_fight_history._get_target_fighters(conn, all_scope=all_scope)
+        (sql,) = fakedb.executed_statements(conn)
+        select_clause = " ".join(sql.split()).split(" FROM ")[0]
+        assert "f.birth_date" in select_clause
 
 
 # Contender Series con datos REALES (sonda del 29-sep-2026): Tommy Gantt
@@ -648,7 +820,7 @@ class TestContenderSeries:
 
     def test_backfill_writes_the_dwcs_row(self, fakedb, monkeypatch):
         monkeypatch.setenv("DATABASE_URL", "postgresql://test/test")
-        conn = fakedb.Connection(_Responder([(9080, "Tommy Gantt", "5307814", False)]))
+        conn = fakedb.Connection(_Responder([(9080, "Tommy Gantt", "5307814", False, None)]))
         payload = career(
             entry(UFC_UID, name="UFC Fight Night: Allen vs. Costa",
                   short_name="UFC Fight Night"),
@@ -685,7 +857,7 @@ class TestContenderSeries:
 
     def test_backfill_dry_run_counts_dwcs_but_never_writes(self, fakedb, monkeypatch):
         monkeypatch.setenv("DATABASE_URL", "postgresql://test/test")
-        conn = fakedb.Connection(_Responder([(9080, "Tommy Gantt", "5307814", False)]))
+        conn = fakedb.Connection(_Responder([(9080, "Tommy Gantt", "5307814", False, None)]))
         payload = career(dwcs_entry(), entry(BELLATOR_UID))
         payload["athlete"] = {"displayName": "Tommy Gantt"}
 
