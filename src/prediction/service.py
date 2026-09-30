@@ -12,9 +12,10 @@ Contract (see PREDICTION_MICROSERVICE_HANDOFF.md):
     POST /predict  body {"red": <id>, "blue": <id>}
         200 -> PredictionResponse (identical to api.py output, minus explanation*).
                Thin/absent history is still 200 with "lowConfidence": true.
+               A non-finite float (NaN/Infinity) goes out as null, and is logged.
         400 -> {"error": "..."}  invalid body / same fighter / unknown id
         401 -> {"error": "Unauthorized"}  when an API key is configured and missing/wrong
-        500 -> {"error": "..."}
+        500 -> {"error": "..."}  also when a win probability is not a finite number
 
 Performance: the model bundle is loaded once at startup (fail-fast on a missing or
 corrupt model.joblib); the fight/ranking dataframes are cached in-process with a TTL
@@ -33,6 +34,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import math
 import os
 import sys
 import threading
@@ -41,6 +43,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from fastapi import FastAPI, Header
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -71,6 +74,7 @@ DATA_TTL_SECONDS = float(os.getenv("PREDICTION_DATA_TTL_SECONDS", "600"))
 API_KEY_HEADER = "X-API-Key"
 # The frontend ships PREDICTION_SERVICE_API_KEY; older configs use PREDICTION_API_KEY.
 API_KEY_ENV_NAMES = ("PREDICTION_API_KEY", "PREDICTION_SERVICE_API_KEY")
+WIN_PROBABILITY_KEYS = ("redProbability", "blueProbability")
 
 
 def _resolve_api_key() -> str | None:
@@ -159,6 +163,42 @@ class PredictRequest(BaseModel):
 
 def _error(status_code: int, message: str) -> JSONResponse:
     return JSONResponse(status_code=status_code, content={"error": message})
+
+
+def _is_finite_number(value: Any) -> bool:
+    try:
+        return math.isfinite(value)
+    except TypeError:  # None, a string...: not a number at all
+        return False
+
+
+def _json_safe(value: Any, path: str, replaced: list[str]) -> Any:
+    """Copy of ``value`` with every non-finite float (NaN, +/-Infinity) as None.
+
+    JSON has no NaN. FastAPI currently hands the endpoint's dict to pydantic,
+    whose default quietly writes NaN as null, but Starlette's JSONResponse (every
+    ``_error`` path, or a future ``return JSONResponse(...)``) renders with
+    ``allow_nan=False``, where a NaN is a 500, and a numpy float32 is a 500 on
+    either path. So the payload leaves this service with plain finite floats or
+    None only, whatever serializes it; the dotted path of each replacement is
+    collected in ``replaced`` for the log."""
+    if isinstance(value, dict):
+        return {
+            key: _json_safe(item, f"{path}.{key}" if path else str(key), replaced)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _json_safe(item, f"{path}[{index}]", replaced)
+            for index, item in enumerate(value)
+        ]
+    if isinstance(value, (float, np.floating)):
+        number = float(value)
+        if math.isfinite(number):
+            return number
+        replaced.append(path)
+        return None
+    return value
 
 
 def _get_bundle() -> dict[str, Any]:
@@ -281,7 +321,36 @@ def predict_endpoint(
         )
         # Expose the model's training date so the UI can show it (#29).
         result["modelTrainedAt"] = model_trained_at(bundle)
-        return result
+        # A win probability that is not a finite number is a model defect, not a
+        # data gap, so it never goes out as null: the web's schema would reject
+        # the null anyway (blaming the payload's shape) and the cause would be
+        # lost. Explicit 500 instead: the web answers 503 and degrades, and does
+        # not retry it (only 502/503/504 are retried), which is right for a
+        # failure that repeats with the same two fighters.
+        broken = {
+            key: result.get(key)
+            for key in WIN_PROBABILITY_KEYS
+            if not _is_finite_number(result.get(key))
+        }
+        if broken:
+            LOGGER.error(
+                "Non-finite win probability for red=%s blue=%s: %s",
+                body.red,
+                body.blue,
+                broken,
+            )
+            return _error(500, "Internal prediction error")
+        # Anything else non-finite goes out as null, named in the log.
+        replaced: list[str] = []
+        payload = _json_safe(result, "", replaced)
+        if replaced:
+            LOGGER.warning(
+                "Non-finite floats sent as null for red=%s blue=%s: %s",
+                body.red,
+                body.blue,
+                ", ".join(replaced),
+            )
+        return payload
     except Exception:  # noqa: BLE001 - surface as a clean 500 for the frontend
         LOGGER.exception("Prediction failed for red=%s blue=%s", body.red, body.blue)
         return _error(500, "Internal prediction error")
