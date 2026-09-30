@@ -6,6 +6,7 @@ import pandas as pd
 from src.scrapers.config import get_settings
 from src.scrapers.db import connect
 
+from .dataset_guard import check_winner_dataset
 from .db import load_base_dataframe, load_rankings_dataframe
 from .training import build_training_dataset
 from .types import DatasetBuildResult, OUTPUT_CSV_PATH, OUTPUT_TABLE_NAME
@@ -85,6 +86,9 @@ def main(write_table: bool = False) -> None:
     if dataset.empty:
         print_summary(result)
         raise RuntimeError("No eligible training samples were generated.")
+    # ANTES de escribir: si el dataset viene envenenado (el 97 % de 2026 del CSV
+    # de junio), se lanza y el CSV que hubiera se queda como estaba.
+    check_winner_dataset(dataset)
     dataset.to_csv(OUTPUT_CSV_PATH, index=False)
     if write_table:
         create_output_table(settings.database_url, dataset)
