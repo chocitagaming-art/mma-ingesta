@@ -48,6 +48,7 @@ from sklearn.calibration import calibration_curve
 from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, roc_auc_score
 
 from src.prediction.api import MIN_CONFIDENT_FIGHTS, _swap_corners
+from src.prediction.bundle_io import discard_stale_calibrators
 from src.prediction.train import (
     METRICS_PATH,
     MODEL_PATH,
@@ -120,6 +121,10 @@ def load_model_bundle() -> dict:
     for key in ("model", "imputer", "feature_columns"):
         if key not in bundle:
             raise RuntimeError(f"Model bundle is missing required key: {key!r}")
+    # Same load as production (api._load_model_bundle): a calibrator that does not
+    # wrap the model next to it is dropped, so the "calibrated" variants measure
+    # what is actually served and not the old model the calibrator carries inside.
+    discard_stale_calibrators(bundle)
     return bundle
 
 

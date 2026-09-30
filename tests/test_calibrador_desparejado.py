@@ -171,6 +171,24 @@ def test_la_bomba_reentrenar_sin_recalibrar_no_llega_a_produccion(ganador):
     )
 
 
+def test_evaluate_mide_lo_mismo_que_sirve_produccion(ganador, tmp_path, monkeypatch):
+    """evaluate.py tiene su propio cargador: si no descartara el calibrador
+    desparejado como api.py, su variante «calibrada» mediria el modelo VIEJO que
+    el calibrador lleva dentro mientras produccion sirve el nuevo sin calibrar, y
+    es el instrumento con el que se juzga la fase 4."""
+    import src.prediction.evaluate as evaluate
+
+    ruta = tmp_path / "model.joblib"
+    base = {"imputer": SimpleImputer(), "feature_columns": ["a"]}
+    monkeypatch.setattr(evaluate, "MODEL_PATH", ruta)
+
+    joblib.dump({**base, "model": ganador.reentrenado, "calibrator": ganador.calibrador}, ruta)
+    assert "calibrator" not in evaluate.load_model_bundle()
+
+    joblib.dump({**base, "model": ganador.viejo, "calibrator": ganador.calibrador}, ruta)
+    assert "calibrator" in evaluate.load_model_bundle()
+
+
 def test_las_dos_parejas_del_modelo_de_metodo():
     """Multiclase y mitad lineal, calibradas con la funcion de train_method.py."""
     x, _ = _datos(3, n_columnas=5, n_filas=300)
