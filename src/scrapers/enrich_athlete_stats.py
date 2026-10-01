@@ -249,6 +249,12 @@ def backfill(
     session = requests.Session()
     counts: Counter = Counter()
     targets = _get_target_fighters(connection, limit=limit, offset=offset, all_scope=all_scope)
+    # Release the read transaction of that SELECT right away. Neon kills a
+    # session left idle INSIDE a transaction for 5 min
+    # (idle_in_transaction_session_timeout=5min) and the sweep then spends half
+    # an hour on ufc.com: enrich-facts died exactly like that on 1-sep-2026
+    # (run 33484806063, "SSL connection has been closed unexpectedly").
+    connection.rollback()
     total = len(targets)
     counts["targets"] = total
     LOGGER.info(
@@ -296,8 +302,17 @@ def backfill(
                         first_round_finishes=page.stats.first_round_finishes,
                     )
                     if updated:
-                        connection.commit()
                         counts["updated"] += 1
+
+        if not dry_run:
+            # Close the transaction on EVERY iteration, also when the UPDATE hit
+            # 0 rows (IS DISTINCT FROM: nothing new): that UPDATE still opened a
+            # transaction, and carrying it across the next fetches is the same
+            # 5-min Neon trap. psycopg2 sends nothing when no transaction is
+            # open, so iterations without SQL cost nothing. Dry-run runs no SQL
+            # in this loop, so the rollback above leaves nothing to close, and
+            # it never commits (connect() closes/rolls back, never commits).
+            connection.commit()
 
         if idx % PROGRESS_EVERY == 0:
             LOGGER.info(
@@ -306,9 +321,6 @@ def backfill(
                 idx, total, counts["with_stats"], counts["updated"],
                 counts["no_stats"], counts["unresolved"], counts["name_mismatch"],
             )
-    if dry_run:
-        # Release the read-only snapshot; guarantees dry-run never commits.
-        connection.rollback()
     return counts
 
 

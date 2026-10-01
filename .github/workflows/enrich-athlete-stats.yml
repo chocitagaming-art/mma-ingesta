@@ -9,7 +9,12 @@ name: Enrich athlete finish stats (ufc.com)
 # without this cron the figures would freeze after a bout — the same class of
 # bug as refresh-records. No Claude tokens (no translation); only DATABASE_URL.
 # Default scope (daily cron) = fighters on UPCOMING cards (small, ~1-2 min).
-# Monthly cron / manual all=true sweeps the whole table (~2.8k pages, ~19 min).
+# Monthly cron / manual all=true sweeps the whole table: ~2.9k pages, 27-32 min
+# measured (0.57-0.67 s per fighter = 0.4 s delay + ufc.com), plus an estimated
+# ~0.3 s (BEGIN + COMMIT, two round trips to Neon) for every no-op UPDATE (~48%
+# of the fighters) now that each fighter commits. Hence timeout-minutes 90: 30
+# cancelled the 1-sep (run 33488770710) and 1-oct (run 36848270600) sweeps.
+# tests/test_enrich_sweep_workflows.py keeps these figures honest.
 # Daily 08:15 UTC: after refresh-records (08:00) and event-night live-results
 # seals, clear of the ufc.com photo/facts crawlers (05:00-06:30).
 on:
@@ -42,7 +47,7 @@ concurrency:
 jobs:
   enrich:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6

@@ -8,6 +8,7 @@ div.field--name-qna-facts, and Q&A inside div.field--name-qna either as ONE
 go through the shared fakedb recorder.
 """
 
+import pytest
 from bs4 import BeautifulSoup
 
 from src.scrapers import enrich_facts
@@ -377,6 +378,145 @@ def test_backfill_translation_failure_skips_row(fakedb):
     assert counts["translate_error"] == 1
     assert counts["updated"] == 0
     assert fakedb.mutating_statements(conn) == []
+
+
+def test_backfill_progress_log_includes_translation_failures(fakedb, caplog):
+    # The translation `except` falls through instead of `continue`-ing, so an
+    # iteration that fails translation on a multiple of PROGRESS_EVERY still
+    # logs the progress line (a `continue` there silently skipped it).
+    every = enrich_facts.PROGRESS_EVERY
+    targets = [(100 + i, f"Fighter Number{i}", None, False) for i in range(1, every + 1)]
+
+    def responder(sql, params=None):
+        return targets if sql.upper().strip().startswith("SELECT") else []
+
+    def broken_translator(facts, qa):
+        raise ValueError("translation shape mismatch")
+
+    conn = fakedb.Connection(responder)
+    with caplog.at_level("INFO", logger="src.scrapers.enrich_facts"):
+        counts = enrich_facts.backfill(
+            conn,
+            translator=broken_translator,
+            all_scope=True,
+            resolver=lambda session, name: FactsPage(
+                facts=["Pro since 2013"], qa=[], page_name=name
+            ),
+            sleeper=lambda seconds: None,
+        )
+    assert counts["translate_error"] == every
+    progress = [
+        r.getMessage() for r in caplog.records if r.getMessage().startswith("Progress ")
+    ]
+    assert len(progress) == 1, progress
+    assert progress[0].startswith(f"Progress {every}/{every} "), progress
+    assert f"translate_error={every}" in progress[0], progress
+    assert fakedb.mutating_statements(conn) == []
+
+
+# ------------------------------------------- Neon idle-in-transaction timeout
+
+# (targets, positions whose content is ALREADY stored — the COALESCE guard
+# makes their UPDATE hit 0 rows, e.g. facts stored and Q&A still NULL —,
+# positions with NEW content, seconds the FIRST fighter's network round takes).
+# Every other fighter has no faq-athlete block, so it runs no SQL at all (most
+# of the --all scope). The fake sleeper advances the clock by that first gap on
+# fighter 1 and 60 s on every later one: the gaps between statements are minutes.
+_NEON_SCENARIOS = {
+    # Fighter 1's no-op UPDATE opens a transaction, 2-7 run no SQL, and
+    # fighter 8's UPDATE arrives 7 min later: dead unless EVERY iteration
+    # closes its transaction, not only the ones that changed a row. This is
+    # run 33484806063 (1-sep-2026): three 0-row UPDATEs left uncommitted, 5.2
+    # min without SQL, then "SSL connection has been closed unexpectedly".
+    "noop-update-then-7-min-gap": (8, {1}, {8}, 60),
+    # ufc.com/Claude take 6 min on fighter 1, so its UPDATE (the first statement
+    # after the target SELECT) arrives 6 min after it, before any end-of-
+    # iteration commit: dead if the read transaction of the SELECT is still
+    # open, in write mode too. In dry-run it would stay open to the end.
+    "first-sql-6-min-after-select": (8, {1}, {8}, 360),
+}
+
+
+def _neon_targets(total):
+    return [(100 + i, f"Fighter Number{i}", None, False) for i in range(1, total + 1)]
+
+
+def _neon_responder(targets, stored_ids):
+    def responder(sql, params=None):
+        upper = sql.upper()
+        if upper.strip().startswith("SELECT"):
+            return targets
+        if "UPDATE" in upper:
+            return [] if stored_ids.intersection(params) else [(1,)]
+        return []
+
+    return responder
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+@pytest.mark.parametrize("scenario", sorted(_NEON_SCENARIOS))
+def test_backfill_survives_neon_idle_in_transaction_timeout(fakedb, scenario, dry_run):
+    total, stored, new, first_gap = _NEON_SCENARIOS[scenario]
+    targets = _neon_targets(total)
+    with_content = {targets[i - 1][1] for i in stored | new}
+    gaps = iter([first_gap] + [60] * (total - 1))
+    clock = fakedb.NeonClock()
+    conn = fakedb.NeonLikeConnection(
+        _neon_responder(targets, {targets[i - 1][0] for i in stored}), clock
+    )
+    counts = enrich_facts.backfill(
+        conn,
+        translator=_fake_translator,
+        dry_run=dry_run,
+        all_scope=True,
+        resolver=lambda session, name: FactsPage(
+            facts=["Pro since 2013"] if name in with_content else [],
+            qa=[],
+            page_name=name,
+        ),
+        sleeper=lambda seconds: clock.advance(next(gaps)),
+    )
+    assert counts["with_content"] == 2
+    assert clock.now == first_gap + 60 * (total - 1)  # every fighter was visited
+    assert not conn.in_txn  # nothing left open behind the sweep
+    if dry_run:
+        assert counts["would_update"] == 2
+        assert fakedb.mutating_statements(conn) == []
+        assert conn.commits == 0
+    else:
+        assert counts["updated"] == 1  # the already-stored fighter is a no-op
+        assert len(fakedb.mutating_statements(conn)) == 2
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+def test_backfill_holds_no_transaction_while_fetching_or_translating(fakedb, dry_run):
+    """The invariant behind the scenarios above, independent of timing: when a
+    page is fetched or sent to Claude, neither the target SELECT nor any earlier
+    UPDATE (0-row ones included) may still hold a transaction. A sweep spends
+    ~50 min on ufc.com and Claude, and one slow call can cross Neon's 5 min."""
+    targets = _neon_targets(4)
+    conn = fakedb.NeonLikeConnection(
+        _neon_responder(targets, {targets[0][0]}), fakedb.NeonClock()
+    )
+    open_during_network = []
+
+    def resolver(session, name):
+        if conn.in_txn:
+            open_during_network.append(("fetch", name))
+        return FactsPage(facts=["Pro since 2013"], qa=[], page_name=name)
+
+    def translator(facts, qa):
+        if conn.in_txn:
+            open_during_network.append(("translate", facts))
+        return _fake_translator(facts, qa)
+
+    counts = enrich_facts.backfill(
+        conn, translator=translator, dry_run=dry_run, all_scope=True,
+        resolver=resolver, sleeper=lambda seconds: None,
+    )
+    assert counts["with_content"] == 4
+    assert open_during_network == []
+    assert not conn.in_txn
 
 
 def test_target_selection_is_or_and_homonym_safe(fakedb):

@@ -37,7 +37,7 @@ Usage:
     python -m src.scrapers.enrich_facts --probe "Joel Alvarez"   # no DB: fetch+parse+translate, print JSON
     python -m src.scrapers.enrich_facts --dry-run --limit 5      # preview (translates: spends a few tokens)
     python -m src.scrapers.enrich_facts                          # upcoming-card fighters with a gap
-    python -m src.scrapers.enrich_facts --all                    # whole-table backfill (30-45 min)
+    python -m src.scrapers.enrich_facts --all                    # whole-table backfill (45-55 min measured)
 """
 
 from __future__ import annotations
@@ -368,6 +368,12 @@ def backfill(
     session = requests.Session()
     counts: Counter = Counter()
     targets = _get_target_fighters(connection, limit=limit, all_scope=all_scope)
+    # Release the read transaction of that SELECT right away. Neon kills a
+    # session left idle INSIDE a transaction for 5 min
+    # (idle_in_transaction_session_timeout=5min) and the sweep then spends close
+    # to an hour on ufc.com and Claude: this sweep died exactly like that on
+    # 1-sep-2026 (run 33484806063, "SSL connection has been closed unexpectedly").
+    connection.rollback()
     total = len(targets)
     counts["targets"] = total
     LOGGER.info(
@@ -402,23 +408,41 @@ def backfill(
                 try:
                     facts_es, qa_es = translator(page.facts, page.qa)
                 except Exception as exc:  # noqa: BLE001 - keep sweeping on a single failure
+                    # No `continue`, so this iteration still reaches the
+                    # progress log below. Transactions do not depend on it: the
+                    # translator runs before any SQL of this iteration, so the
+                    # end-of-iteration commit has nothing to close here (it
+                    # would, if SQL were ever added before the translation).
                     counts["translate_error"] += 1
                     LOGGER.warning("Translation failed for id=%d %r: %s", fighter_id, name, exc)
-                    continue
-                if dry_run:
-                    counts["would_update"] += 1
-                    LOGGER.info(
-                        "[dry-run] id=%d %r: %d facts + %d Q&A (es) | primero: %r",
-                        fighter_id, name, len(facts_es), len(qa_es),
-                        (facts_es[0] if facts_es else (qa_es[0]["q"] if qa_es else "")),
-                    )
                 else:
-                    updated = update_fighter_facts(
-                        connection, fighter_id, facts=facts_es or None, qa=qa_es or None
-                    )
-                    if updated:
-                        connection.commit()
-                        counts["updated"] += 1
+                    if dry_run:
+                        counts["would_update"] += 1
+                        LOGGER.info(
+                            "[dry-run] id=%d %r: %d facts + %d Q&A (es) | primero: %r",
+                            fighter_id, name, len(facts_es), len(qa_es),
+                            facts_es[0] if facts_es
+                            else (qa_es[0]["q"] if qa_es else ""),
+                        )
+                    else:
+                        updated = update_fighter_facts(
+                            connection, fighter_id,
+                            facts=facts_es or None, qa=qa_es or None,
+                        )
+                        if updated:
+                            counts["updated"] += 1
+
+        if not dry_run:
+            # Close the transaction on EVERY iteration, also when the UPDATE hit
+            # 0 rows (COALESCE: the column was already stored): that UPDATE
+            # still opened a transaction, and carrying it across the next
+            # fetches is the same 5-min Neon trap (run 33484806063: three 0-row
+            # UPDATEs left open, then 5.2 min without SQL). psycopg2 sends
+            # nothing when no transaction is open, so iterations without SQL
+            # cost nothing. Dry-run runs no SQL in this loop, so the rollback
+            # above leaves nothing to close, and it never commits (connect()
+            # closes/rolls back, never commits).
+            connection.commit()
 
         if idx % PROGRESS_EVERY == 0:
             LOGGER.info(
@@ -428,9 +452,6 @@ def backfill(
                 counts["no_content"], counts["unresolved"],
                 counts["name_mismatch"], counts["translate_error"],
             )
-    if dry_run:
-        # Release the read-only snapshot; guarantees dry-run never commits.
-        connection.rollback()
     return counts
 
 
