@@ -7,6 +7,7 @@ and .hero-profile__stat-text (label). No network, no DB: the resolver is
 injected and writes go through the shared fakedb recorder.
 """
 
+import pytest
 from bs4 import BeautifulSoup
 
 from src.scrapers import enrich_athlete_stats
@@ -221,6 +222,100 @@ def test_backfill_unresolved_page_counts(fakedb):
     )
     assert counts["unresolved"] == 1
     assert fakedb.mutating_statements(conn) == []
+
+
+# ------------------------------------------- Neon idle-in-transaction timeout
+
+# (targets, positions whose stats are ALREADY stored — the IS DISTINCT FROM
+# guard makes their UPDATE hit 0 rows —, positions with NEW stats). Every other
+# fighter has no stats block, so it runs no SQL at all. The fake sleeper
+# advances the clock 60 s per fighter: the gaps between statements are minutes.
+_NEON_SCENARIOS = {
+    # Fighter 1's no-op UPDATE opens a transaction, 2-7 run no SQL, and
+    # fighter 8's UPDATE arrives 7 min later: dead unless EVERY iteration
+    # closes its transaction, not only the ones that changed a row.
+    "noop-update-then-7-min-gap": (8, {1}, {8}),
+    # The first statement after the target SELECT is fighter 6's UPDATE, 6 min
+    # later: dead if the read transaction of the SELECT is still open by then.
+    "first-sql-6-min-after-select": (12, {6}, {12}),
+}
+
+
+def _neon_targets(total):
+    # Ids from 101 so they never collide with the stat values in UPDATE params.
+    return [(100 + i, f"Fighter Number{i}", None, False) for i in range(1, total + 1)]
+
+
+def _neon_responder(targets, stored_ids):
+    def responder(sql, params=None):
+        upper = sql.upper()
+        if upper.strip().startswith("SELECT"):
+            return targets
+        if "UPDATE" in upper:
+            return [] if stored_ids.intersection(params) else [(1,)]
+        return []
+
+    return responder
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+@pytest.mark.parametrize("scenario", sorted(_NEON_SCENARIOS))
+def test_backfill_survives_neon_idle_in_transaction_timeout(fakedb, scenario, dry_run):
+    # Raising the workflow timeout alone would walk the monthly sweep into this:
+    # enrich-facts (same loop) died of this exact OperationalError on
+    # 1-sep-2026 (run 33484806063).
+    total, stored, new = _NEON_SCENARIOS[scenario]
+    targets = _neon_targets(total)
+    with_stats = {targets[i - 1][1] for i in stored | new}
+    clock = fakedb.NeonClock()
+    conn = fakedb.NeonLikeConnection(
+        _neon_responder(targets, {targets[i - 1][0] for i in stored}), clock
+    )
+    counts = enrich_athlete_stats.backfill(
+        conn,
+        dry_run=dry_run,
+        all_scope=True,
+        resolver=lambda session, name: _page(
+            stats=FinishStats(2, 1, 2) if name in with_stats else None, page_name=name
+        ),
+        sleeper=lambda seconds: clock.advance(60),
+    )
+    assert counts["with_stats"] == 2
+    assert clock.now == 60 * total  # every fighter was visited
+    assert not conn.in_txn  # nothing left open behind the sweep
+    if dry_run:
+        assert counts["would_update"] == 2
+        assert fakedb.mutating_statements(conn) == []
+        assert conn.commits == 0
+    else:
+        assert counts["updated"] == 1  # the already-stored fighter is a no-op
+        assert len(fakedb.mutating_statements(conn)) == 2
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+def test_backfill_holds_no_transaction_while_fetching_ufc_com(fakedb, dry_run):
+    """The invariant behind the scenarios above, independent of timing: when a
+    page is fetched, neither the target SELECT nor any earlier UPDATE (0-row
+    ones included) may still hold a transaction. A sweep spends ~30 min on
+    ufc.com, and a single slow first fetch is enough to cross Neon's 5 min."""
+    targets = _neon_targets(4)
+    conn = fakedb.NeonLikeConnection(
+        _neon_responder(targets, {targets[0][0]}), fakedb.NeonClock()
+    )
+    open_while_fetching = []
+
+    def resolver(session, name):
+        if conn.in_txn:
+            open_while_fetching.append(name)
+        return _page(stats=FinishStats(2, 1, 2), page_name=name)
+
+    counts = enrich_athlete_stats.backfill(
+        conn, dry_run=dry_run, all_scope=True, resolver=resolver,
+        sleeper=lambda seconds: None,
+    )
+    assert counts["with_stats"] == 4
+    assert open_while_fetching == []
+    assert not conn.in_txn
 
 
 def test_target_selection_scopes_and_homonym_safe(fakedb):
