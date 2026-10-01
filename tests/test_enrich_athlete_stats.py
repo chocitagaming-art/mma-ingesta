@@ -227,17 +227,20 @@ def test_backfill_unresolved_page_counts(fakedb):
 # ------------------------------------------- Neon idle-in-transaction timeout
 
 # (targets, positions whose stats are ALREADY stored — the IS DISTINCT FROM
-# guard makes their UPDATE hit 0 rows —, positions with NEW stats). Every other
-# fighter has no stats block, so it runs no SQL at all. The fake sleeper
-# advances the clock 60 s per fighter: the gaps between statements are minutes.
+# guard makes their UPDATE hit 0 rows —, positions with NEW stats, seconds the
+# FIRST fetch takes). Every other fighter has no stats block, so it runs no SQL
+# at all. The fake sleeper advances the clock by that first gap on fighter 1
+# and 60 s on every later one: the gaps between statements are minutes.
 _NEON_SCENARIOS = {
     # Fighter 1's no-op UPDATE opens a transaction, 2-7 run no SQL, and
     # fighter 8's UPDATE arrives 7 min later: dead unless EVERY iteration
     # closes its transaction, not only the ones that changed a row.
-    "noop-update-then-7-min-gap": (8, {1}, {8}),
-    # The first statement after the target SELECT is fighter 6's UPDATE, 6 min
-    # later: dead if the read transaction of the SELECT is still open by then.
-    "first-sql-6-min-after-select": (12, {6}, {12}),
+    "noop-update-then-7-min-gap": (8, {1}, {8}, 60),
+    # ufc.com takes 6 min on fighter 1, so its UPDATE (the first statement after
+    # the target SELECT) arrives 6 min after it, before any end-of-iteration
+    # commit: dead if the read transaction of the SELECT is still open, in
+    # write mode too. In dry-run it would stay open to the end.
+    "first-sql-6-min-after-select": (8, {1}, {8}, 360),
 }
 
 
@@ -264,9 +267,10 @@ def test_backfill_survives_neon_idle_in_transaction_timeout(fakedb, scenario, dr
     # Raising the workflow timeout alone would walk the monthly sweep into this:
     # enrich-facts (same loop) died of this exact OperationalError on
     # 1-sep-2026 (run 33484806063).
-    total, stored, new = _NEON_SCENARIOS[scenario]
+    total, stored, new, first_gap = _NEON_SCENARIOS[scenario]
     targets = _neon_targets(total)
     with_stats = {targets[i - 1][1] for i in stored | new}
+    gaps = iter([first_gap] + [60] * (total - 1))
     clock = fakedb.NeonClock()
     conn = fakedb.NeonLikeConnection(
         _neon_responder(targets, {targets[i - 1][0] for i in stored}), clock
@@ -278,10 +282,10 @@ def test_backfill_survives_neon_idle_in_transaction_timeout(fakedb, scenario, dr
         resolver=lambda session, name: _page(
             stats=FinishStats(2, 1, 2) if name in with_stats else None, page_name=name
         ),
-        sleeper=lambda seconds: clock.advance(60),
+        sleeper=lambda seconds: clock.advance(next(gaps)),
     )
     assert counts["with_stats"] == 2
-    assert clock.now == 60 * total  # every fighter was visited
+    assert clock.now == first_gap + 60 * (total - 1)  # every fighter was visited
     assert not conn.in_txn  # nothing left open behind the sweep
     if dry_run:
         assert counts["would_update"] == 2

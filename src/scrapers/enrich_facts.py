@@ -408,7 +408,11 @@ def backfill(
                 try:
                     facts_es, qa_es = translator(page.facts, page.qa)
                 except Exception as exc:  # noqa: BLE001 - keep sweeping on a single failure
-                    # No `continue`: the end-of-iteration commit below must run.
+                    # No `continue`, so this iteration still reaches the
+                    # progress log below. Transactions do not depend on it: the
+                    # translator runs before any SQL of this iteration, so the
+                    # end-of-iteration commit has nothing to close here (it
+                    # would, if SQL were ever added before the translation).
                     counts["translate_error"] += 1
                     LOGGER.warning("Translation failed for id=%d %r: %s", fighter_id, name, exc)
                 else:
