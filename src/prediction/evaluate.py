@@ -33,6 +33,10 @@ also printed to stdout.
 Run with: ``python -m src.prediction.evaluate``
 Print only, leaving model_metrics.md untouched (e.g. to measure phase 4):
 ``python -m src.prediction.evaluate --no-write``
+Another CSV or bundle (the phase-4 measurement scores scratch bundles):
+``python -m src.prediction.evaluate --dataset PATH --bundle PATH --no-write``.
+The columns come from the bundle: its feature_columns, and the CSV must carry
+its feature set (legacy for a pre-phase-4 bundle).
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+from pathlib import Path
 
 import joblib
 import numpy as np
@@ -48,11 +53,14 @@ from sklearn.calibration import calibration_curve
 from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, roc_auc_score
 
 from src.prediction.api import MIN_CONFIDENT_FIGHTS, _swap_corners
-from src.prediction.bundle_io import discard_stale_calibrators
+from src.prediction.bundle_io import discard_stale_calibrators, winner_training_config
 from src.prediction.train import (
+    DATASET_PATH,
     METRICS_PATH,
     MODEL_PATH,
+    bundle_dataset_columns,
     chronological_three_way_split,
+    feature_set_columns,
     get_available_feature_columns,
     load_dataset,
 )
@@ -111,13 +119,15 @@ def era_bucket(year: int) -> str:
     return "2025+"
 
 
-def load_model_bundle() -> dict:
-    """Load the persisted model bundle (model + imputer + feature_columns)."""
-    if not MODEL_PATH.exists():
+def load_model_bundle(path: Path | str | None = None) -> dict:
+    """Load the persisted model bundle (model + imputer + feature_columns);
+    default MODEL_PATH."""
+    path = MODEL_PATH if path is None else Path(path)
+    if not path.exists():
         raise FileNotFoundError(
-            f"Trained model not found at {MODEL_PATH}. Run `python -m src.prediction.train` first."
+            f"Trained model not found at {path}. Run `python -m src.prediction.train` first."
         )
-    bundle = joblib.load(MODEL_PATH)
+    bundle = joblib.load(path)
     for key in ("model", "imputer", "feature_columns"):
         if key not in bundle:
             raise RuntimeError(f"Model bundle is missing required key: {key!r}")
@@ -310,19 +320,24 @@ def _estimator_probabilities(
     return raw, symmetrized
 
 
-def build_test_predictions() -> tuple[pd.DataFrame, dict[str, np.ndarray], str]:
+def build_test_predictions(
+    dataset_path: Path | str | None = None, bundle_path: Path | str | None = None
+) -> tuple[pd.DataFrame, dict[str, np.ndarray], str]:
     """Reconstruct the train.py test slice and score it four ways.
 
-    Returns the test dataframe (with the PRODUCTION-EQUIVALENT `prob`/`pred` plus
-    segment columns), a dict of the four probability variants {raw, symmetrized} x
-    {uncalibrated, calibrated}, and the key of the headline variant actually used.
+    ``dataset_path`` / ``bundle_path`` default to the training CSV and the served
+    bundle. Returns the test dataframe (with the PRODUCTION-EQUIVALENT `prob`/`pred`
+    plus segment columns), a dict of the four probability variants {raw,
+    symmetrized} x {uncalibrated, calibrated}, and the key of the headline variant
+    actually used.
     """
-    dataset = load_dataset()
+    bundle = load_model_bundle(bundle_path)
+    feature_columns = list(bundle["feature_columns"])
+
+    dataset = load_dataset(dataset_path, bundle_dataset_columns(bundle))
     train_df, _calibration_df, test_df = chronological_three_way_split(dataset)
     test_df = test_df.reset_index(drop=True)
 
-    bundle = load_model_bundle()
-    feature_columns = list(bundle["feature_columns"])
     imputer = bundle["imputer"]
     model = bundle["model"]
     # Score with the calibrator when present (mirrors api.predict); the base model
@@ -331,7 +346,9 @@ def build_test_predictions() -> tuple[pd.DataFrame, dict[str, np.ndarray], str]:
 
     # Sanity check: the feature columns saved with the model must match what
     # train.py would derive from the same train slice (guards against drift).
-    expected_columns = get_available_feature_columns(train_df)
+    expected_columns = get_available_feature_columns(
+        train_df, feature_set_columns(winner_training_config(bundle)["feature_set"])
+    )
     if feature_columns != expected_columns:
         print(
             "[warn] Saved feature_columns differ from train.py's "
@@ -812,8 +829,21 @@ def print_summary(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    # Defaults are read when this runs (a test may point MODEL_PATH elsewhere).
     parser = argparse.ArgumentParser(
         description="Evaluacion diagnostica del modelo persistido (sin reentrenar)."
+    )
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=DATASET_PATH,
+        help="CSV de entrenamiento (por defecto: %(default)s).",
+    )
+    parser.add_argument(
+        "--bundle",
+        type=Path,
+        default=MODEL_PATH,
+        help="Bundle que se evalua (por defecto: %(default)s).",
     )
     parser.add_argument(
         "--no-write",
@@ -829,7 +859,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    test_df, variants, headline_key = build_test_predictions()
+    test_df, variants, headline_key = build_test_predictions(
+        dataset_path=args.dataset, bundle_path=args.bundle
+    )
     if not args.no_write:
         section = build_section(test_df, variants, headline_key)
         write_section_idempotent(section)
