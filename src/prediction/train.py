@@ -25,15 +25,20 @@ from xgboost import XGBClassifier
 from src.prediction.bundle_io import save_bundle_preserving
 from src.prediction.features import FEATURE_COLUMNS
 
+# The train / calibration / test split is the frozen "metro" in split.py (fixed
+# dates, defined there and nowhere else). Re-exported here because calibrate.py,
+# evaluate.py, train_method.py and archived experiment scripts import it from
+# train.
+from src.prediction.split import (  # noqa: F401  (re-exported)
+    _test_split_index,
+    chronological_three_way_split,
+    chronological_train_test_split,
+)
+
 
 DATASET_PATH = Path("training_dataset.csv")
 MODEL_PATH = Path("src/prediction/model.joblib")
 METRICS_PATH = Path("src/prediction/model_metrics.md")
-TEST_SIZE = 0.2
-# Out-of-sample calibration holdout carved between train and test (next ~16% of
-# the chronology), so calibrate.py can fit on rows the base model never saw.
-CALIBRATION_SIZE = 0.16
-MIN_TRAIN_ROWS = 40
 
 # Un modelo recien entrenado se guarda SIN calibrador (bundle_io.py explica por
 # que). El servicio seguiria funcionando, con probabilidades sin calibrar, y nadie
@@ -77,41 +82,6 @@ def load_dataset() -> pd.DataFrame:
     if missing_columns:
         raise RuntimeError(f"Dataset missing required columns: {missing_columns}")
     return dataset
-
-
-def _test_split_index(dataset: pd.DataFrame) -> int:
-    """Positional index where the chronological test slice (last TEST_SIZE)
-    begins. Shared by the two-way and three-way splits so the test boundary -
-    and therefore the reported test metrics - stays identical across both."""
-    split_index = max(int(len(dataset) * (1 - TEST_SIZE)), MIN_TRAIN_ROWS)
-    return min(split_index, len(dataset) - 1)
-
-
-def chronological_train_test_split(dataset: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    split_index = _test_split_index(dataset)
-    train_df = dataset.iloc[:split_index].copy()
-    test_df = dataset.iloc[split_index:].copy()
-    return train_df, test_df
-
-
-def chronological_three_way_split(
-    dataset: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Positional chronological split into (train, calibration_holdout, test).
-
-    train = first ~64%, calibration-holdout = next ~16%, test = last ~20%. The
-    test boundary is the SAME positional index as ``chronological_train_test_split``
-    (so test metrics stay comparable), while the calibration-holdout is carved out
-    of what used to be the tail of TRAIN. The base model trains on ``train_df``
-    only; ``calibrate.py`` fits the calibrator on ``calibration_holdout_df`` (rows
-    the base never saw), which removes the in-sample calibration bug. No shuffle."""
-    test_start = _test_split_index(dataset)
-    cal_start = max(int(len(dataset) * (1 - TEST_SIZE - CALIBRATION_SIZE)), 1)
-    cal_start = min(cal_start, test_start - 1)
-    train_df = dataset.iloc[:cal_start].copy()
-    calibration_holdout_df = dataset.iloc[cal_start:test_start].copy()
-    test_df = dataset.iloc[test_start:].copy()
-    return train_df, calibration_holdout_df, test_df
 
 
 def build_time_series_folds(train_df: pd.DataFrame, n_splits: int = 3) -> list[FoldSplit]:
@@ -324,7 +294,8 @@ def write_metrics_report(
 def main() -> None:
     dataset = load_dataset()
     # Base model trains on train_df ONLY; calibration_df is the out-of-sample
-    # holdout that calibrate.py fits on; test_df is the unchanged last-20% slice.
+    # holdout that calibrate.py fits on; test_df is the frozen test window
+    # (split.py). Fights after the metro's TEST_END are in none of the three.
     train_df, calibration_df, test_df = chronological_three_way_split(dataset)
     feature_columns = get_available_feature_columns(train_df)
     parameter_grid = list(

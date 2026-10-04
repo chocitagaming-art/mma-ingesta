@@ -56,6 +56,7 @@ from src.prediction.features.method_features import (
     METHOD_FEATURE_COLUMNS,
     build_method_feature_row,
 )
+from src.prediction.split import TEST_END
 from src.prediction.train_method import select_calibration
 
 # Ruta absoluta: MODEL_PATH de api/train es relativa al directorio de trabajo.
@@ -362,14 +363,18 @@ def test_la_guarda_del_commiteado_se_pone_roja_con_un_reentreno_sin_recalibrar(
 # --- train.py de verdad --------------------------------------------------------
 
 
-def _dataset_sintetico(n_filas: int = 320) -> pd.DataFrame:
+def _dataset_sintetico() -> pd.DataFrame:
+    # One fight every 2 days up to the frozen metro's TEST_END (split.py): the
+    # three partitions get rows and the test clears MIN_TEST_ROWS.
+    fechas = pd.date_range(end=TEST_END, periods=2_200, freq="2D")
+    n_filas = len(fechas)
     rng = np.random.default_rng(3)
     datos = pd.DataFrame(
         rng.normal(size=(n_filas, len(FEATURE_COLUMNS))), columns=FEATURE_COLUMNS
     )
     ruido = rng.normal(scale=1.0, size=n_filas)
     datos["target"] = (datos["height_cm_diff"] + ruido > 0).astype(int)
-    datos["event_date"] = pd.date_range("2015-01-03", periods=n_filas, freq="7D")
+    datos["event_date"] = fechas
     datos["fight_id"] = np.arange(n_filas)
     return datos
 

@@ -3,21 +3,23 @@
 Run with ``python -m src.prediction.train_method``. Reads
 ``method_training_dataset.csv`` (built by ``python -m
 src.prediction.features.method_output``), reuses the winner pipeline's
-chronological machinery (same three-way split boundaries, same walk-forward
-folds) and ADDS the resulting artifacts to the existing ``model.joblib`` bundle
-under ``method_*`` keys — the winner model's keys are never touched, so an old
+chronological machinery (the same three-way split, i.e. the frozen "metro"
+dates of ``split.py``, and the same walk-forward folds) and ADDS the resulting
+artifacts to the existing ``model.joblib`` bundle under ``method_*`` keys — the winner model's keys are never touched, so an old
 service binary keeps working against the new bundle and vice versa.
 
 Pipeline (all chronological, no shuffle):
 1. Hyperparameter search: the winner grid, scored by mean walk-forward
    multiclass log-loss over 3 folds (folds whose train slice lacks a class are
    skipped — XGBoost must see all 3 classes to emit 3-class probabilities).
-2. Base model: XGBClassifier(multi:softprob) fit on train (~64%).
+2. Base model: XGBClassifier(multi:softprob) fit on train (fights before the
+   metro's CAL_START).
 3. Calibration: isotonic vs sigmoid CalibratedClassifierCV over the FROZEN base
    model, selected by 5-fold out-of-fold log-loss on the calibration holdout
-   (~16%, rows the base never saw), then refit on the full holdout.
-4. Evaluation on the untouched last-20% test slice, scored the way PRODUCTION
-   will serve: corner-symmetrized (average of forward and swapped predictions —
+   (CAL_START to TEST_START, rows the base never saw), then refit on the full
+   holdout.
+4. Evaluation on the untouched frozen test window (TEST_START to TEST_END),
+   scored the way PRODUCTION will serve: corner-symmetrized (average of forward and swapped predictions —
    every added method feature is swap-invariant and the diffs negate, so this
    is exact) + calibrated. Honest baselines: majority class and train priors.
 
