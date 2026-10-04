@@ -158,37 +158,55 @@ def test_corrections_are_grouped_by_fighter():
 # -------------------------------------------------- set_fighter_record_corrected
 
 
-def test_corrected_writer_sql_is_guarded(fakedb):
+def test_corrected_writer_sql_bounds_each_component(fakedb):
+    """The corrected writer may lower the stored record only by the bouts the
+    correction removes, COMPONENT BY COMPONENT: stored_c <= new_c + removed_c for
+    wins, losses and draws. A total-only bound (stored total <= new total +
+    removed) let 9-0-0 -> 8-0-0 through, erasing a real win; and it is this SQL
+    guard, not the planner, that closes the race with a concurrent run that wrote
+    9-0-0 between the fetch phase and the write phase."""
     conn = fakedb.Connection(lambda sql, params=None: [(1,)])
     assert set_fighter_record_corrected(
-        conn, IMANOL_ID, wins=8, losses=0, draws=0, removed_bouts=1
+        conn, IMANOL_ID, wins=8, losses=0, draws=0, removed=(0, 1, 0)
     ) is True
     sql, params = conn.cursors[0].executed[0]
     flat = " ".join(sql.split())
     assert "UPDATE fighters" in flat
     assert "IS DISTINCT FROM (%s, %s, %s)" in flat
-    # Never drops more bouts than the correction removes.
-    assert (
-        "(COALESCE(wins, 0) + COALESCE(losses, 0) + COALESCE(draws, 0)) <= (%s + %s + %s + %s)"
-        in flat
+    for column in ("wins", "losses", "draws"):
+        assert f"AND COALESCE({column}, 0) <= %s + %s" in flat
+    # The old total-only bound is gone (it was the hole).
+    assert "<= (%s + %s + %s + %s)" not in flat
+    assert params == (
+        8, 0, 0, IMANOL_ID,   # SET ... WHERE id
+        8, 0, 0,              # IS DISTINCT FROM
+        8, 0,                 # wins   <= new wins   + removed wins
+        0, 1,                 # losses <= new losses + removed losses
+        0, 0,                 # draws  <= new draws  + removed draws
     )
-    assert params == (8, 0, 0, IMANOL_ID, 8, 0, 0, 8, 0, 0, 1)
 
 
 def test_corrected_writer_reports_no_update_when_guard_rejects(fakedb):
     conn = fakedb.Connection(lambda sql, params=None: [])
     assert set_fighter_record_corrected(
-        conn, IMANOL_ID, wins=8, losses=0, draws=0, removed_bouts=1
+        conn, IMANOL_ID, wins=8, losses=0, draws=0, removed=(0, 1, 0)
     ) is False
 
 
 @pytest.mark.parametrize(
-    "wins, losses, draws, removed", [(-1, 0, 0, 1), (8, -1, 0, 1), (8, 0, 0, -1)]
+    "wins, losses, draws, removed",
+    [
+        (-1, 0, 0, (0, 1, 0)),
+        (8, -1, 0, (0, 1, 0)),
+        (8, 0, 0, (0, -1, 0)),
+        (8, 0, 0, (-1, 1, 0)),
+        (8, 0, 0, (0, 1)),
+    ],
 )
-def test_corrected_writer_rejects_negatives_without_touching_db(fakedb, wins, losses, draws, removed):
+def test_corrected_writer_rejects_bad_input_without_touching_db(fakedb, wins, losses, draws, removed):
     conn = fakedb.Connection(lambda sql, params=None: [(1,)])
     assert set_fighter_record_corrected(
-        conn, IMANOL_ID, wins=wins, losses=losses, draws=draws, removed_bouts=removed
+        conn, IMANOL_ID, wins=wins, losses=losses, draws=draws, removed=removed
     ) is False
     assert fakedb.mutating_statements(conn) == []
 
@@ -257,7 +275,7 @@ def test_correction_is_applied_before_the_unchanged_shortcut(fakedb):
     # Fewer bouts than stored (8 < 9): the monotonic bump cannot write it, so the
     # dedicated corrected writer does.
     assert "IS DISTINCT FROM" in flat
-    assert params == (8, 0, 0, IMANOL_ID, 8, 0, 0, 8, 0, 0, 1)
+    assert params == (8, 0, 0, IMANOL_ID, 8, 0, 0, 8, 0, 0, 1, 0, 0)
     assert conn.commits == 1
 
 
@@ -342,7 +360,7 @@ def test_next_fight_from_the_wrong_record_still_lands_on_the_corrected_one(faked
     counts, _ = _run(conn, records={IMANOL_ESPN: (8, 1, 0)}, career={IMANOL_ESPN: _career(8)})
 
     assert counts["updated"] == 1
-    assert _updates(conn)[0][1] == (8, 0, 0, IMANOL_ID, 8, 0, 0, 8, 0, 0, 1)
+    assert _updates(conn)[0][1] == (8, 0, 0, IMANOL_ID, 8, 0, 0, 8, 0, 0, 1, 0, 0)
 
 
 def test_a_regressing_espn_read_is_never_written_for_a_corrected_fighter(fakedb):
@@ -354,6 +372,39 @@ def test_a_regressing_espn_read_is_never_written_for_a_corrected_fighter(fakedb)
     assert counts["not_greater_skipped"] == 1
     assert counts["updated"] == 0
     assert fakedb.mutating_statements(conn) == []
+
+
+@pytest.mark.parametrize(
+    "stored, overall, career_wins",
+    [
+        # After his next win is stored (9-0-0), both ESPN endpoints serve the
+        # pre-fight 8-1-0 (stale cache). Corrected 8-0-0 has 8 bouts vs 9 stored,
+        # and the total-only check let it erase the win.
+        ((9, 0, 0), (8, 1, 0), 8),
+        # A coherent read one win short of what is stored: 7-1-0 -> 7-0-0 would
+        # drop a real win, not the TUF loss.
+        ((8, 0, 0), (7, 1, 0), 7),
+    ],
+    ids=["stale-read-after-the-next-win", "one-real-win-short"],
+)
+def test_the_corrected_writer_never_drops_a_real_bout(fakedb, stored, overall, career_wins):
+    """Only the corrected bouts may disappear, component by component. The same
+    read is refused for a fighter WITHOUT a correction (monotonic bump), so the
+    correction must not open a door that every other fighter keeps shut."""
+    conn = fakedb.Connection(_responder([(IMANOL_ID, "Imanol Rodriguez", IMANOL_ESPN, *stored)]))
+    counts, _ = _run(conn, records={IMANOL_ESPN: overall}, career={IMANOL_ESPN: _career(career_wins)})
+
+    assert counts["updated"] == 0
+    assert counts["not_greater_skipped"] == 1
+    assert fakedb.mutating_statements(conn) == []
+
+    # Control: the same stale read against an uncorrected fighter is not written.
+    control = fakedb.Connection(_responder([(1, "Someone Else", "1", stored[0], 1, 0)]))
+    control_counts, _ = _run(
+        control, records={"1": overall}, career={}, correcciones=[],
+    )
+    assert control_counts["updated"] == 0
+    assert fakedb.mutating_statements(control) == []
 
 
 def test_competition_gone_writes_nothing_and_asks_to_retire_the_line(fakedb):

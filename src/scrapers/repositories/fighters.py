@@ -420,21 +420,28 @@ def set_fighter_record_corrected(
     wins: int,
     losses: int,
     draws: int,
-    removed_bouts: int,
+    removed: "tuple[int, int, int]",
 ) -> bool:
     """Write a record corrected by record_correcciones, even when it has FEWER
     bouts than the stored one (which bump_fighter_record, being monotonic, cannot).
 
     Used ONLY by refresh_fighter_records for a fighter with a verified correction
-    (ESPN overall minus the bouts that must not count). Guarded at SQL level:
+    (ESPN overall minus the bouts that must not count). `removed` is the
+    (wins, losses, draws) the correction subtracted. Guarded at SQL level:
     - writes only when the record actually changes (IS DISTINCT FROM);
-    - never drops more bouts than the correction removes: stored total <= new
-      total + removed_bouts. A bad ESPN read with fewer bouts therefore cannot
-      sneak in through this door.
+    - the stored record may drop ONLY by the subtracted bouts, component by
+      component: stored_c <= new_c + removed_c for wins, losses and draws. So
+      8-1-0 -> 8-0-0 (removed 0-1-0) passes, but 9-0-0 -> 8-0-0 (a stale ESPN
+      read after a real win, or a concurrent run that wrote 9-0-0 after this one
+      planned 8-0-0) and 8-0-0 -> 7-0-0 are rejected: a real bout is never
+      erased through this door. A total-only bound would let both through.
     Returns True if a row was updated.
     """
-    if wins < 0 or losses < 0 or draws < 0 or removed_bouts < 0:
+    if wins < 0 or losses < 0 or draws < 0:
         return False
+    if len(removed) != 3 or any(r < 0 for r in removed):
+        return False
+    removed_wins, removed_losses, removed_draws = removed
     with connection.cursor() as cursor:
         cursor.execute(
             """
@@ -443,13 +450,16 @@ def set_fighter_record_corrected(
             WHERE id = %s
               AND (COALESCE(wins, 0), COALESCE(losses, 0), COALESCE(draws, 0))
                   IS DISTINCT FROM (%s, %s, %s)
-              AND (COALESCE(wins, 0) + COALESCE(losses, 0) + COALESCE(draws, 0))
-                  <= (%s + %s + %s + %s)
+              AND COALESCE(wins, 0) <= %s + %s
+              AND COALESCE(losses, 0) <= %s + %s
+              AND COALESCE(draws, 0) <= %s + %s
             """,
             (
                 wins, losses, draws, fighter_id,
                 wins, losses, draws,
-                wins, losses, draws, removed_bouts,
+                wins, removed_wins,
+                losses, removed_losses,
+                draws, removed_draws,
             ),
         )
         return cursor.rowcount > 0

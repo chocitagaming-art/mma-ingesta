@@ -23,8 +23,10 @@ SAFETY:
   bout is subtracted while ESPN still lists it. Such a fighter is ALWAYS fetched
   by the corrected espn_id and NEVER by name, the correction is applied BEFORE the
   "unchanged" shortcut, and a corrected record with fewer bouts goes through the
-  dedicated set_fighter_record_corrected. If a correction is no longer needed the
-  fighter is left untouched and the run exits 1 (notify-on-failure opens an Issue).
+  dedicated set_fighter_record_corrected, which may lower the stored record ONLY by
+  the subtracted bouts, component by component (never a real win, loss or draw).
+  If a correction is no longer needed the fighter is left untouched and the run
+  exits 1 (notify-on-failure opens an Issue).
 
 Usage:
   python -m src.scrapers.refresh_fighter_records --dry-run --days 400   # report only
@@ -89,6 +91,21 @@ def _name_change_is_safe(
         return False
     delta = (new[0] + new[1] + new[2]) - (old[0] + old[1] + old[2])
     return 0 < delta <= max_delta
+
+
+def _corrected_write_is_safe(
+    stored: "tuple[int, int, int]",
+    new: "tuple[int, int, int]",
+    removed: "tuple[int, int, int]",
+) -> bool:
+    """Whether the non-monotonic corrected writer may replace `stored` by `new`:
+    each of wins/losses/draws may drop only by what the correction removed
+    (stored_c <= new_c + removed_c). Same rule as the SQL guard of
+    set_fighter_record_corrected, which stays the authoritative gate (it also
+    covers a concurrent run that moved the record after this one planned).
+    A total-only bound is not enough: stored 9-0-0 with a stale ESPN 8-1-0 gives
+    corrected 8-0-0, total 8 <= 8 + 1, and would erase a real win."""
+    return all(s <= n + r for s, n, r in zip(stored, new, removed))
 
 
 def _get_target_fighters(
@@ -223,18 +240,22 @@ def _plan_corrected(
     }
     if sum(new) > sum(stored):
         return change  # more bouts: the normal monotonic bump writes it
-    if sum(rec) < sum(stored):
-        # ESPN itself has fewer bouts than stored: a regressing read, not the
-        # correction. The corrected writer is not monotonic; never let it in.
+    removed = tuple(r - n for r, n in zip(rec, new))
+    if not _corrected_write_is_safe(stored, new, removed):
+        # Same or fewer bouts than stored, and NOT only because of the subtracted
+        # ones: a stale or regressing ESPN read (e.g. stored 9-0-0 after a real
+        # win, ESPN still 8-1-0). The corrected writer is not monotonic; never let
+        # it erase a real bout. Every other fighter refuses the same read too.
         counts["not_greater_skipped"] += 1
         LOGGER.info(
-            "skip (not greater) %s: stored %d-%d-%d vs ESPN %d-%d-%d",
-            name, wins, losses, draws, rec[0], rec[1], rec[2],
+            "skip (would drop a real bout) %s: stored %d-%d-%d vs ESPN %d-%d-%d "
+            "corrected %s",
+            name, wins, losses, draws, rec[0], rec[1], rec[2], "-".join(map(str, new)),
         )
         return None
     # Same or fewer bouts than stored, and only because of the subtracted ones.
     change["writer"] = "corrected"
-    change["removed_bouts"] = sum(rec) - sum(new)
+    change["removed"] = list(removed)
     return change
 
 
@@ -419,8 +440,10 @@ def refresh_records(
         return counts
 
     # Phase C: apply (short-lived connection; the SQL guards are the authoritative
-    # gate: monotonic for everyone, "only the subtracted bouts" for a corrected
-    # fighter). Fast, so the connection never goes idle long enough to be dropped.
+    # gate: monotonic for everyone, "only the subtracted bouts, per component" for
+    # a corrected fighter -- so a record another run advanced between Phase B and
+    # here is never lowered). Fast, so the connection never goes idle long enough
+    # to be dropped.
     if planned:
         with _conn() as conn:
             for change in planned:
@@ -428,7 +451,7 @@ def refresh_records(
                 if change.get("writer") == "corrected":
                     written = set_fighter_record_corrected(
                         conn, change["id"], wins=wins, losses=losses, draws=draws,
-                        removed_bouts=change["removed_bouts"],
+                        removed=tuple(change["removed"]),
                     )
                 else:
                     written = bump_fighter_record(
