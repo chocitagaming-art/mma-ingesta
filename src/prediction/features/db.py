@@ -1,8 +1,31 @@
 from __future__ import annotations
 
 import pandas as pd
+from psycopg2.extensions import connection as PgConnection
 
 from src.scrapers.db import connect, cursor
+
+from .preufc import ESPN_HISTORY_COLUMNS
+
+# Phase 4 pre-UFC block (preufc.py). NO league filter and no WHERE at all, as in the
+# 30-sep experiment's HISTORY_SQL: league 3321 (the Contender Series) is the arm that
+# won it. The scraper already keeps UFC bouts out of this table, and the strict date
+# cut is applied per bout by espn_features_for_fighter, never here.
+ESPN_HISTORY_SQL = """
+    SELECT id, fighter_id, event_date, result, method, is_title_fight, league_id
+    FROM fight_history_espn
+    ORDER BY fighter_id, event_date, id
+"""
+
+# Fighters whose ESPN history is KNOWN: linked to an ESPN athlete and swept at least
+# once by the Tuesday cron (espn_fight_history stamps espn_history_checked_at after
+# each successful sweep). Anyone else is "unknown history" for build_preufc_block.
+ESPN_KNOWN_FIGHTERS_SQL = """
+    SELECT id
+    FROM fighters
+    WHERE espn_id IS NOT NULL
+        AND espn_history_checked_at IS NOT NULL
+"""
 
 
 def load_base_dataframe(database_url: str) -> pd.DataFrame:
@@ -89,3 +112,39 @@ def load_rankings_dataframe(database_url: str) -> pd.DataFrame:
         return dataframe
     dataframe["snapshot_date"] = pd.to_datetime(dataframe["snapshot_date"]).dt.date
     return dataframe
+
+
+def load_espn_history_dataframe(connection: PgConnection) -> pd.DataFrame:
+    """Every fight_history_espn row the pre-UFC block reads, DWCS included.
+
+    Takes an open connection (read-only is enough) so the caller decides whether it
+    is pooled. An empty table still yields the ESPN_HISTORY_COLUMNS, so the index
+    and the block keep working on it.
+    """
+    with cursor(connection) as db_cursor:
+        db_cursor.execute(ESPN_HISTORY_SQL)
+        rows = db_cursor.fetchall()
+    return pd.DataFrame(rows, columns=ESPN_HISTORY_COLUMNS)
+
+
+def load_espn_known_fighter_ids(connection: PgConnection) -> set[int]:
+    """Ids of the fighters whose ESPN history is known (ESPN_KNOWN_FIGHTERS_SQL)."""
+    with cursor(connection) as db_cursor:
+        db_cursor.execute(ESPN_KNOWN_FIGHTERS_SQL)
+        rows = db_cursor.fetchall()
+    return {int(row["id"]) for row in rows}
+
+
+def index_espn_history(history: pd.DataFrame) -> dict[int, pd.DataFrame]:
+    """fighter_id -> that fighter's rows, sorted stably by (event_date, id).
+
+    Built once so each corner of each bout reads a handful of rows instead of the
+    whole table. The input frame is not modified.
+    """
+    if history.empty:
+        return {}
+    ordered = history.sort_values(["event_date", "id"], kind="stable")
+    return {
+        int(fighter_id): group.reset_index(drop=True)
+        for fighter_id, group in ordered.groupby("fighter_id", sort=False)
+    }
