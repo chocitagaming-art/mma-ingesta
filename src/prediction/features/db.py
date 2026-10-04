@@ -53,7 +53,12 @@ def load_base_dataframe(database_url: str) -> pd.DataFrame:
         LEFT JOIN fight_stats AS blue_stats
             ON blue_stats.fight_id = fights.id
             AND blue_stats.fighter_id = fights.fighter_blue_id
+        -- A cancelled bout never happened: kept, it reached the fight history as
+        -- a prior fight with result 'other' and moved days_since_last_fight,
+        -- total_prior_fights, wins_last_5... NULL status is a normal fight (the
+        -- reactivation path writes NULL back), hence NULL-safe, never <>.
         WHERE events.event_date IS NOT NULL
+            AND fights.status IS DISTINCT FROM 'cancelled'
         ORDER BY events.event_date ASC, fights.id ASC
     """
     with connect(database_url) as connection:

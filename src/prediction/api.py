@@ -199,7 +199,7 @@ def _get_latest_matchup_context(
     When the two fighters have an actual bout on record (the fight being
     predicted), the temporal features are anchored to that bout's real
     ``event_date`` and its real ``scheduled_rounds`` are used instead of a
-    hardcoded 3. A not-yet-decided bout (``winner_id`` IS NULL) is preferred over
+    hardcoded 3. A not-yet-fought bout (``winner_id`` AND ``method`` NULL) is preferred over
     a past meeting, so an upcoming rematch anchors to the upcoming date rather
     than to the previous fight. For a pure hypothetical (no bout on record
     between the two) there is no real fight date or round count, so we anchor the
@@ -212,8 +212,10 @@ def _get_latest_matchup_context(
     ]
     if not shared.empty:
         # Prefer the still-unfought bout (the scheduled matchup); otherwise the
-        # most recent meeting on record.
-        upcoming = shared[shared["winner_id"].isna()]
+        # most recent meeting on record. Unfought = no winner AND no method: a
+        # draw or a no contest has no winner either, but its method is set
+        # (M-DEC, S-DEC, CNC, Overturned...), and it must not become the anchor.
+        upcoming = shared[shared["winner_id"].isna() & shared["method"].isna()]
         candidates = upcoming if not upcoming.empty else shared
         row = candidates.sort_values(["event_date", "fight_id"], ascending=[False, False]).iloc[0]
         return (
