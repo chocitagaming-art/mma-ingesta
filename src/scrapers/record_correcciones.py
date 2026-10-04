@@ -211,11 +211,17 @@ def evaluar_correcciones(
             f"ESPN overall {_fmt(overall)} minus competition {competitions}",
         )
     if tuple(t - r for t, r in zip(tally, removed)) == tuple(overall):
-        # ESPN fixed the overall but kept the bout in the eventsMap: subtracting it
-        # again would erase a bout that is no longer counted.
+        # Either ESPN fixed the overall but kept the bout in the eventsMap, or the
+        # eventsMap already lists a NEW bout the overall has not caught up with
+        # (two different ESPN endpoints). Subtracting would be wrong in the first
+        # case, so nothing is written; the run still goes red so a person looks,
+        # but the message must not order a deletion that could be premature.
         return Veredicto(
             YA_NO_NECESARIA, None, todas,
-            f"ESPN overall {_fmt(overall)} already excludes competition {competitions}",
+            f"ESPN overall {_fmt(overall)} equals its eventsMap tally {_fmt(tally)} "
+            f"minus competition {competitions}: either ESPN fixed it, or the "
+            f"eventsMap shows a new bout before the overall (ESPN lag). Check "
+            f"ufc.com / UFCStats and the next run before retiring the line",
         )
     return Veredicto(
         SIN_VERIFICAR, None, todas,

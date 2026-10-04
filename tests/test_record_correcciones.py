@@ -124,6 +124,18 @@ def test_evaluate_retires_when_espn_overall_already_excludes_it():
     assert verdict.estado == YA_NO_NECESARIA
 
 
+def test_evaluate_lag_case_warns_without_ordering_the_deletion():
+    """The eventsMap already lists a NEW loss while the overall still says 8-1-0:
+    the tally minus the TUF bout equals the overall, exactly like a real ESPN fix.
+    Nothing is written and the run goes red, but the message must say it may be
+    ESPN lag, because deleting the line then would bring the TUF loss back."""
+    verdict = evaluar_correcciones([_correction()], (8, 1, 0), _career(8, 1, tuf="L"))
+    assert verdict.estado == YA_NO_NECESARIA
+    assert verdict.record is None
+    assert "lag" in verdict.detalle
+    assert "ufc.com" in verdict.detalle
+
+
 @pytest.mark.parametrize("payload", [None, {}, {"eventsMap": {}}, {"eventsMap": "broken"}])
 def test_evaluate_is_unverified_without_an_events_map(payload):
     verdict = evaluar_correcciones([_correction()], (8, 1, 0), payload)
@@ -323,6 +335,36 @@ def test_corrected_fighter_is_fetched_by_the_corrected_espn_id_even_without_one_
     assert name_calls == []
     assert counts["correcciones_aplicadas"] == 1
     assert counts["resolved_by_name"] == 0
+    assert _updates(conn)[0][1][:4] == (8, 0, 0, IMANOL_ID)
+
+
+def test_a_different_stored_espn_id_is_never_used_for_a_corrected_fighter(fakedb):
+    """If fighters.espn_id ever points elsewhere, both the record and the
+    eventsMap are still fetched with the hand-verified id of the correction."""
+    record_calls: list[str] = []
+    events_calls: list[str] = []
+
+    def fetch_record(espn_id):
+        record_calls.append(espn_id)
+        return (8, 1, 0)
+
+    def fetch_events(espn_id):
+        events_calls.append(espn_id)
+        return _career(8)
+
+    conn = fakedb.Connection(_responder([(IMANOL_ID, "Imanol Rodriguez", "999", 8, 1, 0)]))
+    counts = rfr.refresh_records(
+        connection=conn,
+        fetch_record=fetch_record,
+        fetch_by_name=lambda name: (8, 1, 0),
+        fetch_events=fetch_events,
+        correcciones=[_correction()],
+        days=14, delay=0,
+    )
+
+    assert record_calls == [IMANOL_ESPN]
+    assert events_calls == [IMANOL_ESPN]
+    assert counts["correcciones_aplicadas"] == 1
     assert _updates(conn)[0][1][:4] == (8, 0, 0, IMANOL_ID)
 
 

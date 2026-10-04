@@ -217,9 +217,9 @@ def _plan_corrected(
     if verdict.estado == YA_NO_NECESARIA:
         counts["correcciones_ya_no_necesarias"] += len(verdict.lineas)
         LOGGER.warning(
-            "Record correction for %s (id=%d) IS NO LONGER NEEDED, nothing "
+            "Record correction for %s (id=%d) MAY NO LONGER BE NEEDED, nothing "
             "written: %s. "
-            "Delete it from record_correcciones.CORRECCIONES.",
+            "Once confirmed, delete it from record_correcciones.CORRECCIONES.",
             name, fid, verdict.detalle,
         )
         return None
