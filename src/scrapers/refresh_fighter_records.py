@@ -18,6 +18,13 @@ SAFETY:
 - Semantics = TOTAL career record (owner decision, 2026-07-17).
 - One fetch pass -> write a JSON backup of the OLD values BEFORE applying -> then
   apply. Reversible.
+- Manual corrections (record_correcciones.CORRECCIONES): for a fighter whose ESPN
+  overall counts a bout it must not (Imanol Rodriguez, TUF 33 exhibition), that
+  bout is subtracted while ESPN still lists it. Such a fighter is ALWAYS fetched
+  by the corrected espn_id and NEVER by name, the correction is applied BEFORE the
+  "unchanged" shortcut, and a corrected record with fewer bouts goes through the
+  dedicated set_fighter_record_corrected. If a correction is no longer needed the
+  fighter is left untouched and the run exits 1 (notify-on-failure opens an Issue).
 
 Usage:
   python -m src.scrapers.refresh_fighter_records --dry-run --days 400   # report only
@@ -32,6 +39,7 @@ import argparse
 import contextlib
 import json
 import logging
+import sys
 import time
 from typing import Callable
 
@@ -39,8 +47,17 @@ from .config import get_settings
 from .db import connect
 from .enrich_ranked import _build_session, _search_espn_athlete
 from .enrich_records_espn import _fetch_espn_record, resolve_record
+from .espn_fight_history import fetch_career
 from .logging_config import configure_logging
-from .repositories.fighters import bump_fighter_record
+from .record_correcciones import (
+    CORRECCIONES,
+    SIN_VERIFICAR,
+    YA_NO_NECESARIA,
+    CorreccionRecord,
+    correcciones_por_luchador,
+    evaluar_correcciones,
+)
+from .repositories.fighters import bump_fighter_record, set_fighter_record_corrected
 
 LOGGER = logging.getLogger(__name__)
 
@@ -55,6 +72,9 @@ DEFAULT_MAX_NAME_DELTA = 4
 
 # A record fetcher keyed by espn_id: (espn_id) -> (wins, losses, draws) | None.
 RecordFetcher = Callable[[str], "tuple[int, int, int] | None"]
+# The athlete's common/v3 payload (with its eventsMap) keyed by espn_id, or None.
+# Only called for fighters with a manual correction.
+EventsFetcher = Callable[[str], "dict | None"]
 
 
 def _name_change_is_safe(
@@ -118,6 +138,106 @@ def _get_target_fighters(
     return rows[:limit] if limit is not None else rows
 
 
+def _plan_corrected(
+    fighter: "tuple[int, str | None, str | None, int, int, int]",
+    corrections: list[CorreccionRecord],
+    fetch_record: RecordFetcher,
+    fetch_events: EventsFetcher | None,
+    counts: dict[str, int],
+) -> dict | None:
+    """Decide the write for a fighter with manual corrections. Returns the planned
+    change, or None when nothing must be written.
+
+    Runs INSTEAD of the generic path, so (a) the correction is applied before the
+    "rec == stored -> unchanged" shortcut (stored == ESPN == 8-1-0 today) and (b)
+    the name fallback is never reached: it would find the same ESPN athlete and
+    _name_change_is_safe((8,0,0), (8,1,0)) would let 8-1-0 back in.
+    """
+    fid, name, espn_id, wins, losses, draws = fighter
+    stored = (wins, losses, draws)
+    corrected_espn_id = corrections[0].espn_id
+    if espn_id and espn_id != corrected_espn_id:
+        LOGGER.warning(
+            "%s (id=%d): stored espn_id %s differs from the corrected one %s; "
+            "using the corrected (hand-verified) id",
+            name, fid, espn_id, corrected_espn_id,
+        )
+
+    try:
+        rec = fetch_record(corrected_espn_id)
+    except Exception as exc:  # noqa: BLE001 - one failure must not stop the sweep
+        LOGGER.warning(
+            "ESPN fetch failed for %s (espn_id=%s): %s", name, corrected_espn_id, exc
+        )
+        rec = None
+    if rec is None:
+        counts["unresolved"] += 1
+        LOGGER.info(
+            "%s (id=%d) has a record correction: no name fallback, skipped", name, fid
+        )
+        return None
+    counts["resolved"] += 1
+
+    payload = None
+    if fetch_events is not None:
+        try:
+            payload = fetch_events(corrected_espn_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "ESPN eventsMap fetch failed for %s (espn_id=%s): %s",
+                name, corrected_espn_id, exc,
+            )
+    verdict = evaluar_correcciones(corrections, rec, payload)
+
+    if verdict.estado == SIN_VERIFICAR:
+        counts["correcciones_sin_verificar"] += len(verdict.lineas)
+        LOGGER.warning(
+            "Record correction for %s (id=%d) NOT VERIFIED, nothing written "
+            "this run: %s",
+            name, fid, verdict.detalle,
+        )
+        return None
+    if verdict.estado == YA_NO_NECESARIA:
+        counts["correcciones_ya_no_necesarias"] += len(verdict.lineas)
+        LOGGER.warning(
+            "Record correction for %s (id=%d) IS NO LONGER NEEDED, nothing "
+            "written: %s. "
+            "Delete it from record_correcciones.CORRECCIONES.",
+            name, fid, verdict.detalle,
+        )
+        return None
+
+    counts["correcciones_aplicadas"] += len(verdict.lineas)
+    new = verdict.record
+    LOGGER.info(
+        "Record correction applied to %s (id=%d): %s -> %s",
+        name, fid, verdict.detalle, "-".join(map(str, new)),
+    )
+    if new == stored:
+        counts["unchanged"] += 1
+        return None
+
+    change = {
+        "id": fid, "name": name, "old": [wins, losses, draws], "new": list(new),
+        "espn_overall": list(rec), "correccion": verdict.detalle,
+    }
+    if sum(new) > sum(stored):
+        return change  # more bouts: the normal monotonic bump writes it
+    if sum(rec) < sum(stored):
+        # ESPN itself has fewer bouts than stored: a regressing read, not the
+        # correction. The corrected writer is not monotonic; never let it in.
+        counts["not_greater_skipped"] += 1
+        LOGGER.info(
+            "skip (not greater) %s: stored %d-%d-%d vs ESPN %d-%d-%d",
+            name, wins, losses, draws, rec[0], rec[1], rec[2],
+        )
+        return None
+    # Same or fewer bouts than stored, and only because of the subtracted ones.
+    change["writer"] = "corrected"
+    change["removed_bouts"] = sum(rec) - sum(new)
+    return change
+
+
 def refresh_records(
     *,
     dry_run: bool = False,
@@ -129,14 +249,19 @@ def refresh_records(
     connection=None,
     fetch_record: RecordFetcher | None = None,
     fetch_by_name: "Callable[[str], tuple[int, int, int] | None] | None" = None,
+    fetch_events: EventsFetcher | None = None,
+    correcciones: list[CorreccionRecord] | None = None,
     max_name_delta: int = DEFAULT_MAX_NAME_DELTA,
     delay: float = REQUEST_DELAY_SECONDS,
 ) -> dict[str, int]:
     """Refresh records for the target set. Returns counts.
 
-    `connection` and `fetch_record` are injectable for tests (no socket, no
-    network). In production a live connection is opened and fetch_record wraps
-    _fetch_espn_record over a shared HTTP session.
+    `connection`, `fetch_record`, `fetch_by_name`, `fetch_events` and
+    `correcciones` are injectable for tests (no socket, no network). In
+    production a live connection is opened, the fetchers share one HTTP session
+    and the corrections are record_correcciones.CORRECCIONES. With an injected
+    fetch_record and no fetch_events, a corrected fighter cannot be verified and
+    is left untouched (no network).
     """
     counts = {
         "targets": 0,
@@ -147,7 +272,13 @@ def refresh_records(
         "unresolved": 0,
         "not_greater_skipped": 0,
         "name_rejected": 0,
+        "correcciones_aplicadas": 0,
+        "correcciones_ya_no_necesarias": 0,
+        "correcciones_sin_verificar": 0,
     }
+    corrections_by_fighter = correcciones_por_luchador(
+        CORRECCIONES if correcciones is None else correcciones
+    )
 
     if fetch_record is None:
         session = _build_session(get_settings())
@@ -161,6 +292,12 @@ def refresh_records(
             def fetch_by_name(name: str):  # noqa: ANN001
                 found = _search_espn_athlete(session, name)
                 return _fetch_espn_record(session, found[0]) if found else None
+
+        if fetch_events is None:
+            # The athlete career payload espn_fight_history already reads; one extra
+            # request, and only for fighters with a correction.
+            def fetch_events(espn_id: str):  # noqa: ANN001
+                return fetch_career(session, espn_id)
 
     @contextlib.contextmanager
     def _conn():
@@ -188,6 +325,18 @@ def refresh_records(
     # writing anything.
     planned: list[dict] = []
     for idx, (fid, name, espn_id, w, l, d) in enumerate(targets, 1):
+        corrections = corrections_by_fighter.get(fid)
+        if corrections:
+            change = _plan_corrected(
+                (fid, name, espn_id, w, l, d), corrections,
+                fetch_record, fetch_events, counts,
+            )
+            if change is not None:
+                planned.append(change)
+            if delay:
+                time.sleep(delay)
+            continue
+
         rec = None
         via = None
         if espn_id:
@@ -256,20 +405,36 @@ def refresh_records(
     if dry_run:
         for change in planned:
             counts["updated"] += 1
+            suffix = ""
+            if "correccion" in change:
+                suffix = " (correction: %s; writer: %s)" % (
+                    change["correccion"],
+                    "corrected" if change.get("writer") == "corrected" else "monotonic bump",
+                )
             LOGGER.info(
-                "[dry-run] %s: %s -> %s",
+                "[dry-run] %s: %s -> %s%s",
                 change["name"], "-".join(map(str, change["old"])), "-".join(map(str, change["new"])),
+                suffix,
             )
         return counts
 
-    # Phase C: apply (short-lived connection; monotonic guard is the authoritative
-    # gate at SQL level). Fast, so the connection never goes idle long enough to
-    # be dropped.
+    # Phase C: apply (short-lived connection; the SQL guards are the authoritative
+    # gate: monotonic for everyone, "only the subtracted bouts" for a corrected
+    # fighter). Fast, so the connection never goes idle long enough to be dropped.
     if planned:
         with _conn() as conn:
             for change in planned:
                 wins, losses, draws = change["new"]
-                if bump_fighter_record(conn, change["id"], wins=wins, losses=losses, draws=draws):
+                if change.get("writer") == "corrected":
+                    written = set_fighter_record_corrected(
+                        conn, change["id"], wins=wins, losses=losses, draws=draws,
+                        removed_bouts=change["removed_bouts"],
+                    )
+                else:
+                    written = bump_fighter_record(
+                        conn, change["id"], wins=wins, losses=losses, draws=draws
+                    )
+                if written:
                     conn.commit()
                     counts["updated"] += 1
                 else:
@@ -310,6 +475,17 @@ def main() -> None:
         delay=args.delay,
     )
     print(json.dumps(counts, indent=2))
+    if counts.get("correcciones_ya_no_necesarias"):
+        # Red on purpose: notify-on-failure watches "Refresh fighter records" and
+        # opens an Issue. The rest of the run was already applied; only the
+        # fighter whose correction went stale was left untouched. In the live
+        # loop the step is continue-on-error, so the night is not affected.
+        LOGGER.error(
+            "%d record correction(s) are no longer needed (ESPN changed): delete them "
+            "from src/scrapers/record_correcciones.py. Those fighters were not written.",
+            counts["correcciones_ya_no_necesarias"],
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

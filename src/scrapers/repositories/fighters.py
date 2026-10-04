@@ -413,6 +413,48 @@ def bump_fighter_record(
         return cursor.rowcount > 0
 
 
+def set_fighter_record_corrected(
+    connection: PgConnection,
+    fighter_id: int,
+    *,
+    wins: int,
+    losses: int,
+    draws: int,
+    removed_bouts: int,
+) -> bool:
+    """Write a record corrected by record_correcciones, even when it has FEWER
+    bouts than the stored one (which bump_fighter_record, being monotonic, cannot).
+
+    Used ONLY by refresh_fighter_records for a fighter with a verified correction
+    (ESPN overall minus the bouts that must not count). Guarded at SQL level:
+    - writes only when the record actually changes (IS DISTINCT FROM);
+    - never drops more bouts than the correction removes: stored total <= new
+      total + removed_bouts. A bad ESPN read with fewer bouts therefore cannot
+      sneak in through this door.
+    Returns True if a row was updated.
+    """
+    if wins < 0 or losses < 0 or draws < 0 or removed_bouts < 0:
+        return False
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE fighters
+            SET wins = %s, losses = %s, draws = %s, updated_at = NOW()
+            WHERE id = %s
+              AND (COALESCE(wins, 0), COALESCE(losses, 0), COALESCE(draws, 0))
+                  IS DISTINCT FROM (%s, %s, %s)
+              AND (COALESCE(wins, 0) + COALESCE(losses, 0) + COALESCE(draws, 0))
+                  <= (%s + %s + %s + %s)
+            """,
+            (
+                wins, losses, draws, fighter_id,
+                wins, losses, draws,
+                wins, losses, draws, removed_bouts,
+            ),
+        )
+        return cursor.rowcount > 0
+
+
 def update_fighter_finish_stats(
     connection: PgConnection,
     fighter_id: int,
