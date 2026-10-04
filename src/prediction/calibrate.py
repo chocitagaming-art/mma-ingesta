@@ -10,15 +10,16 @@ original ``model`` / ``imputer`` / ``feature_columns`` are preserved untouched).
 
 Calibration data
 ----------------
-``train.py`` now fits the base model on ``train_df`` ONLY (the first ~64% of the
-chronology). ``chronological_three_way_split`` carves out the next ~16% as a
-dedicated calibration holdout, which the base model never trained on; we
-re-derive that exact slice here via the same shared split. This removes the
-previous in-sample calibration bug, where the calibrator was fit on the tail of
-TRAIN that the base had already learned. We compare an isotonic and a sigmoid
-calibrator by out-of-fold Brier on the holdout, keep whichever is better, and
-refit the winning method on the FULL holdout before persisting. The
-``evaluate.py`` test slice (last ~20%) stays untouched.
+``train.py`` now fits the base model on ``train_df`` ONLY (fights before the
+frozen metro's ``CAL_START``, see ``split.py``). ``chronological_three_way_split``
+carves out the dates between ``CAL_START`` and ``TEST_START`` as a dedicated
+calibration holdout, which the base model never trained on; we re-derive that
+exact slice here via the same shared split. This removes the previous in-sample
+calibration bug, where the calibrator was fit on the tail of TRAIN that the base
+had already learned. We compare an isotonic and a sigmoid calibrator by
+out-of-fold Brier on the holdout, keep whichever is better, and refit the winning
+method on the FULL holdout before persisting. The ``evaluate.py`` test window
+(``TEST_START`` to ``TEST_END``) stays untouched.
 
 Prefit calibration
 -------------------
