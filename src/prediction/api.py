@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from dataclasses import asdict, dataclass
@@ -17,6 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.prediction.bundle_io import discard_stale_calibrators
 from src.prediction.features import (
     DEFAULT_SCHEDULED_ROUNDS,
     FEATURE_COLUMNS,
@@ -46,6 +48,8 @@ MODEL_PATH = Path("src/prediction/model.joblib")
 # as solid. Still returned as a normal 200 response, just with lowConfidence:true.
 MIN_CONFIDENT_FIGHTS = 3
 
+LOGGER = logging.getLogger("prediction.api")
+
 
 @dataclass(frozen=True)
 class FighterPredictionProfile:
@@ -69,6 +73,12 @@ def _load_model_bundle() -> dict[str, Any]:
     bundle = joblib.load(MODEL_PATH)
     if not isinstance(bundle, dict):
         raise RuntimeError("Unexpected model bundle format.")
+    # A calibrator carries its OWN copy of the model it was fitted on, and the
+    # predict paths serve `calibrator or model`: one left over from an older model
+    # would silently serve THAT model. Drop any calibrator that does not wrap the
+    # model next to it, so the raw model is served instead (logged as an ERROR).
+    # Checked here, once per load, never per prediction.
+    discard_stale_calibrators(bundle)
     return bundle
 
 
@@ -374,6 +384,14 @@ def _compute_top_features(
     (imputed) forward value the model actually saw) plus the FULL name ->
     contribution map (None when the estimator has no booster).
 
+    No non-finite number leaves this function. A value the booster saw as NaN
+    (XGBoost routes a missing value natively) or as infinite has no JSON form:
+    it is reported as None and the factor stays, because its contribution is
+    real. A non-finite CONTRIBUTION is not a measurement: it cannot be drawn as
+    a bar, a NaN breaks the |contribution| sort for every other factor, and the
+    frontend's schema would reject the whole prediction over it. That factor
+    leaves the ranking and the map, with a warning.
+
     Informative only: this explains the frozen base model's margin and does not
     change the returned probability, which comes from the monotonic calibrator.
     Because the calibrator is monotonic in that margin, the sign/direction stays
@@ -385,16 +403,25 @@ def _compute_top_features(
     symmetrized = (forward - swapped) / 2.0
     contributions_map: dict[str, float] = {}
     ranked: list[dict[str, Any]] = []
+    dropped: list[str] = []
     for index, feature_name in enumerate(feature_columns):
         contribution = float(symmetrized[index])
+        if not np.isfinite(contribution):
+            dropped.append(feature_name)
+            continue
         contributions_map[feature_name] = contribution
+        value = float(transformed_row[0][index])
         ranked.append(
             {
                 "name": feature_name,
-                "value": float(transformed_row[0][index]),
+                "value": value if np.isfinite(value) else None,
                 "contribution": contribution,
                 "direction": "red" if contribution >= 0 else "blue",
             }
+        )
+    if dropped:
+        LOGGER.warning(
+            "Non-finite SHAP contribution, left out of the ranking: %s", dropped
         )
     ranked.sort(key=lambda item: abs(item["contribution"]), reverse=True)
     return ranked[:5], contributions_map
@@ -444,7 +471,8 @@ def _predict_method(
     probabilities(B, A). Probabilities come from the calibrated estimator when
     the bundle carries one, like the winner path. Returning None (instead of
     raising) keeps /predict fully backward-compatible with bundles that predate
-    the method model — the frontend treats the field as optional."""
+    the method model — the frontend treats the field as optional. The same None
+    stands in for probabilities that come out non-finite."""
     method_model = bundle.get("method_model")
     method_imputer = bundle.get("method_imputer")
     if method_model is None or method_imputer is None:
@@ -493,6 +521,17 @@ def _predict_method(
         classes[int(class_index)]: float(symmetrized[position])
         for position, class_index in enumerate(class_order)
     }
+    # Non-finite probabilities mean a broken model or calibrator (a NaN input is
+    # filled by the method imputer before it gets here). Shipping them would make
+    # `predicted` meaningless (max() over NaN) and the web would discard the
+    # block anyway. The method is secondary: drop the whole block, exactly as for
+    # a pre-method bundle, and say so in the log.
+    if not all(np.isfinite(value) for value in probabilities.values()):
+        LOGGER.warning(
+            "Non-finite method probabilities, methodPrediction dropped: %s",
+            probabilities,
+        )
+        return None
     predicted = max(probabilities, key=probabilities.get)
     return {
         "probabilities": probabilities,

@@ -35,6 +35,26 @@ TEST_SIZE = 0.2
 CALIBRATION_SIZE = 0.16
 MIN_TRAIN_ROWS = 40
 
+# Un modelo recien entrenado se guarda SIN calibrador (bundle_io.py explica por
+# que). El servicio seguiria funcionando, con probabilidades sin calibrar, y nadie
+# lo notaria: por eso se avisa alto y con el comando exacto.
+UNCALIBRATED_WARNING = "\n".join(
+    [
+        "",
+        "=" * 78,
+        "AVISO: el modelo nuevo se ha guardado SIN calibrador.",
+        "Un calibrador lleva DENTRO el modelo con el que se calibro. El que hubiera",
+        "en el bundle era del modelo ANTERIOR: conservarlo habria dejado produccion",
+        "sirviendo ese modelo viejo, en silencio. Por eso no se conserva.",
+        "Desplegado asi, el servicio daria probabilidades SIN calibrar, y el test",
+        "del bundle commiteado (tests/test_calibrador_desparejado.py) esta en ROJO",
+        "hasta que recalibres.",
+        "",
+        "Recalibra ahora:  python -m src.prediction.calibrate",
+        "=" * 78,
+    ]
+)
+
 
 @dataclass(frozen=True)
 class FoldSplit:
@@ -337,9 +357,12 @@ def main() -> None:
 
     # ISO date so the UI can show "Modelo entrenado el <fecha>" (#29).
     trained_at = datetime.now(timezone.utc).date().isoformat()
-    # NO usar joblib.dump directo: este bundle tambien lleva el calibrador y el
-    # modelo de metodo (12 claves method_*), y un dump plano los borraria.
-    save_bundle_preserving(
+    # NO usar joblib.dump directo: este bundle tambien lleva el modelo de metodo
+    # (12 claves method_*), y un dump plano lo borraria. El calibrador del modelo
+    # de ganador, en cambio, NO sobrevive: se calibro sobre el modelo anterior y
+    # lo lleva dentro, asi que save_bundle_preserving lo quita (ver bundle_io.py)
+    # y el aviso del final pide recalibrar.
+    bundle = save_bundle_preserving(
         MODEL_PATH,
         {
             "model": model,
@@ -375,6 +398,9 @@ def main() -> None:
     print("Feature importance:")
     for feature_name, score in feature_importance:
         print(f"{feature_name}: {score:.6f}")
+    # Lo ultimo que se imprime, para que no se pierda entre las metricas.
+    if bundle.get("calibrator") is None:
+        print(UNCALIBRATED_WARNING)
 
 
 if __name__ == "__main__":

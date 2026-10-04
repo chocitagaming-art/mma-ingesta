@@ -13,6 +13,7 @@ from pathlib import Path
 
 from src.scrapers.config import get_settings
 
+from .dataset_guard import check_method_dataset
 from .db import load_base_dataframe, load_rankings_dataframe
 from .method_training import MethodDatasetBuildResult, build_method_training_dataset
 
@@ -47,6 +48,9 @@ def main() -> None:
     if result.dataset.empty:
         print_summary(result)
         raise RuntimeError("No eligible method training samples were generated.")
+    # Refuse BEFORE writing. The method target cannot reveal the corner leak, so
+    # the guard reads who won from fights_df (see dataset_guard.py).
+    check_method_dataset(result.dataset, fights_df)
     result.dataset.to_csv(METHOD_OUTPUT_CSV_PATH, index=False)
     print_summary(result)
 

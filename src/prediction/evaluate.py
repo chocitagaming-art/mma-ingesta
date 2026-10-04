@@ -19,6 +19,11 @@ On that test slice it also reports:
     mean predicted probability vs. observed positive fraction per bin.
   * Segment breakdowns (accuracy + Brier) by weight class / division,
     by scheduled rounds (3 vs 5) and by era (year ranges).
+  * A breakdown by UFC experience (debutante / novato / veterano, the phase-3
+    tiers) with n, accuracy, log loss, Brier, AUC and calibration (mean
+    predicted vs. observed rate, plus a simple ECE) for EVERY variant. Phase 4
+    brings debutant fights into the dataset and must leave the veterans no worse
+    while making the debutants better: this is the instrument that says so.
 
 Results are written idempotently into ``src/prediction/model_metrics.md`` under
 the ``## Diagnostico (evaluate.py)`` section (the section is replaced, never
@@ -26,10 +31,13 @@ duplicated, so re-running the script does not accumulate sections). A summary is
 also printed to stdout.
 
 Run with: ``python -m src.prediction.evaluate``
+Print only, leaving model_metrics.md untouched (e.g. to measure phase 4):
+``python -m src.prediction.evaluate --no-write``
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import re
 
@@ -37,9 +45,10 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.calibration import calibration_curve
-from sklearn.metrics import accuracy_score, brier_score_loss, log_loss
+from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, roc_auc_score
 
-from src.prediction.api import _swap_corners
+from src.prediction.api import MIN_CONFIDENT_FIGHTS, _swap_corners
+from src.prediction.bundle_io import discard_stale_calibrators
 from src.prediction.train import (
     METRICS_PATH,
     MODEL_PATH,
@@ -62,6 +71,29 @@ _VARIANT_LABELS = {
     "symmetrized_calibrated": "symmetrized + calibrated (PRODUCTION-EQUIVALENT)",
 }
 HEADLINE_VARIANT = "symmetrized_calibrated"
+
+# UFC experience tiers, decided by the LEAST experienced corner (the min of both
+# corners' prior UFC fights at the fight date). They are the phase-3 definitions
+# (docs/experiments/preufc-dwcs-2026-09-30): its target subset, the "novatos", is
+# min < MIN_CONFIDENT_FIGHTS (the api.py lowConfidence rule), and a debutant
+# corner has 0 prior UFC fights. Phase 4 is judged per tier: veterans must not get
+# worse, debutants must improve.
+TIER_DEBUTANT = "debutante (min 0)"
+TIER_ROOKIE = f"novato (min 1-{MIN_CONFIDENT_FIGHTS - 1})"
+TIER_VETERAN = f"veterano (min >= {MIN_CONFIDENT_FIGHTS})"
+TIER_UNKNOWN = "Unknown"
+# Debutants + rookies = the phase-3 target subset, reported as its own row so the
+# figures line up with the population that experiment measured.
+ROOKIES_PHASE3 = f"novatos fase 3 (min < {MIN_CONFIDENT_FIGHTS})"
+_EXPERIENCE_FIGHTS_COLUMNS = [
+    "fight_id",
+    "event_date",
+    "fighter_red_id",
+    "fighter_blue_id",
+    "winner_id",
+    "status",
+]
+_PRIOR_COUNT_COLUMNS = ["fight_id", "red_prior_fights", "blue_prior_fights"]
 
 
 def era_bucket(year: int) -> str:
@@ -89,6 +121,10 @@ def load_model_bundle() -> dict:
     for key in ("model", "imputer", "feature_columns"):
         if key not in bundle:
             raise RuntimeError(f"Model bundle is missing required key: {key!r}")
+    # Same load as production (api._load_model_bundle): a calibrator that does not
+    # wrap the model next to it is dropped, so the "calibrated" variants measure
+    # what is actually served and not the old model the calibrator carries inside.
+    discard_stale_calibrators(bundle)
     return bundle
 
 
@@ -119,6 +155,138 @@ def fetch_fight_metadata(fight_ids: list[int]) -> pd.DataFrame:
         print(f"[warn] Could not fetch fight metadata from DB ({error}); "
               "segment breakdowns will fall back to the CSV.")
         return pd.DataFrame(columns=["fight_id", "weight_class", "db_scheduled_rounds"])
+
+
+def fetch_fights_for_experience() -> pd.DataFrame:
+    """Fetch every UFC bout (date, corners, winner, status) to count experience.
+
+    Read-only, and it needs the WHOLE fights table, not only the test slice: a
+    test fight's experience is made of the bouts before it. Returns an empty frame
+    (every test row then falls back to the Unknown tier) when DATABASE_URL is
+    absent or the query fails. Used ONLY to label segments; never fed to the model.
+    """
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    if not database_url:
+        return pd.DataFrame(columns=_EXPERIENCE_FIGHTS_COLUMNS)
+    try:
+        from src.scrapers.db import connect, cursor
+
+        query = """
+            SELECT fights.id AS fight_id, events.event_date,
+                   fights.fighter_red_id, fights.fighter_blue_id,
+                   fights.winner_id, fights.status
+            FROM fights
+            INNER JOIN events ON events.id = fights.event_id
+            WHERE events.event_date IS NOT NULL
+        """
+        with connect(database_url) as connection:
+            with cursor(connection) as db_cursor:
+                db_cursor.execute(query)
+                rows = db_cursor.fetchall()
+        return pd.DataFrame(rows, columns=_EXPERIENCE_FIGHTS_COLUMNS)
+    except Exception as error:  # noqa: BLE001 - diagnostics must not hard-fail on DB issues
+        print(f"[warn] Could not fetch fights from DB ({error}); "
+              "the experience breakdown will be Unknown.")
+        return pd.DataFrame(columns=_EXPERIENCE_FIGHTS_COLUMNS)
+
+
+def count_prior_ufc_fights(fights: pd.DataFrame) -> pd.DataFrame:
+    """Prior UFC fights of each corner, one row per input bout (same order).
+
+    A bout adds experience when it was actually decided: it has a winner and it
+    is not cancelled. That is the population the phase-3 counter walked
+    (FIGHTS_SQL in its build_bench_dataset.py), so the tiers match its figures.
+    A draw or a no contest adds nothing, as there. (api.py's own count, from
+    fighter_history.py, also takes draws, no contests and cancelled rows, so
+    near the threshold a bout can be a rookie here and not lowConfidence there.)
+
+    Only bouts dated STRICTLY before the fight count: never the fight itself, nor
+    anything later (no look-ahead). Two bouts of one fighter on the SAME day (the
+    1995-1999 tournaments: 52 cases, per the phase-3 README) do not count each
+    other, because nothing says in which order they were fought: fight_id is an
+    insertion order, not the bout order. It is the same strict date cut as the
+    model's own history (fighter_history.py). The phase-3 walker went by
+    (event_date, fight_id) instead; the two rules only differ on those tournament
+    days, decades before any test slice.
+    """
+    if fights.empty:
+        return pd.DataFrame(columns=_PRIOR_COUNT_COLUMNS)
+    dates = pd.to_datetime(fights["event_date"]).to_numpy(dtype="datetime64[ns]")
+    counted = (
+        fights["winner_id"].notna().to_numpy()
+        & ~fights["status"].isin(["cancelled"]).to_numpy()
+        & ~np.isnat(dates)
+    )
+    appearances = pd.DataFrame(
+        {
+            "fighter_id": np.concatenate(
+                [
+                    fights["fighter_red_id"].to_numpy()[counted],
+                    fights["fighter_blue_id"].to_numpy()[counted],
+                ]
+            ),
+            "event_date": np.concatenate([dates[counted], dates[counted]]),
+        }
+    )
+    history = {
+        fighter_id: np.sort(group.to_numpy(dtype="datetime64[ns]"))
+        for fighter_id, group in appearances.groupby("fighter_id")["event_date"]
+    }
+
+    def prior_fights(fighter_id, fight_date: np.datetime64) -> int | None:
+        if np.isnat(fight_date):
+            return None
+        fighter_dates = history.get(fighter_id)
+        if fighter_dates is None:
+            return 0
+        # side="left" counts the dates strictly lower than fight_date: the fight
+        # itself and any other bout of that same day are not "before".
+        return int(np.searchsorted(fighter_dates, fight_date, side="left"))
+
+    return pd.DataFrame(
+        {
+            "fight_id": fights["fight_id"].to_numpy(),
+            "red_prior_fights": pd.array(
+                [prior_fights(f, d) for f, d in zip(fights["fighter_red_id"], dates)],
+                dtype="Int64",
+            ),
+            "blue_prior_fights": pd.array(
+                [prior_fights(f, d) for f, d in zip(fights["fighter_blue_id"], dates)],
+                dtype="Int64",
+            ),
+        }
+    )
+
+
+def experience_tier(red_prior_fights, blue_prior_fights) -> str:
+    """Tier of a bout by its LEAST experienced corner; Unknown without a count."""
+    if pd.isna(red_prior_fights) or pd.isna(blue_prior_fights):
+        return TIER_UNKNOWN
+    fewest = min(int(red_prior_fights), int(blue_prior_fights))
+    if fewest == 0:
+        return TIER_DEBUTANT
+    if fewest < MIN_CONFIDENT_FIGHTS:
+        return TIER_ROOKIE
+    return TIER_VETERAN
+
+
+def attach_experience(test_df: pd.DataFrame, fights: pd.DataFrame) -> pd.DataFrame:
+    """Add each corner's prior UFC fights and the experience tier to the test slice.
+
+    Looked up by fight_id with ``map`` (never a merge), so the rows keep their
+    order and stay aligned with the positional variant arrays. A test fight
+    missing from ``fights``, or no DB access at all, gets the Unknown tier.
+    """
+    test_df = test_df.copy()
+    counts = count_prior_ufc_fights(fights).drop_duplicates("fight_id")
+    counts = counts.set_index("fight_id")
+    for column in ("red_prior_fights", "blue_prior_fights"):
+        test_df[column] = test_df["fight_id"].map(counts[column]).astype("Int64")
+    test_df["experience_tier"] = [
+        experience_tier(red, blue)
+        for red, blue in zip(test_df["red_prior_fights"], test_df["blue_prior_fights"])
+    ]
+    return test_df
 
 
 def _estimator_probabilities(
@@ -211,6 +379,11 @@ def build_test_predictions() -> tuple[pd.DataFrame, dict[str, np.ndarray], str]:
         .round()
         .astype("Int64")
     )
+
+    # UFC experience of each corner at the fight date (phase-3 tiers). It counts
+    # every earlier bout, so it reads the whole fights table, not only the test
+    # slice; without DB access every row falls back to Unknown.
+    test_df = attach_experience(test_df, fetch_fights_for_experience())
     return test_df, variants, headline_key
 
 
@@ -251,7 +424,7 @@ def compute_calibration(test_df: pd.DataFrame) -> tuple[list[dict], np.ndarray, 
     )
 
     edges = np.linspace(0.0, 1.0, N_CALIBRATION_BINS + 1)
-    bin_ids = np.clip(np.digitize(prob, edges[1:-1]), 0, N_CALIBRATION_BINS - 1)
+    bin_ids = _calibration_bin_ids(prob)
     table: list[dict] = []
     for bin_index in range(N_CALIBRATION_BINS):
         mask = bin_ids == bin_index
@@ -265,6 +438,103 @@ def compute_calibration(test_df: pd.DataFrame) -> tuple[list[dict], np.ndarray, 
             }
         )
     return table, prob_true, prob_pred
+
+
+def _calibration_bin_ids(prob: np.ndarray) -> np.ndarray:
+    """Uniform bin (0..N_CALIBRATION_BINS-1) of each probability; 1.0 -> last bin."""
+    edges = np.linspace(0.0, 1.0, N_CALIBRATION_BINS + 1)
+    return np.clip(np.digitize(prob, edges[1:-1]), 0, N_CALIBRATION_BINS - 1)
+
+
+def expected_calibration_error(y_true: np.ndarray, prob: np.ndarray) -> float | None:
+    """Simple ECE: |mean predicted - observed rate| per uniform bin, weighted by
+    the bin's share of rows. Same bins as the calibration curve; None when empty."""
+    if len(y_true) == 0:
+        return None
+    bin_ids = _calibration_bin_ids(prob)
+    weighted_gap = 0.0
+    for bin_index in np.unique(bin_ids):
+        mask = bin_ids == bin_index
+        weighted_gap += mask.sum() * abs(prob[mask].mean() - y_true[mask].mean())
+    return float(weighted_gap / len(y_true))
+
+
+def segment_metrics(
+    y_true: np.ndarray, prob: np.ndarray
+) -> dict[str, float | int | None]:
+    """n, accuracy, log loss, Brier, AUC and calibration of one segment.
+
+    Calibration = mean predicted probability vs. observed positive rate, plus the
+    ECE. An empty segment gives n=0 and None everywhere else; a single-class
+    segment has no AUC (None), but the rest is still computed.
+    """
+    n = int(len(y_true))
+    if n == 0:
+        return {
+            "n": 0,
+            "accuracy": None,
+            "log_loss": None,
+            "brier": None,
+            "auc": None,
+            "mean_predicted": None,
+            "observed_rate": None,
+            "ece": None,
+        }
+    pred = (prob >= DECISION_THRESHOLD).astype(int)
+    both_classes = len(np.unique(y_true)) == 2
+    return {
+        "n": n,
+        "accuracy": float(accuracy_score(y_true, pred)),
+        "log_loss": float(log_loss(y_true, prob, labels=[0, 1])),
+        "brier": float(brier_score_loss(y_true, prob)),
+        "auc": float(roc_auc_score(y_true, prob)) if both_classes else None,
+        "mean_predicted": float(np.mean(prob)),
+        "observed_rate": float(np.mean(y_true)),
+        "ece": expected_calibration_error(y_true, prob),
+    }
+
+
+def experience_breakdown(
+    test_df: pd.DataFrame, variants: dict[str, np.ndarray]
+) -> list[dict]:
+    """``segment_metrics`` per experience tier x variant, tiers in a FIXED order.
+
+    Every tier is listed even when empty (today's dataset drops the bouts where a
+    corner has no UFC history, so the debutant tier stays empty or nearly so until
+    phase 4), plus the phase-3 rookies row (debutants + rookies). Unknown is
+    listed only when some row has no count. Rows are matched to the variant
+    arrays by POSITION, like the variant comparison, so ``test_df`` must keep the
+    order it was scored in.
+    """
+    tiers = test_df["experience_tier"].to_numpy()
+    y_true = test_df["target"].to_numpy()
+    masks = {
+        TIER_DEBUTANT: tiers == TIER_DEBUTANT,
+        TIER_ROOKIE: tiers == TIER_ROOKIE,
+        ROOKIES_PHASE3: (tiers == TIER_DEBUTANT) | (tiers == TIER_ROOKIE),
+        TIER_VETERAN: tiers == TIER_VETERAN,
+    }
+    unknown = tiers == TIER_UNKNOWN
+    if unknown.any():
+        masks[TIER_UNKNOWN] = unknown
+    rows: list[dict] = []
+    for tier, mask in masks.items():
+        for variant_key in _VARIANT_LABELS:
+            if variant_key not in variants:
+                continue
+            prob = variants[variant_key]
+            rows.append(
+                {
+                    "tier": tier,
+                    "variant": variant_key,
+                    **segment_metrics(y_true[mask], prob[mask]),
+                }
+            )
+    return rows
+
+
+def _format_metric(value: float | None, missing: str = "-") -> str:
+    return missing if value is None else f"{value:.4f}"
 
 
 def _variant_metrics(y_true: np.ndarray, prob: np.ndarray) -> dict[str, float]:
@@ -415,6 +685,45 @@ def build_section(
             f"{row['brier']:.4f} | {row['positive_rate']:.4f} |"
         )
 
+    experience_rows = experience_breakdown(test_df, variants)
+    lines.extend(
+        [
+            "",
+            "### Breakdown by UFC experience (phase-3 tiers)",
+            "",
+            "Prior UFC fights of each corner in `fights` (decided and not "
+            "cancelled, like the phase-3 counter), dated STRICTLY before the bout: "
+            "same-day bouts (1995-1999 tournaments) do not count each other. The "
+            "LEAST experienced corner decides the tier. `novatos fase 3` = "
+            "debutantes + novatos = the phase-3 target subset and the api.py "
+            "lowConfidence rule. Every variant is shown: phase 4 must leave the "
+            "veterans no worse and make the debutants better. ECE = |mean predicted "
+            "- observed rate| per uniform bin (10 bins), weighted by rows; a "
+            "single-class tier has no AUC (-).",
+            "",
+            "| Tier | Variant | N | Accuracy | Log loss | Brier | AUC "
+            "| Mean predicted | Observed rate | ECE |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in experience_rows:
+        marker = " **<-** " if row["variant"] == headline_key else ""
+        lines.append(
+            f"| {row['tier']} | {_VARIANT_LABELS[row['variant']]}{marker} | "
+            f"{row['n']} | {_format_metric(row['accuracy'])} | "
+            f"{_format_metric(row['log_loss'])} | {_format_metric(row['brier'])} | "
+            f"{_format_metric(row['auc'])} | {_format_metric(row['mean_predicted'])} | "
+            f"{_format_metric(row['observed_rate'])} | {_format_metric(row['ece'])} |"
+        )
+    if any(row["tier"] == TIER_UNKNOWN for row in experience_rows):
+        lines.extend(
+            [
+                "",
+                "Unknown = no prior-fight count: no DATABASE_URL, or the bout is "
+                "missing from `fights`.",
+            ]
+        )
+
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -477,14 +786,59 @@ def print_summary(
     for row in segment_breakdown(test_df, "era"):
         print(f"  {row['segment']:<12} acc={row['accuracy']:.4f} brier={row['brier']:.4f} n={row['n']}")
     print()
-    print(f"Wrote diagnostic section to {METRICS_PATH}")
+    print("UFC experience breakdown (least experienced corner, phase-3 tiers):")
+    experience_rows = experience_breakdown(test_df, variants)
+    if any(row["tier"] == TIER_UNKNOWN for row in experience_rows):
+        print("  (Unknown = no prior-fight count: no DATABASE_URL, or the bout is "
+              "missing from fights)")
+    current_tier = None
+    for row in experience_rows:
+        if row["tier"] != current_tier:
+            current_tier = row["tier"]
+            print(f"  {row['tier']:<26} n={row['n']}")
+        if row["n"] == 0:
+            continue
+        marker = "  <- headline" if row["variant"] == headline_key else ""
+        print(
+            f"    {_VARIANT_LABELS[row['variant']]:<48} "
+            f"acc={_format_metric(row['accuracy'], 'n/a')} "
+            f"logloss={_format_metric(row['log_loss'], 'n/a')} "
+            f"brier={_format_metric(row['brier'], 'n/a')} "
+            f"auc={_format_metric(row['auc'], 'n/a')} "
+            f"pred={_format_metric(row['mean_predicted'], 'n/a')} "
+            f"obs={_format_metric(row['observed_rate'], 'n/a')} "
+            f"ece={_format_metric(row['ece'], 'n/a')}{marker}"
+        )
 
 
-def main() -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Evaluacion diagnostica del modelo persistido (sin reentrenar)."
+    )
+    parser.add_argument(
+        "--no-write",
+        action="store_true",
+        help=(
+            "Solo imprime el resumen: NO escribe la seccion en "
+            "src/prediction/model_metrics.md. Para medir (por ejemplo la fase 4) "
+            "sin pisar la ficha local del modelo."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
     test_df, variants, headline_key = build_test_predictions()
-    section = build_section(test_df, variants, headline_key)
-    write_section_idempotent(section)
+    if not args.no_write:
+        section = build_section(test_df, variants, headline_key)
+        write_section_idempotent(section)
     print_summary(test_df, variants, headline_key)
+    print()
+    if args.no_write:
+        print(f"--no-write: {METRICS_PATH} was NOT written.")
+    else:
+        print(f"Wrote diagnostic section to {METRICS_PATH}")
 
 
 if __name__ == "__main__":
