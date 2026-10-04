@@ -19,9 +19,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.prediction.bundle_io import discard_stale_calibrators
+from src.prediction.corners import CORNER_PAIRS, PAIR_BASE_BY_COLUMN, swap_corners
 from src.prediction.features import (
     DEFAULT_SCHEDULED_ROUNDS,
-    FEATURE_COLUMNS,
     FighterHistorySummary,
     _coerce_scheduled_rounds,
     build_feature_row,
@@ -418,10 +418,49 @@ def _raw_contributions(model: Any, transformed_row: np.ndarray) -> np.ndarray | 
     # model is trained on a numpy array (feature_names is None), so forcing names
     # here would raise a feature-name mismatch; a DataFrame-trained booster carries
     # names and must get them. Either way pred_contribs returns contributions in
-    # column order (= FEATURE_COLUMNS order), so we map back by index below.
+    # column order (= the bundle's feature_columns), so we map back by index below.
     dmatrix = xgb.DMatrix(transformed_row, feature_names=booster.feature_names)
     # Shape (1, n_features + 1); the trailing column is the bias term, dropped here.
     return booster.predict(dmatrix, pred_contribs=True)[0][:-1]
+
+
+def _attribution_factors(feature_columns: list[str]) -> list[tuple[str, list[int]]]:
+    """The factors shown to the user, as (name, indices into feature_columns).
+
+    A ``*_diff`` (or any other single column) is its own factor, named after the
+    column. A per-corner pair ``{base}_red`` / ``{base}_blue`` is ONE factor named
+    after its base, at the position of its first column: split in two, each half
+    compares both fighters in the same slot, the concept shows up twice and each
+    half ranks lower than the whole. Half a pair (never produced by training,
+    which keeps or drops pairs whole) stays a factor of its own."""
+    index_of = {column: index for index, column in enumerate(feature_columns)}
+    factors: list[tuple[str, list[int]]] = []
+    for index, column in enumerate(feature_columns):
+        base = PAIR_BASE_BY_COLUMN.get(column)
+        if base is None:
+            factors.append((column, [index]))
+            continue
+        red, blue = CORNER_PAIRS[base]
+        if red not in index_of or blue not in index_of:
+            factors.append((column, [index]))
+        elif index == min(index_of[red], index_of[blue]):
+            factors.append((base, [index_of[red], index_of[blue]]))
+    return factors
+
+
+def _raw_pair_difference(
+    raw_row: dict[str, Any] | None, red_column: str, blue_column: str
+) -> float | None:
+    """Raw red-minus-blue value of a pair, from the row BEFORE imputation; None
+    when either side is unknown. The imputed median of someone without a record
+    is a made-up number and must never be reported as the difference."""
+    if raw_row is None:
+        return None
+    red, blue = raw_row.get(red_column), raw_row.get(blue_column)
+    if red is None or blue is None or pd.isna(red) or pd.isna(blue):
+        return None
+    value = float(red) - float(blue)
+    return value if np.isfinite(value) else None
 
 
 def _compute_top_features(
@@ -429,6 +468,7 @@ def _compute_top_features(
     feature_columns: list[str],
     transformed_row: np.ndarray,
     swapped_transformed_row: np.ndarray,
+    raw_row: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, float] | None]:
     """SYMMETRIZED per-prediction feature attributions from the XGBoost booster.
 
@@ -442,9 +482,18 @@ def _compute_top_features(
     symmetrized contributions sum EXACTLY to the symmetrized margin: the UI can
     close the balance with a "rest of factors" bar.
 
-    Returns the ranked top five (signed contribution, direction, and the
-    (imputed) forward value the model actually saw) plus the FULL name ->
-    contribution map (None when the estimator has no booster).
+    Per-corner pairs are merged into one factor per base (see
+    ``_attribution_factors``): its contribution is the symmetrized contribution
+    of the red column plus that of the blue one, which stays antisymmetric under
+    a corner swap and only regroups terms, so the balance still closes. Its value
+    is the raw red-minus-blue difference from ``raw_row`` (the row before
+    imputation), or None when a side is unknown or no raw row is given. The full
+    map uses the same factor names as the ranking, so a pair is never counted
+    twice by the UI.
+
+    Returns the ranked top five (signed contribution, direction, and for a
+    ``*_diff`` the (imputed) forward value the model actually saw) plus the FULL
+    name -> contribution map (None when the estimator has no booster).
 
     No non-finite number leaves this function. A value the booster saw as NaN
     (XGBoost routes a missing value natively) or as infinite has no JSON form:
@@ -466,17 +515,27 @@ def _compute_top_features(
     contributions_map: dict[str, float] = {}
     ranked: list[dict[str, Any]] = []
     dropped: list[str] = []
-    for index, feature_name in enumerate(feature_columns):
-        contribution = float(symmetrized[index])
+    for feature_name, indices in _attribution_factors(feature_columns):
+        if len(indices) == 1:
+            index = indices[0]
+            contribution = float(symmetrized[index])
+            value: float | None = float(transformed_row[0][index])
+        else:
+            red_index, blue_index = indices
+            contribution = float(symmetrized[red_index]) + float(
+                symmetrized[blue_index]
+            )
+            value = _raw_pair_difference(
+                raw_row, feature_columns[red_index], feature_columns[blue_index]
+            )
         if not np.isfinite(contribution):
             dropped.append(feature_name)
             continue
         contributions_map[feature_name] = contribution
-        value = float(transformed_row[0][index])
         ranked.append(
             {
                 "name": feature_name,
-                "value": value if np.isfinite(value) else None,
+                "value": value if value is not None and np.isfinite(value) else None,
                 "contribution": contribution,
                 "direction": "red" if contribution >= 0 else "blue",
             }
@@ -489,23 +548,11 @@ def _compute_top_features(
     return ranked[:5], contributions_map
 
 
-def _swap_corners(feature_row: dict[str, float | int | None]) -> dict[str, float | int | None]:
-    """Mirror a feature row to the opposite corner assignment.
-
-    Every model feature is a red-minus-blue diff, so swapping the two corners
-    negates each diff (``diff(a, b) == -diff(b, a)``). A missing diff stays None
-    so the imputer fills the same training median in both orientations. The None
-    pattern is identical across corners (a diff is missing iff either fighter's
-    value is missing), so this reproduces the genuine swapped row exactly. The
-    non-``_diff`` passthrough branch is kept defensively for any future
-    corner-independent column."""
-    swapped: dict[str, float | int | None] = {}
-    for column, value in feature_row.items():
-        if column.endswith("_diff") and value is not None:
-            swapped[column] = -value
-        else:
-            swapped[column] = value
-    return swapped
+# The strict, shared corner swap lives in corners.py (diffs negate, per-corner
+# pairs exchange, the method model's symmetric columns pass, anything else
+# raises). Kept under its old name: evaluate.py and train_method.py import it
+# from here, so they symmetrize exactly like serving without touching an import.
+_swap_corners = swap_corners
 
 
 def _red_win_probability(
@@ -514,8 +561,14 @@ def _red_win_probability(
     model: Any,
     feature_columns: list[str],
 ) -> tuple[float, np.ndarray]:
-    """Return P(red wins) for a raw feature row plus the transformed matrix."""
-    feature_frame = pd.DataFrame([{column: feature_row.get(column) for column in FEATURE_COLUMNS}])
+    """Return P(red wins) for a raw feature row plus the transformed matrix.
+
+    The frame is built from the BUNDLE's feature_columns, not from the constant
+    FEATURE_COLUMNS: a bundle with columns beyond the 27-jun schema (the phase-4
+    pairs) would otherwise be a KeyError, a 500 for every prediction. A column the
+    row does not carry yet comes in as None, for the bundle's imputer (or the
+    booster's native NaN routing) to handle."""
+    feature_frame = pd.DataFrame([{column: feature_row.get(column) for column in feature_columns}])
     transformed = imputer.transform(feature_frame[feature_columns])
     probabilities = model.predict_proba(transformed)[0]
     return float(probabilities[1]), transformed
@@ -528,7 +581,7 @@ def _predict_method(
 
     The method classes do not change when the corners are swapped, so the exact
     symmetrization is the plain per-class average of the forward and swapped
-    predictions (the ``*_diff`` features negate under ``_swap_corners`` and every
+    predictions (the ``*_diff`` features negate under ``swap_corners`` and every
     added method feature is swap-invariant): probabilities(A, B) ==
     probabilities(B, A). Probabilities come from the calibrated estimator when
     the bundle carries one, like the winner path. Returning None (instead of
@@ -572,7 +625,7 @@ def _predict_method(
         )
 
     forward = class_probabilities(method_feature_row)
-    swapped = class_probabilities(_swap_corners(method_feature_row))
+    swapped = class_probabilities(swap_corners(method_feature_row))
     symmetrized = (forward + swapped) / 2.0
     # predict_proba columns follow estimator.classes_ (the integer targets);
     # map each back to its class name instead of assuming they are sorted.
@@ -651,18 +704,21 @@ def predict(
     # Corner symmetry (#26): the model was trained on raw red-blue diffs, so the
     # bare P(red wins) is not invariant to which fighter is labelled "red". We
     # average the forward estimate with the mirror estimate (the swapped row,
-    # where every diff is negated). With red_sym = (p_forward + (1 - p_swapped)) /
+    # where every diff is negated and every per-corner pair exchanged, see
+    # corners.py). With red_sym = (p_forward + (1 - p_swapped)) /
     # 2 the prediction satisfies redProbability(A, B) == blueProbability(B, A)
     # exactly, so predict(A, B) and predict(B, A) sum to 1. Both terms pass
     # through the same estimator, so calibration keeps this identity.
     forward_red_prob, transformed = _red_win_probability(feature_row, imputer, proba_estimator, feature_columns)
     swapped_red_prob, swapped_transformed = _red_win_probability(
-        _swap_corners(feature_row), imputer, proba_estimator, feature_columns
+        swap_corners(feature_row), imputer, proba_estimator, feature_columns
     )
     red_probability = (forward_red_prob + (1.0 - swapped_red_prob)) / 2.0
     blue_probability = 1.0 - red_probability
+    # Pairs are reported as ONE factor whose value is the raw red-minus-blue
+    # difference, read from the row before imputation.
     top_features, feature_contributions = _compute_top_features(
-        model, feature_columns, transformed, swapped_transformed
+        model, feature_columns, transformed, swapped_transformed, raw_row=feature_row
     )
     method_prediction = _predict_method(bundle, method_feature_row)
     profiles = _load_fighter_profiles(settings.database_url, [red_fighter_id, blue_fighter_id])
