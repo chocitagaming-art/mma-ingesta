@@ -388,7 +388,9 @@ def test_train_quita_el_calibrador_viejo_y_lo_avisa_lo_ultimo(
     shutil.copyfile(MODELO_COMMITEADO, ruta)
     monkeypatch.setattr(train, "MODEL_PATH", ruta)
     monkeypatch.setattr(train, "METRICS_PATH", tmp_path / "model_metrics.md")
-    monkeypatch.setattr(train, "load_dataset", _dataset_sintetico)
+    monkeypatch.setattr(
+        train, "load_dataset", lambda *_path_and_columns: _dataset_sintetico()
+    )
     # La rejilla entera son 108 combinaciones x 3 pliegues: aqui no aporta.
     monkeypatch.setattr(
         train,
@@ -396,7 +398,7 @@ def test_train_quita_el_calibrador_viejo_y_lo_avisa_lo_ultimo(
         lambda *_args, **_kwargs: {"n_estimators": 20, "max_depth": 2},
     )
 
-    train.main()
+    train.main([])  # no options: the usual paths (patched above)
 
     guardado = joblib.load(ruta)
     assert "calibrator" not in guardado

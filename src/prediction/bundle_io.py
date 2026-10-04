@@ -64,6 +64,27 @@ CALIBRATED_MODELS: tuple[CalibratedModel, ...] = (
 # calibradores que descarto al cargarlo, para que /health lo pueda contar.
 DISCARDED_CALIBRATORS_KEY = "discarded_calibrators"
 
+# How the winner model was trained. train.py writes these four keys since phase 4
+# (--feature-set, --nan-policy, the XGBoost hyperparameters it really used and the
+# final-fit seed). A bundle written before (the 27-jun one) has none of them: it was
+# trained on the 20 legacy diffs with the median imputer, and that is what a missing
+# key means. Its hyperparameters and seed were never recorded (None).
+PRE_PHASE4_TRAINING_CONFIG: dict[str, Any] = {
+    "feature_set": "legacy",
+    "nan_policy": "median",
+    "xgb_params": None,
+    "train_seed": None,
+}
+
+
+def winner_training_config(bundle: Mapping[str, Any]) -> dict[str, Any]:
+    """feature_set, nan_policy, xgb_params and train_seed of the winner model,
+    with the pre-phase-4 meaning for every key the bundle does not carry."""
+    return {
+        key: bundle.get(key, default)
+        for key, default in PRE_PHASE4_TRAINING_CONFIG.items()
+    }
+
 
 def _models_it_predicts_with(calibrator: Any) -> list[Any]:
     """Los modelos a los que el calibrador llama DE VERDAD al predecir.
