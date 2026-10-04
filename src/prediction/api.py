@@ -7,7 +7,7 @@ import sys
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, NamedTuple
 
 import joblib
 import numpy as np
@@ -199,41 +199,102 @@ def _load_fighter_physical(database_url: str, fighter_ids: list[int]) -> dict[in
     return physical
 
 
+AnchorKind = Literal["fight", "pending", "today", "none"]
+
+
+class MatchupContext(NamedTuple):
+    """The fight context a prediction is anchored to.
+
+    ``anchor`` says which rule picked it and travels to the web as
+    ``context.anchor``: "fight" (the bout the caller asked for by id),
+    "pending" (the pair's scheduled bout), "today" (no bout to anchor to) or
+    "none" (neither fighter has any fight on record). ``anchor_fight_id`` is
+    the bout it anchored to (``context.anchorFightId``), None for "today" and
+    "none"."""
+
+    matchup_date: date
+    weight_class: str | None
+    scheduled_rounds: int
+    is_title_fight: bool | None
+    anchor: AnchorKind
+    anchor_fight_id: int | None
+
+
+def _anchored_to_bout(row: pd.Series, anchor: AnchorKind) -> MatchupContext:
+    """Context of a real bout on record: its own date, division, rounds and title."""
+    return MatchupContext(
+        row["event_date"],
+        row["weight_class"],
+        _coerce_scheduled_rounds(row["scheduled_rounds"]),
+        row.get("is_title_fight"),
+        anchor,
+        int(row["fight_id"]),
+    )
+
+
 def _get_latest_matchup_context(
-    fights_df: pd.DataFrame, red_id: int, blue_id: int
-) -> tuple[date, str | None, int, bool | None]:
-    """Resolve the real fight context for the matchup being predicted.
+    fights_df: pd.DataFrame,
+    red_id: int,
+    blue_id: int,
+    fight_id: int | None = None,
+) -> MatchupContext:
+    """Resolve the fight context for the matchup being predicted.
 
-    Returns ``(matchup_date, weight_class, scheduled_rounds, is_title_fight)``.
+    Returns a ``MatchupContext``: ``(matchup_date, weight_class,
+    scheduled_rounds, is_title_fight, anchor, anchor_fight_id)``.
 
-    When the two fighters have an actual bout on record (the fight being
-    predicted), the temporal features are anchored to that bout's real
-    ``event_date`` and its real ``scheduled_rounds`` are used instead of a
-    hardcoded 3. A not-yet-fought bout (``winner_id`` AND ``method`` NULL) is preferred over
-    a past meeting, so an upcoming rematch anchors to the upcoming date rather
-    than to the previous fight. For a pure hypothetical (no bout on record
-    between the two) there is no real fight date or round count, so we anchor the
-    temporal features to today ("if they fought now") and use a default round
-    count, while still borrowing a weight class from each fighter's most recent
-    bout so the ranking lookup can match the right division."""
+    ``fight_id`` (owner decision, 4-oct-2026): the fight page asks for the
+    prediction OF ITS OWN FIGHT. When that bout is in ``fights_df`` and is
+    between exactly these two fighters (either corner order), the prediction is
+    anchored to it, even if it is already decided: the strict history cut keeps
+    its own result (and everything after it) out of both histories. Without
+    this, a decided bout with nothing pending is predicted "today" with its own
+    result in the history (UFC 332, after the results: the model favourite
+    flipped to the real winner in 6 of 12 bouts). Any other ``fight_id``
+    (unknown, cancelled -> the loader dropped it, a bout of other fighters) is
+    ignored and the pair rule below applies: a cancelled bout has no result, so
+    falling back cannot leak one.
+
+    Only a PENDING bout between the two fighters (``winner_id`` AND ``method``
+    NULL: the scheduled matchup) is a real fight to anchor to. The temporal
+    features are then anchored to its real ``event_date`` and its real weight
+    class, ``scheduled_rounds`` and title status are used; with several pending,
+    the latest one. A draw or a no contest has no winner either, but its method
+    is set (M-DEC, S-DEC, CNC, Overturned...), so it is a past meeting.
+
+    Every other pair is predicted "as if they fought today" (owner decision nº 11,
+    4-oct-2026): a pure hypothetical, a pair whose only bout was cancelled (the
+    loader drops those) AND a pair that already met but has nothing pending. A
+    past meeting is part of both fighters' history, not the anchor: anchoring to
+    it showed a 2017 date for Moicano-Ortega and computed every feature as it was
+    back then. There is no real bout to borrow from, so the round count is the
+    default, the title status is unknown (None, the imputer fills the training
+    median) and the weight class comes from the most recent bout of either
+    fighter, so the ranking lookup can match the division they fight at now.
+
+    The history cut is strict (``event_date < matchup_date``) and ``date.today()``
+    is the server's (UTC on Render): a meeting dated today is not in the history
+    until tomorrow."""
+    if fight_id is not None:
+        requested = fights_df[fights_df["fight_id"] == fight_id]
+        requested = requested[
+            ((requested["fighter_red_id"] == red_id) & (requested["fighter_blue_id"] == blue_id))
+            | ((requested["fighter_red_id"] == blue_id) & (requested["fighter_blue_id"] == red_id))
+        ]
+        if not requested.empty:
+            return _anchored_to_bout(requested.iloc[0], "fight")
+
     shared = fights_df[
         ((fights_df["fighter_red_id"] == red_id) | (fights_df["fighter_blue_id"] == red_id))
         & ((fights_df["fighter_red_id"] == blue_id) | (fights_df["fighter_blue_id"] == blue_id))
     ]
+    # `method` is only read when the pair has met: the degraded frames of a
+    # no-history prediction need not carry the column.
     if not shared.empty:
-        # Prefer the still-unfought bout (the scheduled matchup); otherwise the
-        # most recent meeting on record. Unfought = no winner AND no method: a
-        # draw or a no contest has no winner either, but its method is set
-        # (M-DEC, S-DEC, CNC, Overturned...), and it must not become the anchor.
-        upcoming = shared[shared["winner_id"].isna() & shared["method"].isna()]
-        candidates = upcoming if not upcoming.empty else shared
-        row = candidates.sort_values(["event_date", "fight_id"], ascending=[False, False]).iloc[0]
-        return (
-            row["event_date"],
-            row["weight_class"],
-            _coerce_scheduled_rounds(row["scheduled_rounds"]),
-            row.get("is_title_fight"),
-        )
+        pending = shared[shared["winner_id"].isna() & shared["method"].isna()]
+        if not pending.empty:
+            row = pending.sort_values(["event_date", "fight_id"], ascending=[False, False]).iloc[0]
+            return _anchored_to_bout(row, "pending")
 
     latest = fights_df[
         (fights_df["fighter_red_id"].isin([red_id, blue_id]))
@@ -241,15 +302,12 @@ def _get_latest_matchup_context(
     ].sort_values(["event_date", "fight_id"], ascending=[False, False])
     if latest.empty:
         # Degraded path: neither fighter has any recorded fight (e.g. two
-        # debutants). Fall back to today's date so physical features can still be
+        # debutants). Today's date still lets the physical features be
         # computed; the caller flags the prediction as low confidence.
-        return date.today(), None, DEFAULT_SCHEDULED_ROUNDS, None
-    # Hypothetical matchup with no bout on record: anchor temporal features to
-    # today rather than to either fighter's last past fight, keep a weight class
-    # for the ranking lookup, and use the default scheduled round count. There is
-    # no bout on record, so title status is unknown (None) rather than False —
-    # the imputer fills the training median.
-    return date.today(), latest.iloc[0]["weight_class"], DEFAULT_SCHEDULED_ROUNDS, None
+        return MatchupContext(date.today(), None, DEFAULT_SCHEDULED_ROUNDS, None, "none", None)
+    return MatchupContext(
+        date.today(), latest.iloc[0]["weight_class"], DEFAULT_SCHEDULED_ROUNDS, None, "today", None
+    )
 
 
 def _is_low_confidence(
@@ -277,10 +335,10 @@ def _build_feature_row(
     blue_id: int,
     physical: dict[int, dict[str, Any]],
     history_df: pd.DataFrame | None = None,
+    fight_id: int | None = None,
 ) -> tuple[dict[str, float | int | None], dict[str, float | int | None], dict[str, Any], bool]:
-    matchup_date, weight_class, scheduled_rounds, is_title_fight = _get_latest_matchup_context(
-        fights_df, red_id, blue_id
-    )
+    matchup = _get_latest_matchup_context(fights_df, red_id, blue_id, fight_id=fight_id)
+    matchup_date, weight_class, scheduled_rounds, is_title_fight = matchup[:4]
     from src.prediction.features import build_fighter_history_dataframe
 
     # The long-lived service builds this once per data refresh and threads it in;
@@ -336,6 +394,8 @@ def _build_feature_row(
     )
 
     context = {
+        "anchor": matchup.anchor,
+        "anchorFightId": matchup.anchor_fight_id,
         "matchupDate": matchup_date.isoformat(),
         "weightClass": weight_class,
         "scheduledRounds": scheduled_rounds,
@@ -550,7 +610,14 @@ def predict(
     fights_df: pd.DataFrame | None = None,
     rankings_df: pd.DataFrame | None = None,
     history_df: pd.DataFrame | None = None,
+    fight_id: int | None = None,
 ) -> dict[str, Any]:
+    """Win (and method) prediction for red vs blue.
+
+    ``fight_id`` names the bout being predicted (the fight page sends its own):
+    when it is these two fighters' bout, the prediction is anchored to it even
+    if it is already decided; otherwise it is ignored and the pair rule applies
+    (see ``_get_latest_matchup_context``)."""
     settings = get_settings()
     if bundle is None:
         bundle = _load_model_bundle()
@@ -560,7 +627,13 @@ def predict(
         rankings_df = load_rankings_dataframe(settings.database_url)
     physical = _load_fighter_physical(settings.database_url, [red_fighter_id, blue_fighter_id])
     feature_row, method_feature_row, context, low_confidence = _build_feature_row(
-        fights_df, rankings_df, red_fighter_id, blue_fighter_id, physical, history_df=history_df
+        fights_df,
+        rankings_df,
+        red_fighter_id,
+        blue_fighter_id,
+        physical,
+        history_df=history_df,
+        fight_id=fight_id,
     )
     feature_columns = bundle["feature_columns"]
     imputer = bundle["imputer"]
@@ -616,9 +689,15 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--red", type=int, required=True)
     parser.add_argument("--blue", type=int, required=True)
+    parser.add_argument(
+        "--fight-id",
+        type=int,
+        default=None,
+        help="Anchor to this bout of the two fighters, even if already decided.",
+    )
     args = parser.parse_args()
 
-    result = predict(args.red, args.blue)
+    result = predict(args.red, args.blue, fight_id=args.fight_id)
     print(json.dumps(result, default=str))
 
 

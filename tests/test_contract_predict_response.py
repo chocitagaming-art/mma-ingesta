@@ -82,11 +82,43 @@ def _service_added_keys() -> set[str]:
     return keys
 
 
+def _context_keys() -> set[str]:
+    """Literal keys of the ``context`` dict ``api._build_feature_row`` builds,
+    read from the AST for the same reason as ``_predict_response_keys``."""
+    tree = ast.parse(API_PATH.read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_build_feature_row"
+    )
+    for node in ast.walk(function):
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Dict)
+            and any(isinstance(target, ast.Name) and target.id == "context" for target in node.targets)
+        ):
+            return {
+                key.value
+                for key in node.value.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            }
+    raise AssertionError("api._build_feature_row no longer builds a context dict literal")
+
+
 def test_contract_matches_what_the_service_returns(contract):
     """Every key that reaches the wire is in the contract, and vice versa."""
     emitted = _predict_response_keys() | _service_added_keys()
     assert emitted == set(contract), (
         "the service and tests/contracts/predict_response.json disagree. If the "
+        "change is intended, update the fixture AND its copy in mma-app."
+    )
+
+
+def test_contract_context_matches_what_the_service_returns(contract):
+    """Same check one level down: the ``context`` block (where ``anchor`` and
+    ``anchorFightId`` live) is part of the contract too."""
+    assert _context_keys() == set(contract["context"]), (
+        "api._build_feature_row's context and the fixture's disagree. If the "
         "change is intended, update the fixture AND its copy in mma-app."
     )
 
@@ -111,6 +143,15 @@ def test_contract_carries_the_fields_the_web_reads(contract):
     for corner in ("red", "blue"):
         assert {"id", "name"} <= set(contract["fighters"][corner])
     assert {"matchupDate", "weightClass"} <= set(contract["context"])
+
+    # Where the prediction is anchored: the bout the fight page asked for
+    # ("fight"), the pair's pending bout ("pending"), today ("today") or nothing
+    # at all ("none"). Only the first two name a bout.
+    anchor = contract["context"]["anchor"]
+    anchor_fight_id = contract["context"]["anchorFightId"]
+    assert anchor in {"fight", "pending", "today", "none"}
+    assert anchor_fight_id is None or isinstance(anchor_fight_id, int)
+    assert (anchor_fight_id is not None) == (anchor in {"fight", "pending"})
 
 
 @pytest.mark.skipif(not APP_CONTRACT_PATH.exists(), reason="mma-app no está junto a este repo")
