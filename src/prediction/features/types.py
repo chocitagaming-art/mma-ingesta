@@ -97,3 +97,64 @@ FEATURE_COLUMNS = [
     "takedown_defense_diff",
     "avg_opponent_prior_win_rate_diff",
 ]
+
+
+# --- Phase 4 (Contender Series): winner-only columns ------------------------------
+# FEATURE_COLUMNS above stays exactly as it is: it is the schema of the 27-jun bundle
+# and the base of the METHOD model (METHOD_FEATURE_COLUMNS inherits it). Everything
+# below is used ONLY by the winner model, so the method model's LogisticRegression
+# never sees these columns or their NaN.
+#
+# Per-corner pairs: a corner swap EXCHANGES {base}_red and {base}_blue, it does not
+# negate them. Written as red-minus-blue diffs the pre-UFC block lost its signal
+# (29-sep, docs/experiments/preufc-encoding-2026-09-29/), so it goes per corner.
+CORNER_SIDES = ("red", "blue")
+
+# Prior UFC fights of each corner, counted from `fights` with the strict date cut.
+# Never NaN: a debutant is an explicit 0. With the gates open the history diffs of a
+# debutant are NaN, and a NaN does not say which corner is the new one; the bench of
+# the 30-sep experiment carried this count explicitly (build_bench_dataset.py:84).
+UFC_COUNT_BASES = ["ufc_prev_fights"]
+
+# The nine pre-UFC variables of fight_history_espn, in the order of
+# docs/experiments/preufc-dwcs-2026-09-30/build_espn_block.py (ESPN_COLUMNS).
+PREUFC_BASES = [
+    "espn_has_history",
+    "espn_prev_fights",
+    "espn_win_rate",
+    "espn_ko_rate",
+    "espn_sub_rate",
+    "espn_streak",
+    "espn_days_since_last",
+    "espn_years_pro",
+    "espn_title_fights",
+]
+
+CORNER_PAIR_BASES = UFC_COUNT_BASES + PREUFC_BASES
+
+
+def pair_columns(bases: list[str]) -> list[str]:
+    """[f"{base}_red", f"{base}_blue", ...] for each base, in order."""
+    return [f"{base}_{side}" for base in bases for side in CORNER_SIDES]
+
+
+UFC_COUNT_COLUMNS = pair_columns(UFC_COUNT_BASES)
+PREUFC_COLUMNS = pair_columns(PREUFC_BASES)
+# Arm C of the phase-4 measurement only (informative): the same block written as
+# red-minus-blue diffs. They end in _diff, so a corner swap negates them.
+PREUFC_DIFF_COLUMNS = [f"{base}_diff" for base in PREUFC_BASES]
+
+# Every column the winner training CSV may carry, in order.
+WINNER_FEATURE_COLUMNS = (
+    FEATURE_COLUMNS + UFC_COUNT_COLUMNS + PREUFC_COLUMNS + PREUFC_DIFF_COLUMNS
+)
+
+# Named column sets for train/calibrate/evaluate (--feature-set). "legacy" is the
+# 27-jun bundle and the default, so nothing changes unless a set is asked for.
+FEATURE_SETS: dict[str, list[str]] = {
+    "legacy": list(FEATURE_COLUMNS),
+    "base": FEATURE_COLUMNS + UFC_COUNT_COLUMNS,
+    "preufc": FEATURE_COLUMNS + UFC_COUNT_COLUMNS + PREUFC_COLUMNS,
+    "preufc_diff": FEATURE_COLUMNS + UFC_COUNT_COLUMNS + PREUFC_DIFF_COLUMNS,
+}
+DEFAULT_FEATURE_SET = "legacy"
