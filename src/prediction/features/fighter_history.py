@@ -158,6 +158,25 @@ def compute_fighter_history(
     )
 
 
+def count_prior_ufc_fights(
+    history_df: pd.DataFrame, fighter_id: int, cutoff: date
+) -> int:
+    """Prior UFC fights of ``fighter_id`` with event_date strictly before ``cutoff``.
+
+    Same population as compute_fighter_history's prior_history (the cancelled
+    bouts never reach history_df: load_base_dataframe drops them), so it equals
+    total_prior_fights whenever the summary exists. Unlike the summary it is never
+    None: a debutant is an explicit 0. Once the winner CSV keeps debutants, their
+    history diffs are NaN and a NaN does not say which corner is the new one; this
+    count does (phase 4, UFC_COUNT_COLUMNS)."""
+    if history_df.empty:
+        return 0
+    # Filter by fighter first: the date comparison runs on object-dtype dates, so
+    # doing it on the whole frame would cost a Python call per history row.
+    fighter_dates = history_df.loc[history_df["fighter_id"] == fighter_id, "event_date"]
+    return int((fighter_dates < cutoff).sum())
+
+
 def lookup_ranking_position(
     fighter_id: int,
     current_event_date: date,

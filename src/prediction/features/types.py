@@ -63,8 +63,17 @@ class DatasetBuildResult:
     spot_checks: list[dict[str, Any]]
     total_fights_seen: int
     excluded_no_target: int
+    # Phase 4 opened both gates of the winner CSV, so build_training_dataset no
+    # longer excludes for these two reasons and always reports 0. Kept so the log
+    # line and the callers that build a result by hand keep their shape.
     excluded_missing_history: int
     excluded_missing_stats: int
+    # The rows each old gate used to exclude, now kept with their history diffs
+    # NaN: a corner without a UFC summary (a debutant, or prior fights without
+    # fight_stats), or both summaries present with an accuracy None (zero
+    # attempts). Mutually exclusive, like the two exclusions they replace.
+    included_no_ufc_history: int = 0
+    included_nan_stats: int = 0
 
 
 # Every feature is a red-minus-blue diff. Five zero-importance features were

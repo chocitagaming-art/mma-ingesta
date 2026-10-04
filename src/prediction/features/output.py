@@ -65,6 +65,14 @@ def print_summary(result: DatasetBuildResult) -> None:
             "missing_stats": result.excluded_missing_stats,
         },
     )
+    # Phase 4: the rows the two old gates excluded now enter with NaN history diffs.
+    print(
+        "Included with NaN:",
+        {
+            "no_ufc_history": result.included_no_ufc_history,
+            "nan_stats": result.included_nan_stats,
+        },
+    )
     print("Spot checks:")
     for spot_check in result.spot_checks:
         print(spot_check)
