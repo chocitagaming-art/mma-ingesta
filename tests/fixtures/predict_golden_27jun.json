@@ -1,0 +1,2607 @@
+{
+ "bundle_sha256": "6ccb0e5ef99efd5b9389e4aaa45ef3da8f2a1bd6531cec706ac04166a2dd5b4c",
+ "bundle_trained_at": "2026-06-27",
+ "tolerance": 1e-12,
+ "cases": [
+  {
+   "label": "veterans",
+   "feature_row": {
+    "height_cm_diff": 10.874213207533359,
+    "reach_cm_diff": 4.6535009025053,
+    "age_diff": -8.500113914150077,
+    "sig_strikes_landed_per_fight_diff": 10.93364731822939,
+    "sig_strike_accuracy_diff": 0.11727860547318919,
+    "knockdowns_per_fight_diff": 0.11846161676790415,
+    "takedowns_landed_per_fight_diff": -2.0129460364647076,
+    "takedown_accuracy_diff": -0.3568106349108264,
+    "control_time_seconds_per_fight_diff": -27.75807488056175,
+    "wins_last_5_diff": 0.0,
+    "total_prior_fights_diff": -13.0,
+    "total_rounds_fought_diff": -22.0,
+    "pct_wins_by_ko_diff": -0.17031458275576955,
+    "days_since_last_fight_diff": 353.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": 36.487155062407055,
+    "sig_strike_defense_diff": -0.04786270031282985,
+    "takedowns_absorbed_per_fight_diff": 0.08703018684913699,
+    "takedown_defense_diff": -0.4194018882944989,
+    "avg_opponent_prior_win_rate_diff": -0.11958426562483493
+   },
+   "method_row": {
+    "height_cm_diff": 10.874213207533359,
+    "reach_cm_diff": 4.6535009025053,
+    "age_diff": -8.500113914150077,
+    "sig_strikes_landed_per_fight_diff": 10.93364731822939,
+    "sig_strike_accuracy_diff": 0.11727860547318919,
+    "knockdowns_per_fight_diff": 0.11846161676790415,
+    "takedowns_landed_per_fight_diff": -2.0129460364647076,
+    "takedown_accuracy_diff": -0.3568106349108264,
+    "control_time_seconds_per_fight_diff": -27.75807488056175,
+    "wins_last_5_diff": 0.0,
+    "total_prior_fights_diff": -13.0,
+    "total_rounds_fought_diff": -22.0,
+    "pct_wins_by_ko_diff": -0.17031458275576955,
+    "days_since_last_fight_diff": 353.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": 36.487155062407055,
+    "sig_strike_defense_diff": -0.04786270031282985,
+    "takedowns_absorbed_per_fight_diff": 0.08703018684913699,
+    "takedown_defense_diff": -0.4194018882944989,
+    "avg_opponent_prior_win_rate_diff": -0.11958426562483493,
+    "pct_wins_by_ko_sum": 1.0085659531218036,
+    "pct_wins_by_submission_sum": 0.5287002052058265,
+    "pct_wins_by_decision_sum": 0.4627338416723699,
+    "knockdowns_per_fight_sum": 0.23010715862787193,
+    "submission_attempts_per_fight_sum": 1.0160557762119535,
+    "takedowns_landed_per_fight_sum": 5.195903231399132,
+    "control_time_seconds_per_fight_sum": 156.29982892253884,
+    "sig_strikes_landed_per_fight_sum": 72.3714387616732,
+    "total_prior_fights_sum": 25.0,
+    "pct_losses_by_ko_sum": 0.6883663026731401,
+    "pct_losses_by_submission_sum": 0.4034518984476052,
+    "avg_fight_duration_s_sum": 1054.8929285713766,
+    "pct_went_the_distance_sum": 0.9700891045418443,
+    "scheduled_rounds": 5,
+    "weight_kg": 70.3,
+    "is_female_division": 0.0,
+    "is_title_fight": 1.0
+   },
+   "expected": {
+    "redProbability": 0.4394828405681964,
+    "blueProbability": 0.5605171594318036,
+    "topFeatures": [
+     {
+      "name": "age_diff",
+      "value": -8.500113914150077,
+      "contribution": 0.30923032760620117,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strikes_absorbed_per_fight_diff",
+      "value": 36.487155062407055,
+      "contribution": -0.18408450484275818,
+      "direction": "blue"
+     },
+     {
+      "name": "takedowns_landed_per_fight_diff",
+      "value": -2.0129460364647076,
+      "contribution": -0.13027986884117126,
+      "direction": "blue"
+     },
+     {
+      "name": "days_since_last_fight_diff",
+      "value": 353.0,
+      "contribution": -0.10568022727966309,
+      "direction": "blue"
+     },
+     {
+      "name": "sig_strike_defense_diff",
+      "value": -0.04786270031282985,
+      "contribution": -0.10468533635139465,
+      "direction": "blue"
+     }
+    ],
+    "featureContributions": {
+     "height_cm_diff": 0.038669295608997345,
+     "reach_cm_diff": 0.005458296276628971,
+     "age_diff": 0.30923032760620117,
+     "sig_strikes_landed_per_fight_diff": 0.07918346673250198,
+     "sig_strike_accuracy_diff": 0.014269047416746616,
+     "knockdowns_per_fight_diff": 0.014827405102550983,
+     "takedowns_landed_per_fight_diff": -0.13027986884117126,
+     "takedown_accuracy_diff": 0.0027786605060100555,
+     "control_time_seconds_per_fight_diff": 0.003931396175175905,
+     "wins_last_5_diff": -0.01759101264178753,
+     "total_prior_fights_diff": -0.026629142463207245,
+     "total_rounds_fought_diff": -0.008274116553366184,
+     "pct_wins_by_ko_diff": -0.005463616456836462,
+     "days_since_last_fight_diff": -0.10568022727966309,
+     "ranking_position_diff": 0.0,
+     "sig_strikes_absorbed_per_fight_diff": -0.18408450484275818,
+     "sig_strike_defense_diff": -0.10468533635139465,
+     "takedowns_absorbed_per_fight_diff": -0.00786612555384636,
+     "takedown_defense_diff": -0.017513509839773178,
+     "avg_opponent_prior_win_rate_diff": -0.017607128247618675
+    },
+    "methodPrediction": {
+     "probabilities": {
+      "decision": 0.386227951639161,
+      "ko": 0.3350350478678609,
+      "submission": 0.27873700049297806
+     },
+     "predicted": "decision"
+    }
+   }
+  },
+  {
+   "label": "veterans",
+   "feature_row": {
+    "height_cm_diff": 24.591363094262107,
+    "reach_cm_diff": 20.41369176864552,
+    "age_diff": 0.9184737581204843,
+    "sig_strikes_landed_per_fight_diff": -37.978431135599756,
+    "sig_strike_accuracy_diff": 0.07398459326806694,
+    "knockdowns_per_fight_diff": 0.5046839287378481,
+    "takedowns_landed_per_fight_diff": 2.7811051987158053,
+    "takedown_accuracy_diff": -0.484587321370739,
+    "control_time_seconds_per_fight_diff": -227.7060744810289,
+    "wins_last_5_diff": -2.0,
+    "total_prior_fights_diff": -4.0,
+    "total_rounds_fought_diff": -10.0,
+    "pct_wins_by_ko_diff": -0.20142764665623025,
+    "days_since_last_fight_diff": 423.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": 0.030474344056543146,
+    "sig_strike_defense_diff": -0.16623177470479245,
+    "takedowns_absorbed_per_fight_diff": 1.434434492811134,
+    "takedown_defense_diff": -0.03744433302219352,
+    "avg_opponent_prior_win_rate_diff": 0.015758347485655688
+   },
+   "method_row": {
+    "height_cm_diff": 24.591363094262107,
+    "reach_cm_diff": 20.41369176864552,
+    "age_diff": 0.9184737581204843,
+    "sig_strikes_landed_per_fight_diff": -37.978431135599756,
+    "sig_strike_accuracy_diff": 0.07398459326806694,
+    "knockdowns_per_fight_diff": 0.5046839287378481,
+    "takedowns_landed_per_fight_diff": 2.7811051987158053,
+    "takedown_accuracy_diff": -0.484587321370739,
+    "control_time_seconds_per_fight_diff": -227.7060744810289,
+    "wins_last_5_diff": -2.0,
+    "total_prior_fights_diff": -4.0,
+    "total_rounds_fought_diff": -10.0,
+    "pct_wins_by_ko_diff": -0.20142764665623025,
+    "days_since_last_fight_diff": 423.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": 0.030474344056543146,
+    "sig_strike_defense_diff": -0.16623177470479245,
+    "takedowns_absorbed_per_fight_diff": 1.434434492811134,
+    "takedown_defense_diff": -0.03744433302219352,
+    "avg_opponent_prior_win_rate_diff": 0.015758347485655688,
+    "pct_wins_by_ko_sum": 1.2033381550344409,
+    "pct_wins_by_submission_sum": 0.1832819680629995,
+    "pct_wins_by_decision_sum": 0.6133798769025596,
+    "knockdowns_per_fight_sum": 0.9653598697030036,
+    "submission_attempts_per_fight_sum": 1.384710935102456,
+    "takedowns_landed_per_fight_sum": 3.7363343231770094,
+    "control_time_seconds_per_fight_sum": 499.0441288637019,
+    "sig_strikes_landed_per_fight_sum": 118.26426130346616,
+    "total_prior_fights_sum": 22.0,
+    "pct_losses_by_ko_sum": 0.5006425087431426,
+    "pct_losses_by_submission_sum": 0.5963567076034161,
+    "avg_fight_duration_s_sum": 1461.4147319570952,
+    "pct_went_the_distance_sum": 1.4672118545026902,
+    "scheduled_rounds": 3,
+    "weight_kg": 77.1,
+    "is_female_division": 0.0,
+    "is_title_fight": 0.0
+   },
+   "expected": {
+    "redProbability": 0.3377387157434836,
+    "blueProbability": 0.6622612842565164,
+    "topFeatures": [
+     {
+      "name": "sig_strike_defense_diff",
+      "value": -0.16623177470479245,
+      "contribution": -0.17275336384773254,
+      "direction": "blue"
+     },
+     {
+      "name": "wins_last_5_diff",
+      "value": -2.0,
+      "contribution": -0.13318471610546112,
+      "direction": "blue"
+     },
+     {
+      "name": "takedowns_landed_per_fight_diff",
+      "value": 2.7811051987158053,
+      "contribution": 0.13258785009384155,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strikes_landed_per_fight_diff",
+      "value": -37.978431135599756,
+      "contribution": -0.11181376129388809,
+      "direction": "blue"
+     },
+     {
+      "name": "days_since_last_fight_diff",
+      "value": 423.0,
+      "contribution": -0.08418416231870651,
+      "direction": "blue"
+     }
+    ],
+    "featureContributions": {
+     "height_cm_diff": 0.02699975110590458,
+     "reach_cm_diff": 0.02217964641749859,
+     "age_diff": -0.0450543574988842,
+     "sig_strikes_landed_per_fight_diff": -0.11181376129388809,
+     "sig_strike_accuracy_diff": 0.0017891142051666975,
+     "knockdowns_per_fight_diff": 0.017837144434452057,
+     "takedowns_landed_per_fight_diff": 0.13258785009384155,
+     "takedown_accuracy_diff": 0.0009640204953029752,
+     "control_time_seconds_per_fight_diff": -0.060272376984357834,
+     "wins_last_5_diff": -0.13318471610546112,
+     "total_prior_fights_diff": -0.010632757097482681,
+     "total_rounds_fought_diff": -0.004560536704957485,
+     "pct_wins_by_ko_diff": -0.0037212951574474573,
+     "days_since_last_fight_diff": -0.08418416231870651,
+     "ranking_position_diff": 0.0,
+     "sig_strikes_absorbed_per_fight_diff": -0.0014875424094498158,
+     "sig_strike_defense_diff": -0.17275336384773254,
+     "takedowns_absorbed_per_fight_diff": -0.008706284686923027,
+     "takedown_defense_diff": -0.010326853021979332,
+     "avg_opponent_prior_win_rate_diff": 0.003151197684928775
+    },
+    "methodPrediction": {
+     "probabilities": {
+      "decision": 0.5277985161349703,
+      "ko": 0.3210247456659881,
+      "submission": 0.15117673819904168
+     },
+     "predicted": "decision"
+    }
+   }
+  },
+  {
+   "label": "veterans + float NaN",
+   "feature_row": {
+    "height_cm_diff": -8.99211981772848,
+    "reach_cm_diff": NaN,
+    "age_diff": 1.9716594363292046,
+    "sig_strikes_landed_per_fight_diff": -8.31790654598749,
+    "sig_strike_accuracy_diff": 0.11008978995005236,
+    "knockdowns_per_fight_diff": 0.5551387168501283,
+    "takedowns_landed_per_fight_diff": -1.5749508645954298,
+    "takedown_accuracy_diff": -0.3135846925623311,
+    "control_time_seconds_per_fight_diff": 189.39363964756046,
+    "wins_last_5_diff": -1.0,
+    "total_prior_fights_diff": -9.0,
+    "total_rounds_fought_diff": -15.0,
+    "pct_wins_by_ko_diff": 0.09078331041755194,
+    "days_since_last_fight_diff": NaN,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": -2.0322558839586122,
+    "sig_strike_defense_diff": -0.23162609718691868,
+    "takedowns_absorbed_per_fight_diff": 0.9570875982974215,
+    "takedown_defense_diff": 0.1250109276403828,
+    "avg_opponent_prior_win_rate_diff": -0.3578455448289177
+   },
+   "method_row": {
+    "height_cm_diff": -8.99211981772848,
+    "reach_cm_diff": NaN,
+    "age_diff": 1.9716594363292046,
+    "sig_strikes_landed_per_fight_diff": -8.31790654598749,
+    "sig_strike_accuracy_diff": 0.11008978995005236,
+    "knockdowns_per_fight_diff": 0.5551387168501283,
+    "takedowns_landed_per_fight_diff": -1.5749508645954298,
+    "takedown_accuracy_diff": -0.3135846925623311,
+    "control_time_seconds_per_fight_diff": 189.39363964756046,
+    "wins_last_5_diff": -1.0,
+    "total_prior_fights_diff": -9.0,
+    "total_rounds_fought_diff": -15.0,
+    "pct_wins_by_ko_diff": 0.09078331041755194,
+    "days_since_last_fight_diff": NaN,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": -2.0322558839586122,
+    "sig_strike_defense_diff": -0.23162609718691868,
+    "takedowns_absorbed_per_fight_diff": 0.9570875982974215,
+    "takedown_defense_diff": 0.1250109276403828,
+    "avg_opponent_prior_win_rate_diff": -0.3578455448289177,
+    "pct_wins_by_ko_sum": 0.5222330517412879,
+    "pct_wins_by_submission_sum": 0.43799302416615904,
+    "pct_wins_by_decision_sum": 1.0397739240925532,
+    "knockdowns_per_fight_sum": 0.9396288478758541,
+    "submission_attempts_per_fight_sum": 1.2792653011836415,
+    "takedowns_landed_per_fight_sum": 2.9936515045423717,
+    "control_time_seconds_per_fight_sum": 248.99025574801783,
+    "sig_strikes_landed_per_fight_sum": 108.48906545287741,
+    "total_prior_fights_sum": 39.0,
+    "pct_losses_by_ko_sum": 0.4630767229643445,
+    "pct_losses_by_submission_sum": 0.8079609334768922,
+    "avg_fight_duration_s_sum": 1100.7069951256467,
+    "pct_went_the_distance_sum": 0.4885309584678229,
+    "scheduled_rounds": 3,
+    "weight_kg": 52.2,
+    "is_female_division": 1.0,
+    "is_title_fight": null
+   },
+   "expected": {
+    "redProbability": 0.3469824274092184,
+    "blueProbability": 0.6530175725907816,
+    "topFeatures": [
+     {
+      "name": "sig_strike_defense_diff",
+      "value": -0.23162609718691868,
+      "contribution": -0.18536725640296936,
+      "direction": "blue"
+     },
+     {
+      "name": "sig_strikes_landed_per_fight_diff",
+      "value": -8.31790654598749,
+      "contribution": -0.0691206082701683,
+      "direction": "blue"
+     },
+     {
+      "name": "age_diff",
+      "value": 1.9716594363292046,
+      "contribution": -0.06450279802083969,
+      "direction": "blue"
+     },
+     {
+      "name": "wins_last_5_diff",
+      "value": -1.0,
+      "contribution": -0.06074018031358719,
+      "direction": "blue"
+     },
+     {
+      "name": "control_time_seconds_per_fight_diff",
+      "value": 189.39363964756046,
+      "contribution": 0.05782455578446388,
+      "direction": "red"
+     }
+    ],
+    "featureContributions": {
+     "height_cm_diff": -0.012479743920266628,
+     "reach_cm_diff": 0.006721763405948877,
+     "age_diff": -0.06450279802083969,
+     "sig_strikes_landed_per_fight_diff": -0.0691206082701683,
+     "sig_strike_accuracy_diff": 0.012190837413072586,
+     "knockdowns_per_fight_diff": 0.028849950060248375,
+     "takedowns_landed_per_fight_diff": -0.054997801780700684,
+     "takedown_accuracy_diff": 0.0026297266595065594,
+     "control_time_seconds_per_fight_diff": 0.05782455578446388,
+     "wins_last_5_diff": -0.06074018031358719,
+     "total_prior_fights_diff": -0.021955227479338646,
+     "total_rounds_fought_diff": -0.015015026554465294,
+     "pct_wins_by_ko_diff": 0.0008043345296755433,
+     "days_since_last_fight_diff": 0.0007817628793418407,
+     "ranking_position_diff": 0.0,
+     "sig_strikes_absorbed_per_fight_diff": -0.003829576075077057,
+     "sig_strike_defense_diff": -0.18536725640296936,
+     "takedowns_absorbed_per_fight_diff": -0.030008425936102867,
+     "takedown_defense_diff": 0.011240988969802856,
+     "avg_opponent_prior_win_rate_diff": -0.017963314428925514
+    },
+    "methodPrediction": {
+     "probabilities": {
+      "decision": 0.4722374448109379,
+      "ko": 0.3015952130425845,
+      "submission": 0.22616734214647763
+     },
+     "predicted": "decision"
+    }
+   }
+  },
+  {
+   "label": "blue debutant",
+   "feature_row": {
+    "height_cm_diff": 8.94110940213423,
+    "reach_cm_diff": 18.795745360695662,
+    "age_diff": -6.134803869872933,
+    "sig_strikes_landed_per_fight_diff": null,
+    "sig_strike_accuracy_diff": null,
+    "knockdowns_per_fight_diff": null,
+    "takedowns_landed_per_fight_diff": null,
+    "takedown_accuracy_diff": null,
+    "control_time_seconds_per_fight_diff": null,
+    "wins_last_5_diff": null,
+    "total_prior_fights_diff": null,
+    "total_rounds_fought_diff": null,
+    "pct_wins_by_ko_diff": null,
+    "days_since_last_fight_diff": null,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": null,
+    "sig_strike_defense_diff": null,
+    "takedowns_absorbed_per_fight_diff": null,
+    "takedown_defense_diff": null,
+    "avg_opponent_prior_win_rate_diff": null
+   },
+   "method_row": {
+    "height_cm_diff": 8.94110940213423,
+    "reach_cm_diff": 18.795745360695662,
+    "age_diff": -6.134803869872933,
+    "sig_strikes_landed_per_fight_diff": null,
+    "sig_strike_accuracy_diff": null,
+    "knockdowns_per_fight_diff": null,
+    "takedowns_landed_per_fight_diff": null,
+    "takedown_accuracy_diff": null,
+    "control_time_seconds_per_fight_diff": null,
+    "wins_last_5_diff": null,
+    "total_prior_fights_diff": null,
+    "total_rounds_fought_diff": null,
+    "pct_wins_by_ko_diff": null,
+    "days_since_last_fight_diff": null,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": null,
+    "sig_strike_defense_diff": null,
+    "takedowns_absorbed_per_fight_diff": null,
+    "takedown_defense_diff": null,
+    "avg_opponent_prior_win_rate_diff": null,
+    "pct_wins_by_ko_sum": null,
+    "pct_wins_by_submission_sum": null,
+    "pct_wins_by_decision_sum": null,
+    "knockdowns_per_fight_sum": null,
+    "submission_attempts_per_fight_sum": null,
+    "takedowns_landed_per_fight_sum": null,
+    "control_time_seconds_per_fight_sum": null,
+    "sig_strikes_landed_per_fight_sum": null,
+    "total_prior_fights_sum": null,
+    "pct_losses_by_ko_sum": null,
+    "pct_losses_by_submission_sum": null,
+    "avg_fight_duration_s_sum": null,
+    "pct_went_the_distance_sum": null,
+    "scheduled_rounds": 3,
+    "weight_kg": 120.2,
+    "is_female_division": 0.0,
+    "is_title_fight": 1.0
+   },
+   "expected": {
+    "redProbability": 0.6524950814689203,
+    "blueProbability": 0.3475049185310797,
+    "topFeatures": [
+     {
+      "name": "age_diff",
+      "value": -6.134803869872933,
+      "contribution": 0.32688748836517334,
+      "direction": "red"
+     },
+     {
+      "name": "reach_cm_diff",
+      "value": 18.795745360695662,
+      "contribution": 0.045958492904901505,
+      "direction": "red"
+     },
+     {
+      "name": "height_cm_diff",
+      "value": 8.94110940213423,
+      "contribution": 0.022152185440063477,
+      "direction": "red"
+     },
+     {
+      "name": "wins_last_5_diff",
+      "value": 0.0,
+      "contribution": -0.012699777260422707,
+      "direction": "blue"
+     },
+     {
+      "name": "takedowns_landed_per_fight_diff",
+      "value": 0.0,
+      "contribution": 0.012232423759996891,
+      "direction": "red"
+     }
+    ],
+    "featureContributions": {
+     "height_cm_diff": 0.022152185440063477,
+     "reach_cm_diff": 0.045958492904901505,
+     "age_diff": 0.32688748836517334,
+     "sig_strikes_landed_per_fight_diff": -0.003616184927523136,
+     "sig_strike_accuracy_diff": -0.0017428689170628786,
+     "knockdowns_per_fight_diff": 0.0026788306422531605,
+     "takedowns_landed_per_fight_diff": 0.012232423759996891,
+     "takedown_accuracy_diff": 5.4221367463469505e-05,
+     "control_time_seconds_per_fight_diff": 0.012085232883691788,
+     "wins_last_5_diff": -0.012699777260422707,
+     "total_prior_fights_diff": -0.00623555202037096,
+     "total_rounds_fought_diff": -0.006616333499550819,
+     "pct_wins_by_ko_diff": -0.0018653197912499309,
+     "days_since_last_fight_diff": -0.0024680159986019135,
+     "ranking_position_diff": 0.0,
+     "sig_strikes_absorbed_per_fight_diff": 0.00731826713308692,
+     "sig_strike_defense_diff": -0.004505481570959091,
+     "takedowns_absorbed_per_fight_diff": -0.0025659133680164814,
+     "takedown_defense_diff": 0.0014050810132175684,
+     "avg_opponent_prior_win_rate_diff": 0.006170538254082203
+    },
+    "methodPrediction": {
+     "probabilities": {
+      "decision": 0.3279003531300887,
+      "ko": 0.43012408321140805,
+      "submission": 0.24197556365850328
+     },
+     "predicted": "ko"
+    }
+   }
+  },
+  {
+   "label": "veterans",
+   "feature_row": {
+    "height_cm_diff": -19.276796683026305,
+    "reach_cm_diff": -22.229279808743144,
+    "age_diff": -7.716886827108095,
+    "sig_strikes_landed_per_fight_diff": -18.197461706134995,
+    "sig_strike_accuracy_diff": 0.06560936523979305,
+    "knockdowns_per_fight_diff": -0.3368962282382406,
+    "takedowns_landed_per_fight_diff": 0.9771230675923537,
+    "takedown_accuracy_diff": 0.12762623080414356,
+    "control_time_seconds_per_fight_diff": -69.98610318404133,
+    "wins_last_5_diff": 0.0,
+    "total_prior_fights_diff": 10.0,
+    "total_rounds_fought_diff": 34.0,
+    "pct_wins_by_ko_diff": 0.14716889481347833,
+    "days_since_last_fight_diff": 191.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": 11.512090990635848,
+    "sig_strike_defense_diff": -0.027490366530493415,
+    "takedowns_absorbed_per_fight_diff": 1.5123070068022766,
+    "takedown_defense_diff": 0.2127619386533457,
+    "avg_opponent_prior_win_rate_diff": 0.2359720734226125
+   },
+   "method_row": {
+    "height_cm_diff": -19.276796683026305,
+    "reach_cm_diff": -22.229279808743144,
+    "age_diff": -7.716886827108095,
+    "sig_strikes_landed_per_fight_diff": -18.197461706134995,
+    "sig_strike_accuracy_diff": 0.06560936523979305,
+    "knockdowns_per_fight_diff": -0.3368962282382406,
+    "takedowns_landed_per_fight_diff": 0.9771230675923537,
+    "takedown_accuracy_diff": 0.12762623080414356,
+    "control_time_seconds_per_fight_diff": -69.98610318404133,
+    "wins_last_5_diff": 0.0,
+    "total_prior_fights_diff": 10.0,
+    "total_rounds_fought_diff": 34.0,
+    "pct_wins_by_ko_diff": 0.14716889481347833,
+    "days_since_last_fight_diff": 191.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": 11.512090990635848,
+    "sig_strike_defense_diff": -0.027490366530493415,
+    "takedowns_absorbed_per_fight_diff": 1.5123070068022766,
+    "takedown_defense_diff": 0.2127619386533457,
+    "avg_opponent_prior_win_rate_diff": 0.2359720734226125,
+    "pct_wins_by_ko_sum": 0.6711737201759915,
+    "pct_wins_by_submission_sum": 0.4677773590085833,
+    "pct_wins_by_decision_sum": 0.8610489208154251,
+    "knockdowns_per_fight_sum": 0.8136020604396714,
+    "submission_attempts_per_fight_sum": 2.130973963042577,
+    "takedowns_landed_per_fight_sum": 5.828605604137212,
+    "control_time_seconds_per_fight_sum": 143.67620086599163,
+    "sig_strikes_landed_per_fight_sum": 140.71703278755422,
+    "total_prior_fights_sum": 36.0,
+    "pct_losses_by_ko_sum": 0.8673836734147911,
+    "pct_losses_by_submission_sum": 0.6325225645314005,
+    "avg_fight_duration_s_sum": 1106.9728803583625,
+    "pct_went_the_distance_sum": 1.271996522046559,
+    "scheduled_rounds": 5,
+    "weight_kg": null,
+    "is_female_division": 0.0,
+    "is_title_fight": 0.0
+   },
+   "expected": {
+    "redProbability": 0.5821885169668473,
+    "blueProbability": 0.41781148303315274,
+    "topFeatures": [
+     {
+      "name": "age_diff",
+      "value": -7.716886827108095,
+      "contribution": 0.35737067461013794,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strikes_landed_per_fight_diff",
+      "value": -18.197461706134995,
+      "contribution": -0.11485523730516434,
+      "direction": "blue"
+     },
+     {
+      "name": "total_prior_fights_diff",
+      "value": 10.0,
+      "contribution": 0.06914666295051575,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strike_defense_diff",
+      "value": -0.027490366530493415,
+      "contribution": -0.05388493090867996,
+      "direction": "blue"
+     },
+     {
+      "name": "height_cm_diff",
+      "value": -19.276796683026305,
+      "contribution": -0.0515231229364872,
+      "direction": "blue"
+     }
+    ],
+    "featureContributions": {
+     "height_cm_diff": -0.0515231229364872,
+     "reach_cm_diff": -0.03299437090754509,
+     "age_diff": 0.35737067461013794,
+     "sig_strikes_landed_per_fight_diff": -0.11485523730516434,
+     "sig_strike_accuracy_diff": 0.003082695184275508,
+     "knockdowns_per_fight_diff": -0.01933891884982586,
+     "takedowns_landed_per_fight_diff": 0.04948662221431732,
+     "takedown_accuracy_diff": 0.0017534393118694425,
+     "control_time_seconds_per_fight_diff": -0.002957944292575121,
+     "wins_last_5_diff": -0.009172692894935608,
+     "total_prior_fights_diff": 0.06914666295051575,
+     "total_rounds_fought_diff": 0.026502639055252075,
+     "pct_wins_by_ko_diff": 0.0019710890483111143,
+     "days_since_last_fight_diff": -0.030512334778904915,
+     "ranking_position_diff": 0.0,
+     "sig_strikes_absorbed_per_fight_diff": -0.031349316239356995,
+     "sig_strike_defense_diff": -0.05388493090867996,
+     "takedowns_absorbed_per_fight_diff": 5.07822260260582e-05,
+     "takedown_defense_diff": 0.019025715067982674,
+     "avg_opponent_prior_win_rate_diff": 0.02567516639828682
+    },
+    "methodPrediction": {
+     "probabilities": {
+      "decision": 0.4666479428084581,
+      "ko": 0.3469080158266067,
+      "submission": 0.18644404136493523
+     },
+     "predicted": "decision"
+    }
+   }
+  },
+  {
+   "label": "missing reach and age",
+   "feature_row": {
+    "height_cm_diff": -35.29409546452263,
+    "reach_cm_diff": null,
+    "age_diff": null,
+    "sig_strikes_landed_per_fight_diff": -19.72308190754576,
+    "sig_strike_accuracy_diff": 0.0069115165514690435,
+    "knockdowns_per_fight_diff": 0.05862049164861288,
+    "takedowns_landed_per_fight_diff": 1.73003692074282,
+    "takedown_accuracy_diff": 0.1164493416036621,
+    "control_time_seconds_per_fight_diff": 55.02192368552778,
+    "wins_last_5_diff": -3.0,
+    "total_prior_fights_diff": 0.0,
+    "total_rounds_fought_diff": 3.0,
+    "pct_wins_by_ko_diff": 0.5425805760898517,
+    "days_since_last_fight_diff": -181.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": -44.690237224292105,
+    "sig_strike_defense_diff": 0.10559201933154105,
+    "takedowns_absorbed_per_fight_diff": -0.7342252190163132,
+    "takedown_defense_diff": 0.3863818555742402,
+    "avg_opponent_prior_win_rate_diff": 0.07787725305212179
+   },
+   "method_row": {
+    "height_cm_diff": -35.29409546452263,
+    "reach_cm_diff": null,
+    "age_diff": null,
+    "sig_strikes_landed_per_fight_diff": -19.72308190754576,
+    "sig_strike_accuracy_diff": 0.0069115165514690435,
+    "knockdowns_per_fight_diff": 0.05862049164861288,
+    "takedowns_landed_per_fight_diff": 1.73003692074282,
+    "takedown_accuracy_diff": 0.1164493416036621,
+    "control_time_seconds_per_fight_diff": 55.02192368552778,
+    "wins_last_5_diff": -3.0,
+    "total_prior_fights_diff": 0.0,
+    "total_rounds_fought_diff": 3.0,
+    "pct_wins_by_ko_diff": 0.5425805760898517,
+    "days_since_last_fight_diff": -181.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": -44.690237224292105,
+    "sig_strike_defense_diff": 0.10559201933154105,
+    "takedowns_absorbed_per_fight_diff": -0.7342252190163132,
+    "takedown_defense_diff": 0.3863818555742402,
+    "avg_opponent_prior_win_rate_diff": 0.07787725305212179,
+    "pct_wins_by_ko_sum": 0.758421329966595,
+    "pct_wins_by_submission_sum": 0.23977490283716774,
+    "pct_wins_by_decision_sum": 1.0018037671962374,
+    "knockdowns_per_fight_sum": 0.965350952697565,
+    "submission_attempts_per_fight_sum": 1.2451883690942709,
+    "takedowns_landed_per_fight_sum": 5.668660363208148,
+    "control_time_seconds_per_fight_sum": 300.79955756879065,
+    "sig_strikes_landed_per_fight_sum": 138.1359948314224,
+    "total_prior_fights_sum": 20.0,
+    "pct_losses_by_ko_sum": 1.557222486204839,
+    "pct_losses_by_submission_sum": 0.0976973629357032,
+    "avg_fight_duration_s_sum": 1443.2164981057817,
+    "pct_went_the_distance_sum": 0.9938000609600518,
+    "scheduled_rounds": 3,
+    "weight_kg": null,
+    "is_female_division": null,
+    "is_title_fight": null
+   },
+   "expected": {
+    "redProbability": 0.5974595573755423,
+    "blueProbability": 0.40254044262445765,
+    "topFeatures": [
+     {
+      "name": "sig_strike_defense_diff",
+      "value": 0.10559201933154105,
+      "contribution": 0.17234563827514648,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strikes_absorbed_per_fight_diff",
+      "value": -44.690237224292105,
+      "contribution": 0.1637774109840393,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strikes_landed_per_fight_diff",
+      "value": -19.72308190754576,
+      "contribution": -0.1291404813528061,
+      "direction": "blue"
+     },
+     {
+      "name": "wins_last_5_diff",
+      "value": -3.0,
+      "contribution": -0.1239161491394043,
+      "direction": "blue"
+     },
+     {
+      "name": "takedowns_landed_per_fight_diff",
+      "value": 1.73003692074282,
+      "contribution": 0.09700596332550049,
+      "direction": "red"
+     }
+    ],
+    "featureContributions": {
+     "height_cm_diff": -0.04134635627269745,
+     "reach_cm_diff": 0.000548419775441289,
+     "age_diff": 0.01124323159456253,
+     "sig_strikes_landed_per_fight_diff": -0.1291404813528061,
+     "sig_strike_accuracy_diff": -0.010320523753762245,
+     "knockdowns_per_fight_diff": 0.003072943538427353,
+     "takedowns_landed_per_fight_diff": 0.09700596332550049,
+     "takedown_accuracy_diff": -0.0034605173859745264,
+     "control_time_seconds_per_fight_diff": 0.0030237711034715176,
+     "wins_last_5_diff": -0.1239161491394043,
+     "total_prior_fights_diff": 0.0021827162709087133,
+     "total_rounds_fought_diff": -0.000521279638633132,
+     "pct_wins_by_ko_diff": 0.009307070635259151,
+     "days_since_last_fight_diff": 0.023647285997867584,
+     "ranking_position_diff": 0.0,
+     "sig_strikes_absorbed_per_fight_diff": 0.1637774109840393,
+     "sig_strike_defense_diff": 0.17234563827514648,
+     "takedowns_absorbed_per_fight_diff": 0.0238169115036726,
+     "takedown_defense_diff": 0.037672944366931915,
+     "avg_opponent_prior_win_rate_diff": 0.006515015847980976
+    },
+    "methodPrediction": {
+     "probabilities": {
+      "decision": 0.5600250786806172,
+      "ko": 0.3203195218039829,
+      "submission": 0.1196553995153999
+     },
+     "predicted": "decision"
+    }
+   }
+  },
+  {
+   "label": "veterans",
+   "feature_row": {
+    "height_cm_diff": -6.358144220410992,
+    "reach_cm_diff": -9.20224308879233,
+    "age_diff": -7.393624202483391,
+    "sig_strikes_landed_per_fight_diff": -38.87707943602983,
+    "sig_strike_accuracy_diff": -0.06123422710126125,
+    "knockdowns_per_fight_diff": 0.6642584453209152,
+    "takedowns_landed_per_fight_diff": -1.7404807209665325,
+    "takedown_accuracy_diff": -0.2686861725402724,
+    "control_time_seconds_per_fight_diff": -46.218563003316774,
+    "wins_last_5_diff": 2.0,
+    "total_prior_fights_diff": 0.0,
+    "total_rounds_fought_diff": -9.0,
+    "pct_wins_by_ko_diff": -0.21831932807601084,
+    "days_since_last_fight_diff": 49.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": -49.01461144420404,
+    "sig_strike_defense_diff": -0.09067684863185421,
+    "takedowns_absorbed_per_fight_diff": 0.8901723048027986,
+    "takedown_defense_diff": 0.12097823542955422,
+    "avg_opponent_prior_win_rate_diff": -0.18263141220418505
+   },
+   "method_row": {
+    "height_cm_diff": -6.358144220410992,
+    "reach_cm_diff": -9.20224308879233,
+    "age_diff": -7.393624202483391,
+    "sig_strikes_landed_per_fight_diff": -38.87707943602983,
+    "sig_strike_accuracy_diff": -0.06123422710126125,
+    "knockdowns_per_fight_diff": 0.6642584453209152,
+    "takedowns_landed_per_fight_diff": -1.7404807209665325,
+    "takedown_accuracy_diff": -0.2686861725402724,
+    "control_time_seconds_per_fight_diff": -46.218563003316774,
+    "wins_last_5_diff": 2.0,
+    "total_prior_fights_diff": 0.0,
+    "total_rounds_fought_diff": -9.0,
+    "pct_wins_by_ko_diff": -0.21831932807601084,
+    "days_since_last_fight_diff": 49.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": -49.01461144420404,
+    "sig_strike_defense_diff": -0.09067684863185421,
+    "takedowns_absorbed_per_fight_diff": 0.8901723048027986,
+    "takedown_defense_diff": 0.12097823542955422,
+    "avg_opponent_prior_win_rate_diff": -0.18263141220418505,
+    "pct_wins_by_ko_sum": 0.3523625025031303,
+    "pct_wins_by_submission_sum": 0.5876977729031134,
+    "pct_wins_by_decision_sum": 1.0599397245937565,
+    "knockdowns_per_fight_sum": 0.9232508902295441,
+    "submission_attempts_per_fight_sum": 1.1388379988606363,
+    "takedowns_landed_per_fight_sum": 5.539110748005489,
+    "control_time_seconds_per_fight_sum": 605.5382079141959,
+    "sig_strikes_landed_per_fight_sum": 123.2588980552418,
+    "total_prior_fights_sum": 42.0,
+    "pct_losses_by_ko_sum": 0.5852730028363787,
+    "pct_losses_by_submission_sum": 0.976074420728253,
+    "avg_fight_duration_s_sum": 1433.4353104335507,
+    "pct_went_the_distance_sum": 1.0476549043574535,
+    "scheduled_rounds": 3,
+    "weight_kg": 70.3,
+    "is_female_division": 0.0,
+    "is_title_fight": 1.0
+   },
+   "expected": {
+    "redProbability": 0.5414447304303859,
+    "blueProbability": 0.4585552695696141,
+    "topFeatures": [
+     {
+      "name": "age_diff",
+      "value": -7.393624202483391,
+      "contribution": 0.2942485809326172,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strike_defense_diff",
+      "value": -0.09067684863185421,
+      "contribution": -0.1470952332019806,
+      "direction": "blue"
+     },
+     {
+      "name": "sig_strikes_landed_per_fight_diff",
+      "value": -38.87707943602983,
+      "contribution": -0.13829493522644043,
+      "direction": "blue"
+     },
+     {
+      "name": "wins_last_5_diff",
+      "value": 2.0,
+      "contribution": 0.12683257460594177,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strikes_absorbed_per_fight_diff",
+      "value": -49.01461144420404,
+      "contribution": 0.12482600659132004,
+      "direction": "red"
+     }
+    ],
+    "featureContributions": {
+     "height_cm_diff": -0.0001539826625958085,
+     "reach_cm_diff": -0.034424591809511185,
+     "age_diff": 0.2942485809326172,
+     "sig_strikes_landed_per_fight_diff": -0.13829493522644043,
+     "sig_strike_accuracy_diff": -0.003296886570751667,
+     "knockdowns_per_fight_diff": 0.008769650012254715,
+     "takedowns_landed_per_fight_diff": -0.10612443834543228,
+     "takedown_accuracy_diff": 0.0009762159315869212,
+     "control_time_seconds_per_fight_diff": 0.008416321128606796,
+     "wins_last_5_diff": 0.12683257460594177,
+     "total_prior_fights_diff": -0.004079627338796854,
+     "total_rounds_fought_diff": 0.0024138123262673616,
+     "pct_wins_by_ko_diff": -0.00489331129938364,
+     "days_since_last_fight_diff": -0.0023971719201654196,
+     "ranking_position_diff": 0.0,
+     "sig_strikes_absorbed_per_fight_diff": 0.12482600659132004,
+     "sig_strike_defense_diff": -0.1470952332019806,
+     "takedowns_absorbed_per_fight_diff": -0.024074530228972435,
+     "takedown_defense_diff": 0.027105877175927162,
+     "avg_opponent_prior_win_rate_diff": -0.024906713515520096
+    },
+    "methodPrediction": {
+     "probabilities": {
+      "decision": 0.49246725463783964,
+      "ko": 0.3203999654314234,
+      "submission": 0.18713277993073696
+     },
+     "predicted": "decision"
+    }
+   }
+  },
+  {
+   "label": "red debutant",
+   "feature_row": {
+    "height_cm_diff": -0.6284285074353022,
+    "reach_cm_diff": -5.379927575451603,
+    "age_diff": 1.3702086323300193,
+    "sig_strikes_landed_per_fight_diff": null,
+    "sig_strike_accuracy_diff": null,
+    "knockdowns_per_fight_diff": null,
+    "takedowns_landed_per_fight_diff": null,
+    "takedown_accuracy_diff": null,
+    "control_time_seconds_per_fight_diff": null,
+    "wins_last_5_diff": null,
+    "total_prior_fights_diff": null,
+    "total_rounds_fought_diff": null,
+    "pct_wins_by_ko_diff": null,
+    "days_since_last_fight_diff": null,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": null,
+    "sig_strike_defense_diff": null,
+    "takedowns_absorbed_per_fight_diff": null,
+    "takedown_defense_diff": null,
+    "avg_opponent_prior_win_rate_diff": null
+   },
+   "method_row": {
+    "height_cm_diff": -0.6284285074353022,
+    "reach_cm_diff": -5.379927575451603,
+    "age_diff": 1.3702086323300193,
+    "sig_strikes_landed_per_fight_diff": null,
+    "sig_strike_accuracy_diff": null,
+    "knockdowns_per_fight_diff": null,
+    "takedowns_landed_per_fight_diff": null,
+    "takedown_accuracy_diff": null,
+    "control_time_seconds_per_fight_diff": null,
+    "wins_last_5_diff": null,
+    "total_prior_fights_diff": null,
+    "total_rounds_fought_diff": null,
+    "pct_wins_by_ko_diff": null,
+    "days_since_last_fight_diff": null,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": null,
+    "sig_strike_defense_diff": null,
+    "takedowns_absorbed_per_fight_diff": null,
+    "takedown_defense_diff": null,
+    "avg_opponent_prior_win_rate_diff": null,
+    "pct_wins_by_ko_sum": null,
+    "pct_wins_by_submission_sum": null,
+    "pct_wins_by_decision_sum": null,
+    "knockdowns_per_fight_sum": null,
+    "submission_attempts_per_fight_sum": null,
+    "takedowns_landed_per_fight_sum": null,
+    "control_time_seconds_per_fight_sum": null,
+    "sig_strikes_landed_per_fight_sum": null,
+    "total_prior_fights_sum": null,
+    "pct_losses_by_ko_sum": null,
+    "pct_losses_by_submission_sum": null,
+    "avg_fight_duration_s_sum": null,
+    "pct_went_the_distance_sum": null,
+    "scheduled_rounds": 3,
+    "weight_kg": 77.1,
+    "is_female_division": 0.0,
+    "is_title_fight": 0.0
+   },
+   "expected": {
+    "redProbability": 0.49118711894780154,
+    "blueProbability": 0.5088128810521985,
+    "topFeatures": [
+     {
+      "name": "age_diff",
+      "value": 1.3702086323300193,
+      "contribution": -0.03213479369878769,
+      "direction": "blue"
+     },
+     {
+      "name": "sig_strike_defense_diff",
+      "value": -0.0024424850511807,
+      "contribution": 0.006560515612363815,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strikes_landed_per_fight_diff",
+      "value": -0.6495454545454535,
+      "contribution": 0.004842257127165794,
+      "direction": "red"
+     },
+     {
+      "name": "reach_cm_diff",
+      "value": -5.379927575451603,
+      "contribution": -0.004473970737308264,
+      "direction": "blue"
+     },
+     {
+      "name": "wins_last_5_diff",
+      "value": 0.0,
+      "contribution": 0.003819188103079796,
+      "direction": "red"
+     }
+    ],
+    "featureContributions": {
+     "height_cm_diff": -0.0012019770219922066,
+     "reach_cm_diff": -0.004473970737308264,
+     "age_diff": -0.03213479369878769,
+     "sig_strikes_landed_per_fight_diff": 0.004842257127165794,
+     "sig_strike_accuracy_diff": 0.0,
+     "knockdowns_per_fight_diff": -0.0014202473685145378,
+     "takedowns_landed_per_fight_diff": -0.0001322515308856964,
+     "takedown_accuracy_diff": 6.75358169246465e-05,
+     "control_time_seconds_per_fight_diff": -0.001867835409939289,
+     "wins_last_5_diff": 0.003819188103079796,
+     "total_prior_fights_diff": 0.0,
+     "total_rounds_fought_diff": 0.0009988105157390237,
+     "pct_wins_by_ko_diff": 0.0,
+     "days_since_last_fight_diff": -0.001478748396039009,
+     "ranking_position_diff": 0.0,
+     "sig_strikes_absorbed_per_fight_diff": -0.00024005956947803497,
+     "sig_strike_defense_diff": 0.006560515612363815,
+     "takedowns_absorbed_per_fight_diff": 0.0027661980129778385,
+     "takedown_defense_diff": 0.001973305596038699,
+     "avg_opponent_prior_win_rate_diff": 7.156818173825741e-05
+    },
+    "methodPrediction": {
+     "probabilities": {
+      "decision": 0.46084263929575575,
+      "ko": 0.29408821733890367,
+      "submission": 0.2450691433653407
+     },
+     "predicted": "decision"
+    }
+   }
+  },
+  {
+   "label": "veterans",
+   "feature_row": {
+    "height_cm_diff": 17.771213369240826,
+    "reach_cm_diff": 15.249692387141579,
+    "age_diff": -9.220865821470436,
+    "sig_strikes_landed_per_fight_diff": -32.272215392809045,
+    "sig_strike_accuracy_diff": 0.11828944592800017,
+    "knockdowns_per_fight_diff": -0.45702196516755744,
+    "takedowns_landed_per_fight_diff": 0.7903728666334051,
+    "takedown_accuracy_diff": 0.31270210460316344,
+    "control_time_seconds_per_fight_diff": 125.39058498155322,
+    "wins_last_5_diff": 1.0,
+    "total_prior_fights_diff": -13.0,
+    "total_rounds_fought_diff": -33.0,
+    "pct_wins_by_ko_diff": 0.14101449718601072,
+    "days_since_last_fight_diff": 29.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": 2.888926544768971,
+    "sig_strike_defense_diff": 0.07427356181337252,
+    "takedowns_absorbed_per_fight_diff": -0.6127371823915528,
+    "takedown_defense_diff": -0.11484754829609267,
+    "avg_opponent_prior_win_rate_diff": 0.019054243669961224
+   },
+   "method_row": {
+    "height_cm_diff": 17.771213369240826,
+    "reach_cm_diff": 15.249692387141579,
+    "age_diff": -9.220865821470436,
+    "sig_strikes_landed_per_fight_diff": -32.272215392809045,
+    "sig_strike_accuracy_diff": 0.11828944592800017,
+    "knockdowns_per_fight_diff": -0.45702196516755744,
+    "takedowns_landed_per_fight_diff": 0.7903728666334051,
+    "takedown_accuracy_diff": 0.31270210460316344,
+    "control_time_seconds_per_fight_diff": 125.39058498155322,
+    "wins_last_5_diff": 1.0,
+    "total_prior_fights_diff": -13.0,
+    "total_rounds_fought_diff": -33.0,
+    "pct_wins_by_ko_diff": 0.14101449718601072,
+    "days_since_last_fight_diff": 29.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": 2.888926544768971,
+    "sig_strike_defense_diff": 0.07427356181337252,
+    "takedowns_absorbed_per_fight_diff": -0.6127371823915528,
+    "takedown_defense_diff": -0.11484754829609267,
+    "avg_opponent_prior_win_rate_diff": 0.019054243669961224,
+    "pct_wins_by_ko_sum": 0.6855694542097661,
+    "pct_wins_by_submission_sum": 0.6227933308557656,
+    "pct_wins_by_decision_sum": 0.6916372149344684,
+    "knockdowns_per_fight_sum": 0.7619100427023627,
+    "submission_attempts_per_fight_sum": 2.402117973641577,
+    "takedowns_landed_per_fight_sum": 2.4318843158233725,
+    "control_time_seconds_per_fight_sum": 624.7654719474774,
+    "sig_strikes_landed_per_fight_sum": 104.70644016358702,
+    "total_prior_fights_sum": 15.0,
+    "pct_losses_by_ko_sum": 0.6656292359275293,
+    "pct_losses_by_submission_sum": 0.5253148442318067,
+    "avg_fight_duration_s_sum": 1138.913331290756,
+    "pct_went_the_distance_sum": 1.7833636355834852,
+    "scheduled_rounds": 5,
+    "weight_kg": 52.2,
+    "is_female_division": 1.0,
+    "is_title_fight": null
+   },
+   "expected": {
+    "redProbability": 0.6643761587654818,
+    "blueProbability": 0.33562384123451816,
+    "topFeatures": [
+     {
+      "name": "age_diff",
+      "value": -9.220865821470436,
+      "contribution": 0.38226187229156494,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strikes_landed_per_fight_diff",
+      "value": -32.272215392809045,
+      "contribution": -0.1774802803993225,
+      "direction": "blue"
+     },
+     {
+      "name": "sig_strike_defense_diff",
+      "value": 0.07427356181337252,
+      "contribution": 0.09694106876850128,
+      "direction": "red"
+     },
+     {
+      "name": "wins_last_5_diff",
+      "value": 1.0,
+      "contribution": 0.08144599199295044,
+      "direction": "red"
+     },
+     {
+      "name": "takedowns_landed_per_fight_diff",
+      "value": 0.7903728666334051,
+      "contribution": 0.03468020632863045,
+      "direction": "red"
+     }
+    ],
+    "featureContributions": {
+     "height_cm_diff": 0.024883639067411423,
+     "reach_cm_diff": 0.023766642436385155,
+     "age_diff": 0.38226187229156494,
+     "sig_strikes_landed_per_fight_diff": -0.1774802803993225,
+     "sig_strike_accuracy_diff": 0.009049403481185436,
+     "knockdowns_per_fight_diff": -0.03339189291000366,
+     "takedowns_landed_per_fight_diff": 0.03468020632863045,
+     "takedown_accuracy_diff": -0.0012275339104235172,
+     "control_time_seconds_per_fight_diff": 0.022822367027401924,
+     "wins_last_5_diff": 0.08144599199295044,
+     "total_prior_fights_diff": -0.030289549380540848,
+     "total_rounds_fought_diff": -0.01212251465767622,
+     "pct_wins_by_ko_diff": -0.0011766531970351934,
+     "days_since_last_fight_diff": -0.007494852878153324,
+     "ranking_position_diff": 0.0,
+     "sig_strikes_absorbed_per_fight_diff": 0.0003864802420139313,
+     "sig_strike_defense_diff": 0.09694106876850128,
+     "takedowns_absorbed_per_fight_diff": 0.013082419522106647,
+     "takedown_defense_diff": -0.003598569892346859,
+     "avg_opponent_prior_win_rate_diff": 0.007914186455309391
+    },
+    "methodPrediction": {
+     "probabilities": {
+      "decision": 0.5299809556260804,
+      "ko": 0.20892144547728855,
+      "submission": 0.2610975988966311
+     },
+     "predicted": "decision"
+    }
+   }
+  },
+  {
+   "label": "zero takedown attempts",
+   "feature_row": {
+    "height_cm_diff": 6.160446029760749,
+    "reach_cm_diff": 8.147341813346003,
+    "age_diff": 0.4770842598906526,
+    "sig_strikes_landed_per_fight_diff": -1.531368455012327,
+    "sig_strike_accuracy_diff": -0.29247696365333353,
+    "knockdowns_per_fight_diff": 0.7708558898500175,
+    "takedowns_landed_per_fight_diff": 1.6634988283015453,
+    "takedown_accuracy_diff": null,
+    "control_time_seconds_per_fight_diff": 204.01752352569585,
+    "wins_last_5_diff": -2.0,
+    "total_prior_fights_diff": 3.0,
+    "total_rounds_fought_diff": 7.0,
+    "pct_wins_by_ko_diff": 0.25320159567714784,
+    "days_since_last_fight_diff": 22.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": -35.38514675291316,
+    "sig_strike_defense_diff": -0.06984709559604951,
+    "takedowns_absorbed_per_fight_diff": 1.1851811502611194,
+    "takedown_defense_diff": -0.2702576356588801,
+    "avg_opponent_prior_win_rate_diff": -0.02311804176372123
+   },
+   "method_row": {
+    "height_cm_diff": 6.160446029760749,
+    "reach_cm_diff": 8.147341813346003,
+    "age_diff": 0.4770842598906526,
+    "sig_strikes_landed_per_fight_diff": -1.531368455012327,
+    "sig_strike_accuracy_diff": -0.29247696365333353,
+    "knockdowns_per_fight_diff": 0.7708558898500175,
+    "takedowns_landed_per_fight_diff": 1.6634988283015453,
+    "takedown_accuracy_diff": null,
+    "control_time_seconds_per_fight_diff": 204.01752352569585,
+    "wins_last_5_diff": -2.0,
+    "total_prior_fights_diff": 3.0,
+    "total_rounds_fought_diff": 7.0,
+    "pct_wins_by_ko_diff": 0.25320159567714784,
+    "days_since_last_fight_diff": 22.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": -35.38514675291316,
+    "sig_strike_defense_diff": -0.06984709559604951,
+    "takedowns_absorbed_per_fight_diff": 1.1851811502611194,
+    "takedown_defense_diff": -0.2702576356588801,
+    "avg_opponent_prior_win_rate_diff": -0.02311804176372123,
+    "pct_wins_by_ko_sum": 1.1729734785542503,
+    "pct_wins_by_submission_sum": 0.2462038856221942,
+    "pct_wins_by_decision_sum": 0.5808226358235555,
+    "knockdowns_per_fight_sum": 0.784562816807671,
+    "submission_attempts_per_fight_sum": 2.638130487843677,
+    "takedowns_landed_per_fight_sum": 5.879897468740841,
+    "control_time_seconds_per_fight_sum": 355.1897828223059,
+    "sig_strikes_landed_per_fight_sum": 87.58968620852089,
+    "total_prior_fights_sum": 39.0,
+    "pct_losses_by_ko_sum": 0.2761469088514389,
+    "pct_losses_by_submission_sum": 0.5950019716182152,
+    "avg_fight_duration_s_sum": 1170.282310587853,
+    "pct_went_the_distance_sum": 1.0052249630287746,
+    "scheduled_rounds": 3,
+    "weight_kg": 120.2,
+    "is_female_division": 0.0,
+    "is_title_fight": 1.0
+   },
+   "expected": {
+    "redProbability": 0.4889731784742772,
+    "blueProbability": 0.5110268215257228,
+    "topFeatures": [
+     {
+      "name": "sig_strikes_absorbed_per_fight_diff",
+      "value": -35.38514675291316,
+      "contribution": 0.21588823199272156,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strike_defense_diff",
+      "value": -0.06984709559604951,
+      "contribution": -0.16349360346794128,
+      "direction": "blue"
+     },
+     {
+      "name": "wins_last_5_diff",
+      "value": -2.0,
+      "contribution": -0.10910084843635559,
+      "direction": "blue"
+     },
+     {
+      "name": "takedowns_landed_per_fight_diff",
+      "value": 1.6634988283015453,
+      "contribution": 0.07788839191198349,
+      "direction": "red"
+     },
+     {
+      "name": "age_diff",
+      "value": 0.4770842598906526,
+      "contribution": -0.05748162791132927,
+      "direction": "blue"
+     }
+    ],
+    "featureContributions": {
+     "height_cm_diff": -0.0001395501894876361,
+     "reach_cm_diff": 0.018990708515048027,
+     "age_diff": -0.05748162791132927,
+     "sig_strikes_landed_per_fight_diff": -0.008926697075366974,
+     "sig_strike_accuracy_diff": -0.013955014757812023,
+     "knockdowns_per_fight_diff": 0.027788037434220314,
+     "takedowns_landed_per_fight_diff": 0.07788839191198349,
+     "takedown_accuracy_diff": 0.0021581584587693214,
+     "control_time_seconds_per_fight_diff": 0.0416778028011322,
+     "wins_last_5_diff": -0.10910084843635559,
+     "total_prior_fights_diff": 0.0034861438907682896,
+     "total_rounds_fought_diff": -0.0008398343343287706,
+     "pct_wins_by_ko_diff": 0.006425178609788418,
+     "days_since_last_fight_diff": -0.005321654491126537,
+     "ranking_position_diff": 0.0,
+     "sig_strikes_absorbed_per_fight_diff": 0.21588823199272156,
+     "sig_strike_defense_diff": -0.16349360346794128,
+     "takedowns_absorbed_per_fight_diff": -0.02290162816643715,
+     "takedown_defense_diff": -0.029501955956220627,
+     "avg_opponent_prior_win_rate_diff": -0.009882669895887375
+    },
+    "methodPrediction": {
+     "probabilities": {
+      "decision": 0.35197398462552615,
+      "ko": 0.44572768923693495,
+      "submission": 0.20229832613753884
+     },
+     "predicted": "ko"
+    }
+   }
+  },
+  {
+   "label": "veterans",
+   "feature_row": {
+    "height_cm_diff": 24.168086805635653,
+    "reach_cm_diff": 12.947370525606146,
+    "age_diff": -2.4833245384313187,
+    "sig_strikes_landed_per_fight_diff": 12.973926607547657,
+    "sig_strike_accuracy_diff": -0.037354794803363955,
+    "knockdowns_per_fight_diff": -0.2559863204598256,
+    "takedowns_landed_per_fight_diff": -1.5339073480904006,
+    "takedown_accuracy_diff": -0.1964308947141102,
+    "control_time_seconds_per_fight_diff": -113.7330043466886,
+    "wins_last_5_diff": 2.0,
+    "total_prior_fights_diff": 0.0,
+    "total_rounds_fought_diff": 1.0,
+    "pct_wins_by_ko_diff": 0.03321621093831362,
+    "days_since_last_fight_diff": 510.0,
+    "ranking_position_diff": 0.0,
+    "sig_strikes_absorbed_per_fight_diff": -41.51583972979663,
+    "sig_strike_defense_diff": -0.03485032447443848,
+    "takedowns_absorbed_per_fight_diff": -1.1731307667160946,
+    "takedown_defense_diff": -0.2492686387486206,
+    "avg_opponent_prior_win_rate_diff": -0.015172547780567425
+   },
+   "method_row": {
+    "height_cm_diff": 24.168086805635653,
+    "reach_cm_diff": 12.947370525606146,
+    "age_diff": -2.4833245384313187,
+    "sig_strikes_landed_per_fight_diff": 12.973926607547657,
+    "sig_strike_accuracy_diff": -0.037354794803363955,
+    "knockdowns_per_fight_diff": -0.2559863204598256,
+    "takedowns_landed_per_fight_diff": -1.5339073480904006,
+    "takedown_accuracy_diff": -0.1964308947141102,
+    "control_time_seconds_per_fight_diff": -113.7330043466886,
+    "wins_last_5_diff": 2.0,
+    "total_prior_fights_diff": 0.0,
+    "total_rounds_fought_diff": 1.0,
+    "pct_wins_by_ko_diff": 0.03321621093831362,
+    "days_since_last_fight_diff": 510.0,
+    "ranking_position_diff": 0.0,
+    "sig_strikes_absorbed_per_fight_diff": -41.51583972979663,
+    "sig_strike_defense_diff": -0.03485032447443848,
+    "takedowns_absorbed_per_fight_diff": -1.1731307667160946,
+    "takedown_defense_diff": -0.2492686387486206,
+    "avg_opponent_prior_win_rate_diff": -0.015172547780567425,
+    "pct_wins_by_ko_sum": 0.5264877539950921,
+    "pct_wins_by_submission_sum": 0.5294748442986086,
+    "pct_wins_by_decision_sum": 0.9440374017062994,
+    "knockdowns_per_fight_sum": 0.36333116535997845,
+    "submission_attempts_per_fight_sum": 0.9492410837912062,
+    "takedowns_landed_per_fight_sum": 4.2912412263829545,
+    "control_time_seconds_per_fight_sum": 419.9868784005499,
+    "sig_strikes_landed_per_fight_sum": 56.61949417368385,
+    "total_prior_fights_sum": 36.0,
+    "pct_losses_by_ko_sum": 0.23554710982514682,
+    "pct_losses_by_submission_sum": 0.9725191595530638,
+    "avg_fight_duration_s_sum": 1076.325021166008,
+    "pct_went_the_distance_sum": 1.5050720548541516,
+    "scheduled_rounds": 3,
+    "weight_kg": null,
+    "is_female_division": 0.0,
+    "is_title_fight": 0.0
+   },
+   "expected": {
+    "redProbability": 0.6486568550279742,
+    "blueProbability": 0.3513431449720258,
+    "topFeatures": [
+     {
+      "name": "age_diff",
+      "value": -2.4833245384313187,
+      "contribution": 0.1908469796180725,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strikes_absorbed_per_fight_diff",
+      "value": -41.51583972979663,
+      "contribution": 0.1829654574394226,
+      "direction": "red"
+     },
+     {
+      "name": "wins_last_5_diff",
+      "value": 2.0,
+      "contribution": 0.11641326546669006,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strikes_landed_per_fight_diff",
+      "value": 12.973926607547657,
+      "contribution": 0.11486689001321793,
+      "direction": "red"
+     },
+     {
+      "name": "days_since_last_fight_diff",
+      "value": 510.0,
+      "contribution": -0.09826211631298065,
+      "direction": "blue"
+     }
+    ],
+    "featureContributions": {
+     "height_cm_diff": 0.021287992596626282,
+     "reach_cm_diff": 0.04196416586637497,
+     "age_diff": 0.1908469796180725,
+     "sig_strikes_landed_per_fight_diff": 0.11486689001321793,
+     "sig_strike_accuracy_diff": -0.008211270906031132,
+     "knockdowns_per_fight_diff": -0.017339756712317467,
+     "takedowns_landed_per_fight_diff": -0.06725223362445831,
+     "takedown_accuracy_diff": 0.0009516805876046419,
+     "control_time_seconds_per_fight_diff": -0.00392112135887146,
+     "wins_last_5_diff": 0.11641326546669006,
+     "total_prior_fights_diff": -0.002030923729762435,
+     "total_rounds_fought_diff": 0.0002858752850443125,
+     "pct_wins_by_ko_diff": -0.0012306526768952608,
+     "days_since_last_fight_diff": -0.09826211631298065,
+     "ranking_position_diff": 0.0,
+     "sig_strikes_absorbed_per_fight_diff": 0.1829654574394226,
+     "sig_strike_defense_diff": -0.050631120800971985,
+     "takedowns_absorbed_per_fight_diff": 0.015152789652347565,
+     "takedown_defense_diff": -0.04954338073730469,
+     "avg_opponent_prior_win_rate_diff": -0.0019421381875872612
+    },
+    "methodPrediction": {
+     "probabilities": {
+      "decision": 0.4495666252443026,
+      "ko": 0.2807258037225527,
+      "submission": 0.2697075710331448
+     },
+     "predicted": "decision"
+    }
+   }
+  },
+  {
+   "label": "blue debutant",
+   "feature_row": {
+    "height_cm_diff": 8.19919957668563,
+    "reach_cm_diff": 13.823335156736675,
+    "age_diff": -3.587067330761265,
+    "sig_strikes_landed_per_fight_diff": null,
+    "sig_strike_accuracy_diff": null,
+    "knockdowns_per_fight_diff": null,
+    "takedowns_landed_per_fight_diff": null,
+    "takedown_accuracy_diff": null,
+    "control_time_seconds_per_fight_diff": null,
+    "wins_last_5_diff": null,
+    "total_prior_fights_diff": null,
+    "total_rounds_fought_diff": null,
+    "pct_wins_by_ko_diff": null,
+    "days_since_last_fight_diff": null,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": null,
+    "sig_strike_defense_diff": null,
+    "takedowns_absorbed_per_fight_diff": null,
+    "takedown_defense_diff": null,
+    "avg_opponent_prior_win_rate_diff": null
+   },
+   "method_row": {
+    "height_cm_diff": 8.19919957668563,
+    "reach_cm_diff": 13.823335156736675,
+    "age_diff": -3.587067330761265,
+    "sig_strikes_landed_per_fight_diff": null,
+    "sig_strike_accuracy_diff": null,
+    "knockdowns_per_fight_diff": null,
+    "takedowns_landed_per_fight_diff": null,
+    "takedown_accuracy_diff": null,
+    "control_time_seconds_per_fight_diff": null,
+    "wins_last_5_diff": null,
+    "total_prior_fights_diff": null,
+    "total_rounds_fought_diff": null,
+    "pct_wins_by_ko_diff": null,
+    "days_since_last_fight_diff": null,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": null,
+    "sig_strike_defense_diff": null,
+    "takedowns_absorbed_per_fight_diff": null,
+    "takedown_defense_diff": null,
+    "avg_opponent_prior_win_rate_diff": null,
+    "pct_wins_by_ko_sum": null,
+    "pct_wins_by_submission_sum": null,
+    "pct_wins_by_decision_sum": null,
+    "knockdowns_per_fight_sum": null,
+    "submission_attempts_per_fight_sum": null,
+    "takedowns_landed_per_fight_sum": null,
+    "control_time_seconds_per_fight_sum": null,
+    "sig_strikes_landed_per_fight_sum": null,
+    "total_prior_fights_sum": null,
+    "pct_losses_by_ko_sum": null,
+    "pct_losses_by_submission_sum": null,
+    "avg_fight_duration_s_sum": null,
+    "pct_went_the_distance_sum": null,
+    "scheduled_rounds": 3,
+    "weight_kg": null,
+    "is_female_division": null,
+    "is_title_fight": null
+   },
+   "expected": {
+    "redProbability": 0.632110288283994,
+    "blueProbability": 0.36788971171600604,
+    "topFeatures": [
+     {
+      "name": "age_diff",
+      "value": -3.587067330761265,
+      "contribution": 0.266859769821167,
+      "direction": "red"
+     },
+     {
+      "name": "reach_cm_diff",
+      "value": 13.823335156736675,
+      "contribution": 0.045958492904901505,
+      "direction": "red"
+     },
+     {
+      "name": "height_cm_diff",
+      "value": 8.19919957668563,
+      "contribution": 0.022185035049915314,
+      "direction": "red"
+     },
+     {
+      "name": "takedowns_landed_per_fight_diff",
+      "value": 0.0,
+      "contribution": 0.012471687979996204,
+      "direction": "red"
+     },
+     {
+      "name": "control_time_seconds_per_fight_diff",
+      "value": -2.50555555555556,
+      "contribution": 0.009780324064195156,
+      "direction": "red"
+     }
+    ],
+    "featureContributions": {
+     "height_cm_diff": 0.022185035049915314,
+     "reach_cm_diff": 0.045958492904901505,
+     "age_diff": 0.266859769821167,
+     "sig_strikes_landed_per_fight_diff": -0.001528424210846424,
+     "sig_strike_accuracy_diff": -0.0017428689170628786,
+     "knockdowns_per_fight_diff": 0.0026788306422531605,
+     "takedowns_landed_per_fight_diff": 0.012471687979996204,
+     "takedown_accuracy_diff": 5.4221367463469505e-05,
+     "control_time_seconds_per_fight_diff": 0.009780324064195156,
+     "wins_last_5_diff": -0.006960954517126083,
+     "total_prior_fights_diff": -0.00623555202037096,
+     "total_rounds_fought_diff": -0.0032616399694234133,
+     "pct_wins_by_ko_diff": -0.0018653197912499309,
+     "days_since_last_fight_diff": -0.0024680159986019135,
+     "ranking_position_diff": 0.0,
+     "sig_strikes_absorbed_per_fight_diff": 0.004808364901691675,
+     "sig_strike_defense_diff": -0.005517793819308281,
+     "takedowns_absorbed_per_fight_diff": -0.002279080916196108,
+     "takedown_defense_diff": 0.0010613894555717707,
+     "avg_opponent_prior_win_rate_diff": 0.003360960865393281
+    },
+    "methodPrediction": {
+     "probabilities": {
+      "decision": 0.46068675502094825,
+      "ko": 0.29402276248462567,
+      "submission": 0.2452904824944262
+     },
+     "predicted": "decision"
+    }
+   }
+  },
+  {
+   "label": "veterans",
+   "feature_row": {
+    "height_cm_diff": -3.619470696654446,
+    "reach_cm_diff": -15.892149148290287,
+    "age_diff": -0.4932066505664494,
+    "sig_strikes_landed_per_fight_diff": -8.36365244843001,
+    "sig_strike_accuracy_diff": -0.06636518526222879,
+    "knockdowns_per_fight_diff": 0.6166144218299967,
+    "takedowns_landed_per_fight_diff": 1.7075479857518814,
+    "takedown_accuracy_diff": -0.542855443042648,
+    "control_time_seconds_per_fight_diff": -290.22939488661086,
+    "wins_last_5_diff": 3.0,
+    "total_prior_fights_diff": 5.0,
+    "total_rounds_fought_diff": 20.0,
+    "pct_wins_by_ko_diff": -0.1970963616005565,
+    "days_since_last_fight_diff": 24.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": -10.842901442530017,
+    "sig_strike_defense_diff": -0.016620305920805822,
+    "takedowns_absorbed_per_fight_diff": -1.5318289486611318,
+    "takedown_defense_diff": -0.38685051494154465,
+    "avg_opponent_prior_win_rate_diff": 0.02108895042407055
+   },
+   "method_row": {
+    "height_cm_diff": -3.619470696654446,
+    "reach_cm_diff": -15.892149148290287,
+    "age_diff": -0.4932066505664494,
+    "sig_strikes_landed_per_fight_diff": -8.36365244843001,
+    "sig_strike_accuracy_diff": -0.06636518526222879,
+    "knockdowns_per_fight_diff": 0.6166144218299967,
+    "takedowns_landed_per_fight_diff": 1.7075479857518814,
+    "takedown_accuracy_diff": -0.542855443042648,
+    "control_time_seconds_per_fight_diff": -290.22939488661086,
+    "wins_last_5_diff": 3.0,
+    "total_prior_fights_diff": 5.0,
+    "total_rounds_fought_diff": 20.0,
+    "pct_wins_by_ko_diff": -0.1970963616005565,
+    "days_since_last_fight_diff": 24.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": -10.842901442530017,
+    "sig_strike_defense_diff": -0.016620305920805822,
+    "takedowns_absorbed_per_fight_diff": -1.5318289486611318,
+    "takedown_defense_diff": -0.38685051494154465,
+    "avg_opponent_prior_win_rate_diff": 0.02108895042407055,
+    "pct_wins_by_ko_sum": 0.4352691224218565,
+    "pct_wins_by_submission_sum": 0.5019749567045902,
+    "pct_wins_by_decision_sum": 1.0627559208735535,
+    "knockdowns_per_fight_sum": 0.937145000287775,
+    "submission_attempts_per_fight_sum": 1.2664521542696576,
+    "takedowns_landed_per_fight_sum": 2.2937188324946933,
+    "control_time_seconds_per_fight_sum": 361.46681948867206,
+    "sig_strikes_landed_per_fight_sum": 132.6672010742515,
+    "total_prior_fights_sum": 27.0,
+    "pct_losses_by_ko_sum": 0.23676245840734206,
+    "pct_losses_by_submission_sum": 0.692447804140207,
+    "avg_fight_duration_s_sum": 1156.4280606952625,
+    "pct_went_the_distance_sum": 0.9480113954904907,
+    "scheduled_rounds": 5,
+    "weight_kg": 70.3,
+    "is_female_division": 0.0,
+    "is_title_fight": 1.0
+   },
+   "expected": {
+    "redProbability": 0.554682632951147,
+    "blueProbability": 0.44531736704885305,
+    "topFeatures": [
+     {
+      "name": "wins_last_5_diff",
+      "value": 3.0,
+      "contribution": 0.14220942556858063,
+      "direction": "red"
+     },
+     {
+      "name": "takedowns_landed_per_fight_diff",
+      "value": 1.7075479857518814,
+      "contribution": 0.08532696962356567,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strikes_landed_per_fight_diff",
+      "value": -8.36365244843001,
+      "contribution": -0.049943625926971436,
+      "direction": "blue"
+     },
+     {
+      "name": "takedown_defense_diff",
+      "value": -0.38685051494154465,
+      "contribution": -0.04351300746202469,
+      "direction": "blue"
+     },
+     {
+      "name": "sig_strike_defense_diff",
+      "value": -0.016620305920805822,
+      "contribution": -0.03972611576318741,
+      "direction": "blue"
+     }
+    ],
+    "featureContributions": {
+     "height_cm_diff": -0.0005514463409781456,
+     "reach_cm_diff": -0.038050174713134766,
+     "age_diff": 0.0025767162442207336,
+     "sig_strikes_landed_per_fight_diff": -0.049943625926971436,
+     "sig_strike_accuracy_diff": -0.0034133768640458584,
+     "knockdowns_per_fight_diff": 0.020970050245523453,
+     "takedowns_landed_per_fight_diff": 0.08532696962356567,
+     "takedown_accuracy_diff": -0.0007217461825348437,
+     "control_time_seconds_per_fight_diff": -0.029145922511816025,
+     "wins_last_5_diff": 0.14220942556858063,
+     "total_prior_fights_diff": 0.021528802812099457,
+     "total_rounds_fought_diff": 0.025196626782417297,
+     "pct_wins_by_ko_diff": -0.004610244184732437,
+     "days_since_last_fight_diff": -0.00433072354644537,
+     "ranking_position_diff": 0.0,
+     "sig_strikes_absorbed_per_fight_diff": 0.026849407702684402,
+     "sig_strike_defense_diff": -0.03972611576318741,
+     "takedowns_absorbed_per_fight_diff": 0.022278327494859695,
+     "takedown_defense_diff": -0.04351300746202469,
+     "avg_opponent_prior_win_rate_diff": 0.007032173685729504
+    },
+    "methodPrediction": {
+     "probabilities": {
+      "decision": 0.4266833062583044,
+      "ko": 0.3573173218130613,
+      "submission": 0.21599937192863428
+     },
+     "predicted": "decision"
+    }
+   }
+  },
+  {
+   "label": "identical fighters",
+   "feature_row": {
+    "height_cm_diff": 0.0,
+    "reach_cm_diff": 0.0,
+    "age_diff": 0.0,
+    "sig_strikes_landed_per_fight_diff": 0.0,
+    "sig_strike_accuracy_diff": 0.0,
+    "knockdowns_per_fight_diff": 0.0,
+    "takedowns_landed_per_fight_diff": 0.0,
+    "takedown_accuracy_diff": 0.0,
+    "control_time_seconds_per_fight_diff": 0.0,
+    "wins_last_5_diff": 0.0,
+    "total_prior_fights_diff": 0.0,
+    "total_rounds_fought_diff": 0.0,
+    "pct_wins_by_ko_diff": 0.0,
+    "days_since_last_fight_diff": 0.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": 0.0,
+    "sig_strike_defense_diff": 0.0,
+    "takedowns_absorbed_per_fight_diff": 0.0,
+    "takedown_defense_diff": 0.0,
+    "avg_opponent_prior_win_rate_diff": 0.0
+   },
+   "method_row": {
+    "height_cm_diff": 0.0,
+    "reach_cm_diff": 0.0,
+    "age_diff": 0.0,
+    "sig_strikes_landed_per_fight_diff": 0.0,
+    "sig_strike_accuracy_diff": 0.0,
+    "knockdowns_per_fight_diff": 0.0,
+    "takedowns_landed_per_fight_diff": 0.0,
+    "takedown_accuracy_diff": 0.0,
+    "control_time_seconds_per_fight_diff": 0.0,
+    "wins_last_5_diff": 0.0,
+    "total_prior_fights_diff": 0.0,
+    "total_rounds_fought_diff": 0.0,
+    "pct_wins_by_ko_diff": 0.0,
+    "days_since_last_fight_diff": 0.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": 0.0,
+    "sig_strike_defense_diff": 0.0,
+    "takedowns_absorbed_per_fight_diff": 0.0,
+    "takedown_defense_diff": 0.0,
+    "avg_opponent_prior_win_rate_diff": 0.0,
+    "pct_wins_by_ko_sum": 1.0666848239871711,
+    "pct_wins_by_submission_sum": 0.4653476676604744,
+    "pct_wins_by_decision_sum": 0.4679675083523545,
+    "knockdowns_per_fight_sum": 0.7054188023896386,
+    "submission_attempts_per_fight_sum": 2.340138255966914,
+    "takedowns_landed_per_fight_sum": 7.944344174304989,
+    "control_time_seconds_per_fight_sum": 268.5675599059817,
+    "sig_strikes_landed_per_fight_sum": 176.5524228161204,
+    "total_prior_fights_sum": 44.0,
+    "pct_losses_by_ko_sum": 0.36626397689472917,
+    "pct_losses_by_submission_sum": 0.32699957140442404,
+    "avg_fight_duration_s_sum": 1417.3227297615663,
+    "pct_went_the_distance_sum": 1.1032514112826775,
+    "scheduled_rounds": 3,
+    "weight_kg": 77.1,
+    "is_female_division": 0.0,
+    "is_title_fight": 0.0
+   },
+   "expected": {
+    "redProbability": 0.5,
+    "blueProbability": 0.5,
+    "topFeatures": [
+     {
+      "name": "height_cm_diff",
+      "value": 0.0,
+      "contribution": 0.0,
+      "direction": "red"
+     },
+     {
+      "name": "reach_cm_diff",
+      "value": 0.0,
+      "contribution": 0.0,
+      "direction": "red"
+     },
+     {
+      "name": "age_diff",
+      "value": 0.0,
+      "contribution": 0.0,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strikes_landed_per_fight_diff",
+      "value": 0.0,
+      "contribution": 0.0,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strike_accuracy_diff",
+      "value": 0.0,
+      "contribution": 0.0,
+      "direction": "red"
+     }
+    ],
+    "featureContributions": {
+     "height_cm_diff": 0.0,
+     "reach_cm_diff": 0.0,
+     "age_diff": 0.0,
+     "sig_strikes_landed_per_fight_diff": 0.0,
+     "sig_strike_accuracy_diff": 0.0,
+     "knockdowns_per_fight_diff": 0.0,
+     "takedowns_landed_per_fight_diff": 0.0,
+     "takedown_accuracy_diff": 0.0,
+     "control_time_seconds_per_fight_diff": 0.0,
+     "wins_last_5_diff": 0.0,
+     "total_prior_fights_diff": 0.0,
+     "total_rounds_fought_diff": 0.0,
+     "pct_wins_by_ko_diff": 0.0,
+     "days_since_last_fight_diff": 0.0,
+     "ranking_position_diff": 0.0,
+     "sig_strikes_absorbed_per_fight_diff": 0.0,
+     "sig_strike_defense_diff": 0.0,
+     "takedowns_absorbed_per_fight_diff": 0.0,
+     "takedown_defense_diff": 0.0,
+     "avg_opponent_prior_win_rate_diff": 0.0
+    },
+    "methodPrediction": {
+     "probabilities": {
+      "decision": 0.5989043800642864,
+      "ko": 0.2689962805233138,
+      "submission": 0.13209933941239999
+     },
+     "predicted": "decision"
+    }
+   }
+  },
+  {
+   "label": "veterans",
+   "feature_row": {
+    "height_cm_diff": -7.68519676162839,
+    "reach_cm_diff": -4.953746715195194,
+    "age_diff": 1.7431257594753404,
+    "sig_strikes_landed_per_fight_diff": 58.73630917137599,
+    "sig_strike_accuracy_diff": 0.012267921587623243,
+    "knockdowns_per_fight_diff": 0.2631918260692928,
+    "takedowns_landed_per_fight_diff": -1.0087083489211617,
+    "takedown_accuracy_diff": 0.0435304935224185,
+    "control_time_seconds_per_fight_diff": 196.17400872012405,
+    "wins_last_5_diff": -3.0,
+    "total_prior_fights_diff": 1.0,
+    "total_rounds_fought_diff": 2.0,
+    "pct_wins_by_ko_diff": 0.10505934961995733,
+    "days_since_last_fight_diff": 457.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": 33.43976716493795,
+    "sig_strike_defense_diff": -0.06910762064971565,
+    "takedowns_absorbed_per_fight_diff": 0.9927178731017485,
+    "takedown_defense_diff": -0.2689426923205657,
+    "avg_opponent_prior_win_rate_diff": -0.06015831152651874
+   },
+   "method_row": {
+    "height_cm_diff": -7.68519676162839,
+    "reach_cm_diff": -4.953746715195194,
+    "age_diff": 1.7431257594753404,
+    "sig_strikes_landed_per_fight_diff": 58.73630917137599,
+    "sig_strike_accuracy_diff": 0.012267921587623243,
+    "knockdowns_per_fight_diff": 0.2631918260692928,
+    "takedowns_landed_per_fight_diff": -1.0087083489211617,
+    "takedown_accuracy_diff": 0.0435304935224185,
+    "control_time_seconds_per_fight_diff": 196.17400872012405,
+    "wins_last_5_diff": -3.0,
+    "total_prior_fights_diff": 1.0,
+    "total_rounds_fought_diff": 2.0,
+    "pct_wins_by_ko_diff": 0.10505934961995733,
+    "days_since_last_fight_diff": 457.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": 33.43976716493795,
+    "sig_strike_defense_diff": -0.06910762064971565,
+    "takedowns_absorbed_per_fight_diff": 0.9927178731017485,
+    "takedown_defense_diff": -0.2689426923205657,
+    "avg_opponent_prior_win_rate_diff": -0.06015831152651874,
+    "pct_wins_by_ko_sum": 1.0216980707356202,
+    "pct_wins_by_submission_sum": 0.38743655551618394,
+    "pct_wins_by_decision_sum": 0.5908653737481957,
+    "knockdowns_per_fight_sum": 0.5174110213297423,
+    "submission_attempts_per_fight_sum": 1.9287992616079705,
+    "takedowns_landed_per_fight_sum": 5.426907039965312,
+    "control_time_seconds_per_fight_sum": 348.13355822394595,
+    "sig_strikes_landed_per_fight_sum": 118.70889256081266,
+    "total_prior_fights_sum": 15.0,
+    "pct_losses_by_ko_sum": 0.6919996204760095,
+    "pct_losses_by_submission_sum": 0.5512153342097356,
+    "avg_fight_duration_s_sum": 941.2932761825438,
+    "pct_went_the_distance_sum": 1.598077305519098,
+    "scheduled_rounds": 3,
+    "weight_kg": 52.2,
+    "is_female_division": 1.0,
+    "is_title_fight": null
+   },
+   "expected": {
+    "redProbability": 0.29776964073841006,
+    "blueProbability": 0.7022303592615899,
+    "topFeatures": [
+     {
+      "name": "sig_strikes_absorbed_per_fight_diff",
+      "value": 33.43976716493795,
+      "contribution": -0.19257932901382446,
+      "direction": "blue"
+     },
+     {
+      "name": "sig_strikes_landed_per_fight_diff",
+      "value": 58.73630917137599,
+      "contribution": 0.1508089005947113,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strike_defense_diff",
+      "value": -0.06910762064971565,
+      "contribution": -0.14295780658721924,
+      "direction": "blue"
+     },
+     {
+      "name": "wins_last_5_diff",
+      "value": -3.0,
+      "contribution": -0.1420793980360031,
+      "direction": "blue"
+     },
+     {
+      "name": "days_since_last_fight_diff",
+      "value": 457.0,
+      "contribution": -0.11985856294631958,
+      "direction": "blue"
+     }
+    ],
+    "featureContributions": {
+     "height_cm_diff": -0.012633191421627998,
+     "reach_cm_diff": -0.005290099419653416,
+     "age_diff": -0.062237516045570374,
+     "sig_strikes_landed_per_fight_diff": 0.1508089005947113,
+     "sig_strike_accuracy_diff": 0.011153112165629864,
+     "knockdowns_per_fight_diff": 0.021791020408272743,
+     "takedowns_landed_per_fight_diff": -0.060511112213134766,
+     "takedown_accuracy_diff": -0.0008043836569413543,
+     "control_time_seconds_per_fight_diff": 0.051609400659799576,
+     "wins_last_5_diff": -0.1420793980360031,
+     "total_prior_fights_diff": 0.0023057302460074425,
+     "total_rounds_fought_diff": -0.0004040380008518696,
+     "pct_wins_by_ko_diff": -0.0018642216455191374,
+     "days_since_last_fight_diff": -0.11985856294631958,
+     "ranking_position_diff": 0.0,
+     "sig_strikes_absorbed_per_fight_diff": -0.19257932901382446,
+     "sig_strike_defense_diff": -0.14295780658721924,
+     "takedowns_absorbed_per_fight_diff": -0.01575402542948723,
+     "takedown_defense_diff": -0.03319792076945305,
+     "avg_opponent_prior_win_rate_diff": -0.0055344440042972565
+    },
+    "methodPrediction": {
+     "probabilities": {
+      "decision": 0.4991970656252206,
+      "ko": 0.20026231744356626,
+      "submission": 0.30054061693121314
+     },
+     "predicted": "decision"
+    }
+   }
+  },
+  {
+   "label": "two debutants",
+   "feature_row": {
+    "height_cm_diff": -9.405919607218237,
+    "reach_cm_diff": -8.159147501950258,
+    "age_diff": -4.913990048128447,
+    "sig_strikes_landed_per_fight_diff": null,
+    "sig_strike_accuracy_diff": null,
+    "knockdowns_per_fight_diff": null,
+    "takedowns_landed_per_fight_diff": null,
+    "takedown_accuracy_diff": null,
+    "control_time_seconds_per_fight_diff": null,
+    "wins_last_5_diff": null,
+    "total_prior_fights_diff": null,
+    "total_rounds_fought_diff": null,
+    "pct_wins_by_ko_diff": null,
+    "days_since_last_fight_diff": null,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": null,
+    "sig_strike_defense_diff": null,
+    "takedowns_absorbed_per_fight_diff": null,
+    "takedown_defense_diff": null,
+    "avg_opponent_prior_win_rate_diff": null
+   },
+   "method_row": {
+    "height_cm_diff": -9.405919607218237,
+    "reach_cm_diff": -8.159147501950258,
+    "age_diff": -4.913990048128447,
+    "sig_strikes_landed_per_fight_diff": null,
+    "sig_strike_accuracy_diff": null,
+    "knockdowns_per_fight_diff": null,
+    "takedowns_landed_per_fight_diff": null,
+    "takedown_accuracy_diff": null,
+    "control_time_seconds_per_fight_diff": null,
+    "wins_last_5_diff": null,
+    "total_prior_fights_diff": null,
+    "total_rounds_fought_diff": null,
+    "pct_wins_by_ko_diff": null,
+    "days_since_last_fight_diff": null,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": null,
+    "sig_strike_defense_diff": null,
+    "takedowns_absorbed_per_fight_diff": null,
+    "takedown_defense_diff": null,
+    "avg_opponent_prior_win_rate_diff": null,
+    "pct_wins_by_ko_sum": null,
+    "pct_wins_by_submission_sum": null,
+    "pct_wins_by_decision_sum": null,
+    "knockdowns_per_fight_sum": null,
+    "submission_attempts_per_fight_sum": null,
+    "takedowns_landed_per_fight_sum": null,
+    "control_time_seconds_per_fight_sum": null,
+    "sig_strikes_landed_per_fight_sum": null,
+    "total_prior_fights_sum": null,
+    "pct_losses_by_ko_sum": null,
+    "pct_losses_by_submission_sum": null,
+    "avg_fight_duration_s_sum": null,
+    "pct_went_the_distance_sum": null,
+    "scheduled_rounds": 3,
+    "weight_kg": 120.2,
+    "is_female_division": 0.0,
+    "is_title_fight": 1.0
+   },
+   "expected": {
+    "redProbability": 0.5751914679828507,
+    "blueProbability": 0.4248085320171493,
+    "topFeatures": [
+     {
+      "name": "age_diff",
+      "value": -4.913990048128447,
+      "contribution": 0.26206234097480774,
+      "direction": "red"
+     },
+     {
+      "name": "height_cm_diff",
+      "value": -9.405919607218237,
+      "contribution": -0.036422617733478546,
+      "direction": "blue"
+     },
+     {
+      "name": "reach_cm_diff",
+      "value": -8.159147501950258,
+      "contribution": -0.02812633104622364,
+      "direction": "blue"
+     },
+     {
+      "name": "takedowns_landed_per_fight_diff",
+      "value": 0.0,
+      "contribution": 0.012518666684627533,
+      "direction": "red"
+     },
+     {
+      "name": "wins_last_5_diff",
+      "value": 0.0,
+      "contribution": -0.011930631473660469,
+      "direction": "blue"
+     }
+    ],
+    "featureContributions": {
+     "height_cm_diff": -0.036422617733478546,
+     "reach_cm_diff": -0.02812633104622364,
+     "age_diff": 0.26206234097480774,
+     "sig_strikes_landed_per_fight_diff": -0.004548296332359314,
+     "sig_strike_accuracy_diff": -0.0017428689170628786,
+     "knockdowns_per_fight_diff": 0.0014202473685145378,
+     "takedowns_landed_per_fight_diff": 0.012518666684627533,
+     "takedown_accuracy_diff": 5.4221367463469505e-05,
+     "control_time_seconds_per_fight_diff": 0.005975040607154369,
+     "wins_last_5_diff": -0.011930631473660469,
+     "total_prior_fights_diff": -0.005816812161356211,
+     "total_rounds_fought_diff": -0.0003854483366012573,
+     "pct_wins_by_ko_diff": -0.0017164690652862191,
+     "days_since_last_fight_diff": -0.0024680159986019135,
+     "ranking_position_diff": 0.0,
+     "sig_strikes_absorbed_per_fight_diff": 0.0025070756673812866,
+     "sig_strike_defense_diff": -0.0067637027241289616,
+     "takedowns_absorbed_per_fight_diff": -0.0025659133680164814,
+     "takedown_defense_diff": 0.0006889577489346266,
+     "avg_opponent_prior_win_rate_diff": 0.00594182126224041
+    },
+    "methodPrediction": {
+     "probabilities": {
+      "decision": 0.3353454424864687,
+      "ko": 0.42952132522691655,
+      "submission": 0.2351332322866148
+     },
+     "predicted": "ko"
+    }
+   }
+  },
+  {
+   "label": "veterans",
+   "feature_row": {
+    "height_cm_diff": -12.081899854429338,
+    "reach_cm_diff": -23.509308125179075,
+    "age_diff": -7.5180093633185905,
+    "sig_strikes_landed_per_fight_diff": -4.935931988187541,
+    "sig_strike_accuracy_diff": 0.22743517877555747,
+    "knockdowns_per_fight_diff": 0.6599714639454941,
+    "takedowns_landed_per_fight_diff": 2.8702034483105776,
+    "takedown_accuracy_diff": -0.009646943442134237,
+    "control_time_seconds_per_fight_diff": 9.004874789238102,
+    "wins_last_5_diff": -3.0,
+    "total_prior_fights_diff": 2.0,
+    "total_rounds_fought_diff": 7.0,
+    "pct_wins_by_ko_diff": -0.06890049122973155,
+    "days_since_last_fight_diff": -439.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": 9.963142851832199,
+    "sig_strike_defense_diff": 0.044211803654502724,
+    "takedowns_absorbed_per_fight_diff": 1.679932042861716,
+    "takedown_defense_diff": 0.12899636363420824,
+    "avg_opponent_prior_win_rate_diff": -0.0654535329448141
+   },
+   "method_row": {
+    "height_cm_diff": -12.081899854429338,
+    "reach_cm_diff": -23.509308125179075,
+    "age_diff": -7.5180093633185905,
+    "sig_strikes_landed_per_fight_diff": -4.935931988187541,
+    "sig_strike_accuracy_diff": 0.22743517877555747,
+    "knockdowns_per_fight_diff": 0.6599714639454941,
+    "takedowns_landed_per_fight_diff": 2.8702034483105776,
+    "takedown_accuracy_diff": -0.009646943442134237,
+    "control_time_seconds_per_fight_diff": 9.004874789238102,
+    "wins_last_5_diff": -3.0,
+    "total_prior_fights_diff": 2.0,
+    "total_rounds_fought_diff": 7.0,
+    "pct_wins_by_ko_diff": -0.06890049122973155,
+    "days_since_last_fight_diff": -439.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": 9.963142851832199,
+    "sig_strike_defense_diff": 0.044211803654502724,
+    "takedowns_absorbed_per_fight_diff": 1.679932042861716,
+    "takedown_defense_diff": 0.12899636363420824,
+    "avg_opponent_prior_win_rate_diff": -0.0654535329448141,
+    "pct_wins_by_ko_sum": 0.39124136248459807,
+    "pct_wins_by_submission_sum": 0.42888555868493117,
+    "pct_wins_by_decision_sum": 1.1798730788304708,
+    "knockdowns_per_fight_sum": 0.9114613131985272,
+    "submission_attempts_per_fight_sum": 2.3100671318578736,
+    "takedowns_landed_per_fight_sum": 3.9183698450279576,
+    "control_time_seconds_per_fight_sum": 484.7744557380478,
+    "sig_strikes_landed_per_fight_sum": 116.79539136368786,
+    "total_prior_fights_sum": 14.0,
+    "pct_losses_by_ko_sum": 0.09800154633895516,
+    "pct_losses_by_submission_sum": 0.4747212028160148,
+    "avg_fight_duration_s_sum": 1641.6653214984244,
+    "pct_went_the_distance_sum": 1.0175099210006484,
+    "scheduled_rounds": 5,
+    "weight_kg": null,
+    "is_female_division": 0.0,
+    "is_title_fight": 0.0
+   },
+   "expected": {
+    "redProbability": 0.6837083471301292,
+    "blueProbability": 0.3162916528698708,
+    "topFeatures": [
+     {
+      "name": "age_diff",
+      "value": -7.5180093633185905,
+      "contribution": 0.3549222946166992,
+      "direction": "red"
+     },
+     {
+      "name": "takedowns_landed_per_fight_diff",
+      "value": 2.8702034483105776,
+      "contribution": 0.12231417000293732,
+      "direction": "red"
+     },
+     {
+      "name": "days_since_last_fight_diff",
+      "value": -439.0,
+      "contribution": 0.1196344792842865,
+      "direction": "red"
+     },
+     {
+      "name": "wins_last_5_diff",
+      "value": -3.0,
+      "contribution": -0.11442437022924423,
+      "direction": "blue"
+     },
+     {
+      "name": "sig_strike_defense_diff",
+      "value": 0.044211803654502724,
+      "contribution": 0.08780811727046967,
+      "direction": "red"
+     }
+    ],
+    "featureContributions": {
+     "height_cm_diff": -0.03744231164455414,
+     "reach_cm_diff": -0.036729391664266586,
+     "age_diff": 0.3549222946166992,
+     "sig_strikes_landed_per_fight_diff": -0.019800804555416107,
+     "sig_strike_accuracy_diff": 0.011210972443223,
+     "knockdowns_per_fight_diff": 0.03142505884170532,
+     "takedowns_landed_per_fight_diff": 0.12231417000293732,
+     "takedown_accuracy_diff": -0.00037972209975123405,
+     "control_time_seconds_per_fight_diff": -0.004332657903432846,
+     "wins_last_5_diff": -0.11442437022924423,
+     "total_prior_fights_diff": -0.0032603302970528603,
+     "total_rounds_fought_diff": -0.0014100819826126099,
+     "pct_wins_by_ko_diff": -0.0010938934283331037,
+     "days_since_last_fight_diff": 0.1196344792842865,
+     "ranking_position_diff": 0.0,
+     "sig_strikes_absorbed_per_fight_diff": -0.015817886218428612,
+     "sig_strike_defense_diff": 0.08780811727046967,
+     "takedowns_absorbed_per_fight_diff": -0.022473182529211044,
+     "takedown_defense_diff": 0.013960623182356358,
+     "avg_opponent_prior_win_rate_diff": 0.0017467448487877846
+    },
+    "methodPrediction": {
+     "probabilities": {
+      "decision": 0.5149612996506383,
+      "ko": 0.2735977084104845,
+      "submission": 0.21144099193887728
+     },
+     "predicted": "decision"
+    }
+   }
+  },
+  {
+   "label": "both ranked",
+   "feature_row": {
+    "height_cm_diff": 6.231530802323192,
+    "reach_cm_diff": 4.926948670368432,
+    "age_diff": -8.167555199397714,
+    "sig_strikes_landed_per_fight_diff": -38.49337611353356,
+    "sig_strike_accuracy_diff": 0.15625310194036857,
+    "knockdowns_per_fight_diff": -0.1912128888185499,
+    "takedowns_landed_per_fight_diff": -0.30852272182762697,
+    "takedown_accuracy_diff": 0.6045370874478266,
+    "control_time_seconds_per_fight_diff": -20.610413720134744,
+    "wins_last_5_diff": 1.0,
+    "total_prior_fights_diff": 2.0,
+    "total_rounds_fought_diff": -5.0,
+    "pct_wins_by_ko_diff": -0.20677608148293025,
+    "days_since_last_fight_diff": 411.0,
+    "ranking_position_diff": -9.0,
+    "sig_strikes_absorbed_per_fight_diff": 22.14968296097104,
+    "sig_strike_defense_diff": -0.026514912331036533,
+    "takedowns_absorbed_per_fight_diff": 0.29402382589277654,
+    "takedown_defense_diff": -0.0779009400260291,
+    "avg_opponent_prior_win_rate_diff": -0.3465889030705751
+   },
+   "method_row": {
+    "height_cm_diff": 6.231530802323192,
+    "reach_cm_diff": 4.926948670368432,
+    "age_diff": -8.167555199397714,
+    "sig_strikes_landed_per_fight_diff": -38.49337611353356,
+    "sig_strike_accuracy_diff": 0.15625310194036857,
+    "knockdowns_per_fight_diff": -0.1912128888185499,
+    "takedowns_landed_per_fight_diff": -0.30852272182762697,
+    "takedown_accuracy_diff": 0.6045370874478266,
+    "control_time_seconds_per_fight_diff": -20.610413720134744,
+    "wins_last_5_diff": 1.0,
+    "total_prior_fights_diff": 2.0,
+    "total_rounds_fought_diff": -5.0,
+    "pct_wins_by_ko_diff": -0.20677608148293025,
+    "days_since_last_fight_diff": 411.0,
+    "ranking_position_diff": -9.0,
+    "sig_strikes_absorbed_per_fight_diff": 22.14968296097104,
+    "sig_strike_defense_diff": -0.026514912331036533,
+    "takedowns_absorbed_per_fight_diff": 0.29402382589277654,
+    "takedown_defense_diff": -0.0779009400260291,
+    "avg_opponent_prior_win_rate_diff": -0.3465889030705751,
+    "pct_wins_by_ko_sum": 0.9737868947412924,
+    "pct_wins_by_submission_sum": 0.5690461113383487,
+    "pct_wins_by_decision_sum": 0.45716699392035903,
+    "knockdowns_per_fight_sum": 0.6526464950736363,
+    "submission_attempts_per_fight_sum": 1.7603757093645966,
+    "takedowns_landed_per_fight_sum": 4.65080796729433,
+    "control_time_seconds_per_fight_sum": 90.54228453929478,
+    "sig_strikes_landed_per_fight_sum": 99.9769555074012,
+    "total_prior_fights_sum": 30.0,
+    "pct_losses_by_ko_sum": 0.17534767349750013,
+    "pct_losses_by_submission_sum": 1.2854973980248685,
+    "avg_fight_duration_s_sum": 1223.965627122157,
+    "pct_went_the_distance_sum": 1.0650684371647134,
+    "scheduled_rounds": 3,
+    "weight_kg": null,
+    "is_female_division": null,
+    "is_title_fight": null
+   },
+   "expected": {
+    "redProbability": 0.4954060700581664,
+    "blueProbability": 0.5045939299418336,
+    "topFeatures": [
+     {
+      "name": "age_diff",
+      "value": -8.167555199397714,
+      "contribution": 0.3512268662452698,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strikes_absorbed_per_fight_diff",
+      "value": 22.14968296097104,
+      "contribution": -0.13659626245498657,
+      "direction": "blue"
+     },
+     {
+      "name": "sig_strikes_landed_per_fight_diff",
+      "value": -38.49337611353356,
+      "contribution": -0.12652935087680817,
+      "direction": "blue"
+     },
+     {
+      "name": "wins_last_5_diff",
+      "value": 1.0,
+      "contribution": 0.09759097546339035,
+      "direction": "red"
+     },
+     {
+      "name": "days_since_last_fight_diff",
+      "value": 411.0,
+      "contribution": -0.09607131779193878,
+      "direction": "blue"
+     }
+    ],
+    "featureContributions": {
+     "height_cm_diff": 0.0004235549131408334,
+     "reach_cm_diff": 0.0006095007993280888,
+     "age_diff": 0.3512268662452698,
+     "sig_strikes_landed_per_fight_diff": -0.12652935087680817,
+     "sig_strike_accuracy_diff": 0.01224975474178791,
+     "knockdowns_per_fight_diff": -0.02017306536436081,
+     "takedowns_landed_per_fight_diff": -0.014986490830779076,
+     "takedown_accuracy_diff": -0.0019373535178601742,
+     "control_time_seconds_per_fight_diff": 0.0035824936348944902,
+     "wins_last_5_diff": 0.09759097546339035,
+     "total_prior_fights_diff": -0.0016984498361125588,
+     "total_rounds_fought_diff": 0.005358586553484201,
+     "pct_wins_by_ko_diff": -0.00212620641104877,
+     "days_since_last_fight_diff": -0.09607131779193878,
+     "ranking_position_diff": 0.0,
+     "sig_strikes_absorbed_per_fight_diff": -0.13659626245498657,
+     "sig_strike_defense_diff": -0.055493246763944626,
+     "takedowns_absorbed_per_fight_diff": -0.012340194545686245,
+     "takedown_defense_diff": 0.011950780637562275,
+     "avg_opponent_prior_win_rate_diff": -0.026399731636047363
+    },
+    "methodPrediction": {
+     "probabilities": {
+      "decision": 0.44072601457300864,
+      "ko": 0.33184632059166586,
+      "submission": 0.22742766483532553
+     },
+     "predicted": "decision"
+    }
+   }
+  },
+  {
+   "label": "veterans",
+   "feature_row": {
+    "height_cm_diff": 7.032786187559935,
+    "reach_cm_diff": 11.503582343916321,
+    "age_diff": 0.49249162132019464,
+    "sig_strikes_landed_per_fight_diff": 40.65592892971505,
+    "sig_strike_accuracy_diff": 0.11620199662020186,
+    "knockdowns_per_fight_diff": 0.013492776661347294,
+    "takedowns_landed_per_fight_diff": 0.79780087288177,
+    "takedown_accuracy_diff": -0.2646086010288474,
+    "control_time_seconds_per_fight_diff": 332.6838945649646,
+    "wins_last_5_diff": 2.0,
+    "total_prior_fights_diff": 2.0,
+    "total_rounds_fought_diff": -3.0,
+    "pct_wins_by_ko_diff": -0.1427114025836766,
+    "days_since_last_fight_diff": -117.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": -28.86837234314244,
+    "sig_strike_defense_diff": 0.1898489660566366,
+    "takedowns_absorbed_per_fight_diff": -0.1020345376815448,
+    "takedown_defense_diff": -0.23604497708938277,
+    "avg_opponent_prior_win_rate_diff": -0.14036070236091402
+   },
+   "method_row": {
+    "height_cm_diff": 7.032786187559935,
+    "reach_cm_diff": 11.503582343916321,
+    "age_diff": 0.49249162132019464,
+    "sig_strikes_landed_per_fight_diff": 40.65592892971505,
+    "sig_strike_accuracy_diff": 0.11620199662020186,
+    "knockdowns_per_fight_diff": 0.013492776661347294,
+    "takedowns_landed_per_fight_diff": 0.79780087288177,
+    "takedown_accuracy_diff": -0.2646086010288474,
+    "control_time_seconds_per_fight_diff": 332.6838945649646,
+    "wins_last_5_diff": 2.0,
+    "total_prior_fights_diff": 2.0,
+    "total_rounds_fought_diff": -3.0,
+    "pct_wins_by_ko_diff": -0.1427114025836766,
+    "days_since_last_fight_diff": -117.0,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": -28.86837234314244,
+    "sig_strike_defense_diff": 0.1898489660566366,
+    "takedowns_absorbed_per_fight_diff": -0.1020345376815448,
+    "takedown_defense_diff": -0.23604497708938277,
+    "avg_opponent_prior_win_rate_diff": -0.14036070236091402,
+    "pct_wins_by_ko_sum": 1.0072826042833514,
+    "pct_wins_by_submission_sum": 0.27782638514318714,
+    "pct_wins_by_decision_sum": 0.7148910105734614,
+    "knockdowns_per_fight_sum": 1.3701992428234049,
+    "submission_attempts_per_fight_sum": 0.5344188664934979,
+    "takedowns_landed_per_fight_sum": 4.385777708084167,
+    "control_time_seconds_per_fight_sum": 421.07250372474164,
+    "sig_strikes_landed_per_fight_sum": 95.13175941107062,
+    "total_prior_fights_sum": 36.0,
+    "pct_losses_by_ko_sum": 0.7753500550225187,
+    "pct_losses_by_submission_sum": 0.21187865275144907,
+    "avg_fight_duration_s_sum": 1206.738901613923,
+    "pct_went_the_distance_sum": 0.8961098626266324,
+    "scheduled_rounds": 3,
+    "weight_kg": 70.3,
+    "is_female_division": 0.0,
+    "is_title_fight": 1.0
+   },
+   "expected": {
+    "redProbability": 0.7846887495694445,
+    "blueProbability": 0.21531125043055555,
+    "topFeatures": [
+     {
+      "name": "sig_strikes_absorbed_per_fight_diff",
+      "value": -28.86837234314244,
+      "contribution": 0.19770537316799164,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strike_defense_diff",
+      "value": 0.1898489660566366,
+      "contribution": 0.19686783850193024,
+      "direction": "red"
+     },
+     {
+      "name": "wins_last_5_diff",
+      "value": 2.0,
+      "contribution": 0.14870256185531616,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strikes_landed_per_fight_diff",
+      "value": 40.65592892971505,
+      "contribution": 0.11469115316867828,
+      "direction": "red"
+     },
+     {
+      "name": "takedowns_landed_per_fight_diff",
+      "value": 0.79780087288177,
+      "contribution": 0.058531247079372406,
+      "direction": "red"
+     }
+    ],
+    "featureContributions": {
+     "height_cm_diff": -0.001662244787439704,
+     "reach_cm_diff": 0.03918101638555527,
+     "age_diff": 0.005974561907351017,
+     "sig_strikes_landed_per_fight_diff": 0.11469115316867828,
+     "sig_strike_accuracy_diff": 0.017264267429709435,
+     "knockdowns_per_fight_diff": 0.008641636930406094,
+     "takedowns_landed_per_fight_diff": 0.058531247079372406,
+     "takedown_accuracy_diff": 0.006355623714625835,
+     "control_time_seconds_per_fight_diff": 0.0509682334959507,
+     "wins_last_5_diff": 0.14870256185531616,
+     "total_prior_fights_diff": -0.0021179772447794676,
+     "total_rounds_fought_diff": 0.0010688332840800285,
+     "pct_wins_by_ko_diff": -0.0007473990553990006,
+     "days_since_last_fight_diff": 0.02356848120689392,
+     "ranking_position_diff": 0.0,
+     "sig_strikes_absorbed_per_fight_diff": 0.19770537316799164,
+     "sig_strike_defense_diff": 0.19686783850193024,
+     "takedowns_absorbed_per_fight_diff": 0.020465299487113953,
+     "takedown_defense_diff": -0.03656640648841858,
+     "avg_opponent_prior_win_rate_diff": 0.000977479387074709
+    },
+    "methodPrediction": {
+     "probabilities": {
+      "decision": 0.440087924656909,
+      "ko": 0.4074042868688729,
+      "submission": 0.15250778847421814
+     },
+     "predicted": "decision"
+    }
+   }
+  },
+  {
+   "label": "veterans + float NaN",
+   "feature_row": {
+    "height_cm_diff": 5.053720753748934,
+    "reach_cm_diff": NaN,
+    "age_diff": -4.128659277486939,
+    "sig_strikes_landed_per_fight_diff": -47.636068906507106,
+    "sig_strike_accuracy_diff": -0.2010158150357706,
+    "knockdowns_per_fight_diff": 0.08930670892585124,
+    "takedowns_landed_per_fight_diff": -0.361481299518815,
+    "takedown_accuracy_diff": -0.18905362471601284,
+    "control_time_seconds_per_fight_diff": 38.570051189576716,
+    "wins_last_5_diff": 0.0,
+    "total_prior_fights_diff": -17.0,
+    "total_rounds_fought_diff": -19.0,
+    "pct_wins_by_ko_diff": 0.34097170567290397,
+    "days_since_last_fight_diff": NaN,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": -19.221624382494895,
+    "sig_strike_defense_diff": 0.09418629261004241,
+    "takedowns_absorbed_per_fight_diff": -1.594283506279675,
+    "takedown_defense_diff": 0.09042955247005224,
+    "avg_opponent_prior_win_rate_diff": 0.2558666342863027
+   },
+   "method_row": {
+    "height_cm_diff": 5.053720753748934,
+    "reach_cm_diff": NaN,
+    "age_diff": -4.128659277486939,
+    "sig_strikes_landed_per_fight_diff": -47.636068906507106,
+    "sig_strike_accuracy_diff": -0.2010158150357706,
+    "knockdowns_per_fight_diff": 0.08930670892585124,
+    "takedowns_landed_per_fight_diff": -0.361481299518815,
+    "takedown_accuracy_diff": -0.18905362471601284,
+    "control_time_seconds_per_fight_diff": 38.570051189576716,
+    "wins_last_5_diff": 0.0,
+    "total_prior_fights_diff": -17.0,
+    "total_rounds_fought_diff": -19.0,
+    "pct_wins_by_ko_diff": 0.34097170567290397,
+    "days_since_last_fight_diff": NaN,
+    "ranking_position_diff": null,
+    "sig_strikes_absorbed_per_fight_diff": -19.221624382494895,
+    "sig_strike_defense_diff": 0.09418629261004241,
+    "takedowns_absorbed_per_fight_diff": -1.594283506279675,
+    "takedown_defense_diff": 0.09042955247005224,
+    "avg_opponent_prior_win_rate_diff": 0.2558666342863027,
+    "pct_wins_by_ko_sum": 0.9653106659658173,
+    "pct_wins_by_submission_sum": 0.26573144524185166,
+    "pct_wins_by_decision_sum": 0.7689578887923311,
+    "knockdowns_per_fight_sum": 0.5969179314696407,
+    "submission_attempts_per_fight_sum": 1.022024451274453,
+    "takedowns_landed_per_fight_sum": 5.305653041707849,
+    "control_time_seconds_per_fight_sum": 289.26913547334993,
+    "sig_strikes_landed_per_fight_sum": 84.07570666403238,
+    "total_prior_fights_sum": 29.0,
+    "pct_losses_by_ko_sum": 0.5650134985932795,
+    "pct_losses_by_submission_sum": 0.39099696896352765,
+    "avg_fight_duration_s_sum": 1263.996471451309,
+    "pct_went_the_distance_sum": 0.9428760622951028,
+    "scheduled_rounds": 3,
+    "weight_kg": 77.1,
+    "is_female_division": 0.0,
+    "is_title_fight": 0.0
+   },
+   "expected": {
+    "redProbability": 0.6450977206064359,
+    "blueProbability": 0.3549022793935641,
+    "topFeatures": [
+     {
+      "name": "age_diff",
+      "value": -4.128659277486939,
+      "contribution": 0.2677488327026367,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strike_defense_diff",
+      "value": 0.09418629261004241,
+      "contribution": 0.1601790189743042,
+      "direction": "red"
+     },
+     {
+      "name": "sig_strikes_landed_per_fight_diff",
+      "value": -47.636068906507106,
+      "contribution": -0.15024670958518982,
+      "direction": "blue"
+     },
+     {
+      "name": "sig_strikes_absorbed_per_fight_diff",
+      "value": -19.221624382494895,
+      "contribution": 0.10827025771141052,
+      "direction": "red"
+     },
+     {
+      "name": "total_prior_fights_diff",
+      "value": -17.0,
+      "contribution": -0.030709490180015564,
+      "direction": "blue"
+     }
+    ],
+    "featureContributions": {
+     "height_cm_diff": 0.005410165525972843,
+     "reach_cm_diff": 0.003739770036190748,
+     "age_diff": 0.2677488327026367,
+     "sig_strikes_landed_per_fight_diff": -0.15024670958518982,
+     "sig_strike_accuracy_diff": -0.00885016843676567,
+     "knockdowns_per_fight_diff": 0.008760761469602585,
+     "takedowns_landed_per_fight_diff": -0.029415052384138107,
+     "takedown_accuracy_diff": 0.0031619705259799957,
+     "control_time_seconds_per_fight_diff": 0.02002384141087532,
+     "wins_last_5_diff": -0.013790572993457317,
+     "total_prior_fights_diff": -0.030709490180015564,
+     "total_rounds_fought_diff": -0.013974007219076157,
+     "pct_wins_by_ko_diff": 0.003553262446075678,
+     "days_since_last_fight_diff": -0.0019690673798322678,
+     "ranking_position_diff": 0.0,
+     "sig_strikes_absorbed_per_fight_diff": 0.10827025771141052,
+     "sig_strike_defense_diff": 0.1601790189743042,
+     "takedowns_absorbed_per_fight_diff": 0.00466142687946558,
+     "takedown_defense_diff": 0.016428960487246513,
+     "avg_opponent_prior_win_rate_diff": 0.026854632422327995
+    },
+    "methodPrediction": {
+     "probabilities": {
+      "decision": 0.5059278612559692,
+      "ko": 0.3158434908777167,
+      "submission": 0.17822864786631418
+     },
+     "predicted": "decision"
+    }
+   }
+  }
+ ]
+}
