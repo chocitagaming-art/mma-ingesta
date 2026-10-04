@@ -9,7 +9,10 @@ adds it with the Anthropic SDK; this service only does the ML prediction.
 Contract (see PREDICTION_MICROSERVICE_HANDOFF.md):
     GET  /health  -> 200 {"status": "ok"} when the model is loaded and the DB
                      answers; 503 {"status": "unhealthy"} otherwise.
-    POST /predict  body {"red": <id>, "blue": <id>}
+    POST /predict  body {"red": <id>, "blue": <id>, "fightId": <id> (optional)}
+               fightId anchors the prediction to that bout of the two fighters
+               (context.anchor "fight"); without it, or when it is not their
+               bout, the pending bout ("pending") or today ("today"/"none").
         200 -> PredictionResponse (identical to api.py output, minus explanation*).
                Thin/absent history is still 200 with "lowConfidence": true.
                A non-finite float (NaN/Infinity) goes out as null, and is logged.
@@ -158,8 +161,19 @@ _data_lock = threading.Lock()
 
 
 class PredictRequest(BaseModel):
+    """Body of POST /predict.
+
+    ``fightId`` is optional: the fight page sends its own fight's id so the
+    prediction is anchored to that bout even once it is decided (its own result
+    never enters the history); /enfrentamiento sends none. An id that is not
+    these two fighters' bout is ignored (see api._get_latest_matchup_context).
+
+    Unknown fields are ignored (pydantic v2's default ``extra='ignore'``, kept on
+    purpose): the web may deploy a new field before this service knows it."""
+
     red: int
     blue: int
+    fightId: int | None = None
 
 
 def _error(status_code: int, message: str) -> JSONResponse:
@@ -256,7 +270,11 @@ def _existing_fighter_ids(ids: list[int]) -> set[int]:
 async def _on_validation_error(_request, _exc: RequestValidationError) -> JSONResponse:
     # Malformed bodies are a client error: remap FastAPI's default 422 to 400 so
     # the only 4xx the frontend sees from a bad body is a plain 400.
-    return _error(400, 'Invalid request body; expected JSON {"red": <int>, "blue": <int>}')
+    return _error(
+        400,
+        'Invalid request body; expected JSON {"red": <int>, "blue": <int>, '
+        '"fightId": <int, optional>}',
+    )
 
 
 @app.get("/health")
@@ -326,6 +344,7 @@ def predict_endpoint(
             fights_df=fights_df,
             rankings_df=rankings_df,
             history_df=history_df,
+            fight_id=body.fightId,
         )
         # Expose the model's training date so the UI can show it (#29).
         result["modelTrainedAt"] = model_trained_at(bundle)
@@ -342,9 +361,10 @@ def predict_endpoint(
         }
         if broken:
             LOGGER.error(
-                "Non-finite win probability for red=%s blue=%s: %s",
+                "Non-finite win probability for red=%s blue=%s fightId=%s: %s",
                 body.red,
                 body.blue,
+                body.fightId,
                 broken,
             )
             return _error(500, "Internal prediction error")
@@ -353,12 +373,15 @@ def predict_endpoint(
         payload = _json_safe(result, "", replaced)
         if replaced:
             LOGGER.warning(
-                "Non-finite floats sent as null for red=%s blue=%s: %s",
+                "Non-finite floats sent as null for red=%s blue=%s fightId=%s: %s",
                 body.red,
                 body.blue,
+                body.fightId,
                 ", ".join(replaced),
             )
         return payload
     except Exception:  # noqa: BLE001 - surface as a clean 500 for the frontend
-        LOGGER.exception("Prediction failed for red=%s blue=%s", body.red, body.blue)
+        LOGGER.exception(
+            "Prediction failed for red=%s blue=%s fightId=%s", body.red, body.blue, body.fightId
+        )
         return _error(500, "Internal prediction error")

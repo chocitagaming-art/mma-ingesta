@@ -249,6 +249,7 @@ def test_cancelled_bout_does_not_move_ortega_history_features(sqlite_base):
     )
 
     assert context["matchupDate"] == PENDING_DATE.isoformat()
+    assert (context["anchor"], context["anchorFightId"]) == ("pending", PENDING)
     ortega = context["blueHistory"]
     assert ortega["days_since_last_fight"] == (PENDING_DATE - ORTEGA_LAST_REAL_FIGHT).days == 404
     assert ortega["days_since_last_fight"] != (PENDING_DATE - CANCELLED_DATE).days
@@ -274,6 +275,7 @@ def test_decided_meeting_is_history_when_the_pair_is_predicted_today(sqlite_base
     )
 
     assert context["matchupDate"] == TODAY.isoformat()
+    assert (context["anchor"], context["anchorFightId"]) == ("today", None)
     assert context["scheduledRounds"] == DEFAULT_SCHEDULED_ROUNDS
     hooker = context["redHistory"]
     assert hooker is not None
@@ -283,6 +285,50 @@ def test_decided_meeting_is_history_when_the_pair_is_predicted_today(sqlite_base
     # OTHER lost to Hooker (1-jun-2024) and to Ortega (13-oct-2025).
     assert other["total_prior_fights"] == 2
     assert other["days_since_last_fight"] == (TODAY - ORTEGA_LAST_REAL_FIGHT).days
+
+
+def test_fight_id_of_the_cancelled_bout_falls_back_to_today(sqlite_base, frozen_today):
+    """The fight page of the cancelled Moicano-Ortega bout sends its id. The
+    loader dropped it, so it is not in the frame: the pair falls back to the
+    normal rule (nothing pending -> today), exactly as without the id. A
+    cancelled bout has no result, so this fallback cannot leak one."""
+    fights_df = features_db.load_base_dataframe("sqlite://unused")
+    rankings_df = pd.DataFrame(
+        columns=["fighter_id", "division", "rank_position", "snapshot_date"]
+    )
+
+    _row, _method_row, with_id, _low = api._build_feature_row(
+        fights_df, rankings_df, MOICANO, ORTEGA, physical={}, fight_id=CANCELLED
+    )
+    _row, _method_row, without, _low = api._build_feature_row(
+        fights_df, rankings_df, MOICANO, ORTEGA, physical={}
+    )
+
+    assert with_id == without
+    assert with_id["anchor"] == "today"
+    assert with_id["anchorFightId"] is None
+    assert with_id["matchupDate"] == TODAY.isoformat()
+
+
+def test_fight_id_of_a_decided_bout_leaves_its_result_out(sqlite_base, frozen_today):
+    """Through the real loader: Ortega-OTHER (13-oct-2025) asked for by its id
+    anchors to that date. Ortega had no fight before it (his history is None),
+    and OTHER comes in with only the loss to Hooker, not the one to Ortega."""
+    fights_df = features_db.load_base_dataframe("sqlite://unused")
+    rankings_df = pd.DataFrame(
+        columns=["fighter_id", "division", "rank_position", "snapshot_date"]
+    )
+
+    _row, _method_row, context, _low = api._build_feature_row(
+        fights_df, rankings_df, ORTEGA, OTHER, physical={}, fight_id=DECIDED_ORTEGA
+    )
+
+    assert context["anchor"] == "fight"
+    assert context["anchorFightId"] == DECIDED_ORTEGA
+    assert context["matchupDate"] == ORTEGA_LAST_REAL_FIGHT.isoformat()
+    assert context["redHistory"] is None
+    assert context["blueHistory"]["total_prior_fights"] == 1
+    assert context["blueHistory"]["latest_prior_fight_date"] == date(2024, 6, 1)
 
 
 # ------------------------------------------------ _get_latest_matchup_context
@@ -350,7 +396,7 @@ def test_old_draw_or_no_contest_is_not_the_pending_bout(method, frozen_today):
 
     # The rematch is the most recent bout of either fighter: its division stays,
     # its 5 title rounds do not (there is no real bout to take them from).
-    assert context == (TODAY, "Lightweight", DEFAULT_SCHEDULED_ROUNDS, None)
+    assert context == (TODAY, "Lightweight", DEFAULT_SCHEDULED_ROUNDS, None, "today", None)
 
 
 @pytest.mark.parametrize("method", DRAW_OR_NO_CONTEST_METHODS)
@@ -369,7 +415,7 @@ def test_pair_whose_only_meeting_is_a_draw_or_no_contest_anchors_to_today(
 
     context = api._get_latest_matchup_context(fights_df, RED, BLUE)
 
-    assert context == (TODAY, "Lightweight", DEFAULT_SCHEDULED_ROUNDS, None)
+    assert context == (TODAY, "Lightweight", DEFAULT_SCHEDULED_ROUNDS, None, "today", None)
 
 
 @pytest.mark.parametrize("method", DRAW_OR_NO_CONTEST_METHODS)
@@ -390,16 +436,9 @@ def test_pending_bout_still_wins_over_old_draw_or_no_contest(method):
         ),
     )
 
-    matchup_date, weight_class, scheduled_rounds, is_title = api._get_latest_matchup_context(
-        fights_df, RED, BLUE
-    )
+    context = api._get_latest_matchup_context(fights_df, RED, BLUE)
 
-    assert (matchup_date, weight_class, scheduled_rounds, is_title) == (
-        date(2026, 11, 21),
-        "Featherweight",
-        5,
-        True,
-    )
+    assert context == (date(2026, 11, 21), "Featherweight", 5, True, "pending", 3)
 
 
 def test_pending_bout_is_preferred_even_when_a_decided_meeting_is_later():
@@ -410,12 +449,11 @@ def test_pending_bout_is_preferred_even_when_a_decided_meeting_is_later():
         _bout(2, date(2024, 8, 17), RED, BLUE, RED, "KO/TKO"),
     )
 
-    matchup_date, _wc, scheduled_rounds, _title = api._get_latest_matchup_context(
-        fights_df, RED, BLUE
-    )
+    context = api._get_latest_matchup_context(fights_df, RED, BLUE)
 
-    assert matchup_date == date(2024, 2, 3)
-    assert scheduled_rounds == 5
+    assert context.matchup_date == date(2024, 2, 3)
+    assert context.scheduled_rounds == 5
+    assert (context.anchor, context.anchor_fight_id) == ("pending", 1)
 
 
 def test_pending_needs_both_no_winner_and_no_method(frozen_today):
@@ -429,7 +467,7 @@ def test_pending_needs_both_no_winner_and_no_method(frozen_today):
 
     context = api._get_latest_matchup_context(fights_df, RED, BLUE)
 
-    assert context == (TODAY, "Welterweight", DEFAULT_SCHEDULED_ROUNDS, None)
+    assert context == (TODAY, "Welterweight", DEFAULT_SCHEDULED_ROUNDS, None, "today", None)
 
 
 def test_pair_without_pending_bout_anchors_to_today(frozen_today):
@@ -448,7 +486,7 @@ def test_pair_without_pending_bout_anchors_to_today(frozen_today):
 
     context = api._get_latest_matchup_context(fights_df, RED, BLUE)
 
-    assert context == (TODAY, "Lightweight", DEFAULT_SCHEDULED_ROUNDS, None)
+    assert context == (TODAY, "Lightweight", DEFAULT_SCHEDULED_ROUNDS, None, "today", None)
 
 
 def test_pair_with_only_decided_meetings_anchors_to_today(frozen_today):
@@ -464,7 +502,7 @@ def test_pair_with_only_decided_meetings_anchors_to_today(frozen_today):
 
     context = api._get_latest_matchup_context(fights_df, RED, BLUE)
 
-    assert context == (TODAY, "Welterweight", DEFAULT_SCHEDULED_ROUNDS, None)
+    assert context == (TODAY, "Welterweight", DEFAULT_SCHEDULED_ROUNDS, None, "today", None)
 
 
 @pytest.mark.parametrize(
@@ -492,7 +530,7 @@ def test_pending_bout_plus_older_meetings_still_anchors_to_the_pending_bout(
 
     context = api._get_latest_matchup_context(fights_df, RED, BLUE)
 
-    assert context == (pending_date, "Featherweight", 5, True)
+    assert context == (pending_date, "Featherweight", 5, True, "pending", 4)
 
 
 def test_weight_class_comes_from_either_fighters_most_recent_bout(frozen_today):
@@ -508,4 +546,6 @@ def test_weight_class_comes_from_either_fighters_most_recent_bout(frozen_today):
     forward = api._get_latest_matchup_context(fights_df, RED, BLUE)
     swapped = api._get_latest_matchup_context(fights_df, BLUE, RED)
 
-    assert forward == swapped == (TODAY, "Welterweight", DEFAULT_SCHEDULED_ROUNDS, None)
+    assert forward == swapped == (
+        TODAY, "Welterweight", DEFAULT_SCHEDULED_ROUNDS, None, "today", None
+    )

@@ -69,6 +69,46 @@ def test_predict_passes_method_prediction_through(client):
     assert set(method["probabilities"]) == {"decision", "ko", "submission"}
 
 
+@pytest.fixture
+def predict_kwargs(monkeypatch):
+    """The keyword arguments the endpoint hands to api.predict."""
+    seen: dict = {}
+    fake = _fake_predict()
+
+    def _capture(red, blue, **kwargs):
+        seen.clear()
+        seen.update(kwargs)
+        return fake(red, blue)
+
+    monkeypatch.setattr(service, "predict", _capture)
+    return seen
+
+
+def test_predict_forwards_the_fight_id(client, predict_kwargs):
+    # The fight page asks for the prediction of ITS fight: the id travels to
+    # api.predict, which anchors to that bout.
+    response = client.post("/predict", json={"red": 1, "blue": 2, "fightId": 17})
+    assert response.status_code == 200
+    assert predict_kwargs["fight_id"] == 17
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"red": 1, "blue": 2},
+        {"red": 1, "blue": 2, "fightId": None},
+        # snake_case is not the contract: an unknown field, ignored like any other.
+        {"red": 1, "blue": 2, "fight_id": 17},
+    ],
+    ids=["absent", "null", "snake-case"],
+)
+def test_predict_without_fight_id_forwards_none(client, predict_kwargs, body):
+    # /enfrentamiento sends no id: the pair rule (pending bout, else today).
+    response = client.post("/predict", json=body)
+    assert response.status_code == 200
+    assert predict_kwargs["fight_id"] is None
+
+
 def test_predict_same_fighter_is_400(client):
     response = client.post("/predict", json={"red": 5, "blue": 5})
     assert response.status_code == 400

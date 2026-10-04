@@ -1,6 +1,8 @@
 {
   "blueProbability": 0.3455349217145798,
   "context": {
+    "anchor": "today",
+    "anchorFightId": null,
     "blueHistory": {
       "avg_opponent_prior_win_rate": 0.703275393427748,
       "control_time_seconds_per_fight": 45.857142857142854,
