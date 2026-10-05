@@ -20,8 +20,11 @@ what would open a socket to Neon is stubbed):
 * a bundle with the block is exactly corner-symmetric and its pairs come out as
   one factor each;
 * in the service: fight_history_espn is cached with the same TTL as fights, a
-  failed load degrades to "unknown" (200, block None, counted, /health says so),
-  and /health answers from memory only.
+  failed load degrades to "unknown" (200, block None, counted, /health says so)
+  until a later load succeeds, a 'base' bundle loads none of it, and /health
+  answers from memory only;
+* load_preufc_history reads the known ids and the rows in ONE read-only snapshot,
+  the ids first, so a sweep committed mid-load never yields "known without rows".
 """
 
 from __future__ import annotations
@@ -76,6 +79,7 @@ STUB_URL = "postgresql://stub.invalid"
 # ------------------------------------------------------------------ the synthetic world
 
 A, B, X, Y, D, U, LONER, STRANGER = 1, 2, 3, 4, 5, 6, 7, 8
+W = 10  # B's only draw: nothing else on record
 
 PHYSICAL = {
     A: {"birth_date": date(1994, 1, 1), "height_cm": 180.0, "reach_cm": 185.0},
@@ -90,11 +94,13 @@ PHYSICAL = {
     # Neither has any UFC bout: the "none" anchor.
     LONER: {"birth_date": date(1998, 4, 4), "height_cm": 170.0, "reach_cm": 172.0},
     STRANGER: {"birth_date": date(1996, 5, 5), "height_cm": 172.0, "reach_cm": 175.0},
+    W: {"birth_date": date(1993, 8, 8), "height_cm": 179.0, "reach_cm": 182.0},
 }
 
 FIGHT_DAY = date(2026, 10, 3)
 PENDING_DATE = date(2026, 12, 12)
 TODAY = date(2026, 10, 10)
+DRAW = 15  # B-W before FIGHT_DAY: a draw (winner NULL, method M-DEC)
 THE_FIGHT = 20  # A-B on FIGHT_DAY, decided: B won
 SAME_CARD = 21  # X-Y on FIGHT_DAY too
 DEBUT = 22  # D-U on FIGHT_DAY, D's UFC debut
@@ -122,8 +128,11 @@ def _bout(
     end_time: str | None = "3:10",
     scheduled_rounds: int = 3,
     landed: int = 40,
+    with_stats: bool | None = None,
 ) -> dict:
-    """A bout with every column load_base_dataframe returns."""
+    """A bout with every column load_base_dataframe returns. It has fight_stats
+    when it was fought: by default, when it has a winner (a draw passes
+    ``with_stats=True``)."""
     row = {
         "fight_id": fight_id,
         "event_date": event_date,
@@ -138,7 +147,7 @@ def _bout(
         "scheduled_rounds": scheduled_rounds,
         "weight_class": "Welterweight",
     }
-    decided = winner is not None
+    fought = winner is not None if with_stats is None else with_stats
     for corner, fighter in (("red", red), ("blue", blue)):
         physical = PHYSICAL[fighter]
         row[f"{corner}_birth_date"] = physical["birth_date"]
@@ -154,7 +163,7 @@ def _bout(
             "knockdowns": 1 if corner == "red" else 0,
         }
         for stat, value in stats.items():
-            row[f"{corner}_{stat}"] = value if decided else None
+            row[f"{corner}_{stat}"] = value if fought else None
     return row
 
 
@@ -168,6 +177,10 @@ def _card() -> pd.DataFrame:
         _bout(12, date(2025, 2, 1), A, Y, A, "SUB - Rear Naked Choke", landed=33),
         _bout(13, date(2025, 3, 1), X, B, B, landed=47),
         _bout(14, date(2025, 9, 20), U, Y, Y, "S-DEC", end_round=3, end_time="5:00"),
+        _bout(
+            DRAW, date(2026, 3, 7), B, W, None, "M-DEC",
+            end_round=3, end_time="5:00", with_stats=True,
+        ),
         _bout(THE_FIGHT, FIGHT_DAY, A, B, B, landed=61),
         _bout(SAME_CARD, FIGHT_DAY, X, Y, Y),
         _bout(DEBUT, FIGHT_DAY, D, U, D, "SUB"),
@@ -308,9 +321,10 @@ def test_served_row_with_fight_anchor_is_the_training_composition(fight_id, red,
 def test_rows_on_or_after_the_fight_date_never_count():
     row, *_ = _served(A, B, fight_id=THE_FIGHT)
 
-    # UFC: A had 10 and 12 before; THE_FIGHT itself and AFTER do not count.
+    # UFC: A had 10 and 12 before; THE_FIGHT itself and AFTER do not count. B had
+    # 11, 13 and the DRAW.
     assert row["ufc_prev_fights_red"] == 2
-    assert row["ufc_prev_fights_blue"] == 2
+    assert row["ufc_prev_fights_blue"] == 3
     # ESPN: 101-103; the same-day 104 and the later 105 do not count.
     assert row["espn_has_history_red"] == 1
     assert row["espn_prev_fights_red"] == 3
@@ -331,6 +345,31 @@ def test_rows_on_or_after_the_fight_date_never_count():
     # U has ESPN rows but no ESPN link: "don't know", has_history included.
     assert all(row[f"{base}_blue"] is None for base in PREUFC_BASES)
     assert all(row[column] is None for column in PREUFC_DIFF_COLUMNS)
+
+
+def test_a_prior_draw_counts_as_a_ufc_fight_served_and_trained():
+    """The pre-registration's tiers, and the shadow's "novato" (min of the SERVED
+    ufc_prev_fights), count draws and no contests. B's draw has no winner and a
+    method, M-DEC: served and in the training CSV it is one more prior fight."""
+    card = _card()
+    draw = card[card["fight_id"] == DRAW].iloc[0]
+    assert pd.isna(draw["winner_id"]) and draw["method"] == "M-DEC"
+    assert draw["event_date"] < FIGHT_DAY
+    assert B in (draw["fighter_red_id"], draw["fighter_blue_id"])
+
+    row, *_ = _served(A, B, fight_id=THE_FIGHT)
+    dataset = build_training_dataset(
+        card,
+        EMPTY_RANKINGS,
+        espn_by_fighter=index_espn_history(_espn()),
+        known_fighter_ids=KNOWN,
+    ).dataset
+    trained = dataset[dataset["fight_id"] == THE_FIGHT].iloc[0]
+
+    assert row["ufc_prev_fights_blue"] == 3  # 11, 13 and the draw
+    assert trained["ufc_prev_fights_blue"] == 3
+    # The draw itself is no training row (no winner), only history.
+    assert DRAW not in set(dataset["fight_id"])
 
 
 @pytest.mark.parametrize(
@@ -490,7 +529,7 @@ def test_unavailable_history_serves_the_whole_block_as_unknown():
 
     assert all(row[column] is None for column in PREUFC_COLUMNS + PREUFC_DIFF_COLUMNS)
     # The UFC counts do not come from ESPN: still there.
-    assert (row["ufc_prev_fights_red"], row["ufc_prev_fights_blue"]) == (2, 2)
+    assert (row["ufc_prev_fights_red"], row["ufc_prev_fights_blue"]) == (2, 3)
 
 
 def test_needs_preufc_history_only_for_the_block():
@@ -724,6 +763,7 @@ def _synthetic_bundle(feature_set: str, nan_policy: str, calibrated: bool) -> di
 
 BUNDLE_KINDS = {
     "legacy": ("legacy", "median", True),
+    "base-native": ("base", "native", False),
     "preufc-native": ("preufc", "native", False),
     "preufc-median-calibrated": ("preufc", "median", True),
     "preufc_diff-native-calibrated": ("preufc_diff", "native", True),
@@ -942,6 +982,29 @@ def test_service_with_a_legacy_bundle_reads_no_espn(svc, bundles):
     }
 
 
+def test_service_with_a_base_bundle_reads_no_espn(svc, bundles):
+    """Arm A ('base') adds ufc_prev_fights, which comes from `fights`: the service
+    loads fight_history_espn if and only if the bundle reads the pre-UFC block."""
+    svc.use(bundles["base-native"])
+
+    response = svc.client.post("/predict", json=THE_FIGHT_REQUEST)
+
+    assert response.status_code == 200, response.text
+    assert svc.loads == []
+    assert service._cache["preufc_history"] is None
+    values = response.json()["featureValues"]
+    assert list(values) == FEATURE_SETS["base"]
+    assert (values["ufc_prev_fights_red"], values["ufc_prev_fights_blue"]) == (2, 3)
+    assert _health(svc)["preUfc"] == {
+        "needed": False,
+        "state": "not_needed",
+        "rows": None,
+        "knownFighters": None,
+        "loadedAt": None,
+        "degradedPredictions": 0,
+    }
+
+
 def test_service_loads_espn_with_the_fights_once_per_ttl(svc, bundles):
     svc.use(bundles["preufc-native"])
 
@@ -993,7 +1056,7 @@ def test_espn_failure_degrades_to_unknown_and_is_counted(svc, bundles, caplog):
     assert math.isfinite(body["redProbability"])
     values = body["featureValues"]
     assert all(values[column] is None for column in PREUFC_COLUMNS)
-    assert (values["ufc_prev_fights_red"], values["ufc_prev_fights_blue"]) == (2, 2)
+    assert (values["ufc_prev_fights_red"], values["ufc_prev_fights_blue"]) == (2, 3)
     assert any(
         record.levelno == logging.ERROR and "fight_history_espn" in record.getMessage()
         for record in caplog.records
@@ -1009,6 +1072,72 @@ def test_espn_failure_degrades_to_unknown_and_is_counted(svc, bundles, caplog):
     assert again.status_code == 200, again.text
     assert svc.loads == [STUB_URL]
     assert _health(svc)["preUfc"]["degradedPredictions"] == 2
+
+
+def _expire_the_data_ttl() -> None:
+    service._cache["loaded_at"] -= service.DATA_TTL_SECONDS + 1
+
+
+def test_the_service_recovers_when_a_later_load_succeeds(svc, bundles):
+    """A failed load must not outlive its cause. Once the TTL expires and a load
+    succeeds, the block is served again, /health says ok and the counter stops.
+    A degradation that stuck while /health said ok would keep the keep-alive
+    green over a silent failure."""
+    svc.use(bundles["preufc-native"])
+    svc.fail_with = RuntimeError("could not connect to server")
+    failed = svc.client.post("/predict", json=THE_FIGHT_REQUEST)
+    assert failed.status_code == 200, failed.text
+    assert _health(svc)["preUfc"]["state"] == "unavailable"
+    assert _health(svc)["preUfc"]["degradedPredictions"] == 1
+
+    svc.fail_with = None
+    _expire_the_data_ttl()
+    recovered = svc.client.post("/predict", json=THE_FIGHT_REQUEST)
+
+    assert recovered.status_code == 200, recovered.text
+    assert svc.loads == [STUB_URL, STUB_URL]
+    assert service._cache["preufc_history"] is not api.UNAVAILABLE_PREUFC_HISTORY
+    values = recovered.json()["featureValues"]
+    assert values["espn_has_history_red"] == 1
+    expected = _training_composition(A, B, FIGHT_DAY)
+    for column in PREUFC_COLUMNS:
+        assert _same(values[column], expected[column]), column
+    pre_ufc = _health(svc)["preUfc"]
+    assert pre_ufc["state"] == "ok"
+    assert pre_ufc["rows"] == len(ESPN_ROWS)
+    assert pre_ufc["knownFighters"] == len(KNOWN)
+    assert isinstance(pre_ufc["loadedAt"], str)
+    assert pre_ufc["degradedPredictions"] == 1  # the failed one, and no more
+
+    again = svc.client.post("/predict", json={"red": B, "blue": A})
+    assert again.status_code == 200, again.text
+    assert _health(svc)["preUfc"]["degradedPredictions"] == 1
+
+
+def test_a_failed_reload_after_a_good_one_clears_the_health_figures(svc, bundles):
+    """rows, knownFighters and loadedAt describe the data being SERVED: after a
+    failed reload that is nothing, never the copy the failure replaced."""
+    svc.use(bundles["preufc-native"])
+    assert svc.client.post("/predict", json=THE_FIGHT_REQUEST).status_code == 200
+    loaded = _health(svc)["preUfc"]
+    assert (loaded["state"], loaded["rows"]) == ("ok", len(ESPN_ROWS))
+    assert loaded["loadedAt"] is not None
+
+    svc.fail_with = RuntimeError("could not connect to server")
+    _expire_the_data_ttl()
+    response = svc.client.post("/predict", json=THE_FIGHT_REQUEST)
+
+    assert response.status_code == 200, response.text
+    assert all(response.json()["featureValues"][c] is None for c in PREUFC_COLUMNS)
+    assert service._cache["preufc_history"] is api.UNAVAILABLE_PREUFC_HISTORY
+    assert _health(svc)["preUfc"] == {
+        "needed": True,
+        "state": "unavailable",
+        "rows": None,
+        "knownFighters": None,
+        "loadedAt": None,
+        "degradedPredictions": 1,
+    }
 
 
 def test_service_never_lets_api_predict_read_espn_per_request(
