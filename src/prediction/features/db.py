@@ -114,6 +114,14 @@ def load_rankings_dataframe(database_url: str) -> pd.DataFrame:
     return dataframe
 
 
+def fetch_espn_history_rows(connection: PgConnection) -> list[dict]:
+    """The raw rows of ESPN_HISTORY_SQL, as psycopg2 hands them back (int, date,
+    str, bool, None). preufc_snapshot.py freezes exactly these."""
+    with cursor(connection) as db_cursor:
+        db_cursor.execute(ESPN_HISTORY_SQL)
+        return db_cursor.fetchall()
+
+
 def load_espn_history_dataframe(connection: PgConnection) -> pd.DataFrame:
     """Every fight_history_espn row the pre-UFC block reads, DWCS included.
 
@@ -121,9 +129,7 @@ def load_espn_history_dataframe(connection: PgConnection) -> pd.DataFrame:
     is pooled. An empty table still yields the ESPN_HISTORY_COLUMNS, so the index
     and the block keep working on it.
     """
-    with cursor(connection) as db_cursor:
-        db_cursor.execute(ESPN_HISTORY_SQL)
-        rows = db_cursor.fetchall()
+    rows = fetch_espn_history_rows(connection)
     return pd.DataFrame(rows, columns=ESPN_HISTORY_COLUMNS)
 
 
