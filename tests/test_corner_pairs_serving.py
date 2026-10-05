@@ -273,6 +273,11 @@ def serve(monkeypatch):
     )
     monkeypatch.setattr(api, "_load_fighter_physical", lambda _url, ids: {})
     monkeypatch.setattr(api, "_load_fighter_profiles", _profiles)
+    # A pair bundle makes api.predict read fight_history_espn; the row is stubbed
+    # below, so what it reads is never used.
+    monkeypatch.setattr(
+        api, "load_preufc_history", lambda _url: api.UNAVAILABLE_PREUFC_HISTORY
+    )
     monkeypatch.setattr(api, "_build_feature_row", _feature_rows)
 
     def _serve(bundle: dict, red: int, blue: int) -> dict:
@@ -522,15 +527,23 @@ def test_pair_value_none_when_one_side_missing(monkeypatch, raw_row):
 
 def test_half_a_pair_in_a_bundle_stays_its_own_factor(monkeypatch):
     """A bundle should never hold half a pair (whole pairs are dropped together),
-    but the ranking is informative and must not 500 over it."""
+    but the ranking is informative and must not 500 over it. Its value is None:
+    the one corner the booster saw may be an imputed median, and a single
+    fighter's number is not a red-minus-blue difference anyway."""
     columns = ["age_diff", "espn_win_rate_red"]
     transformed = np.array([[1.0, 0.7]])
     _pin_raw_contributions(monkeypatch, forward=[0.2, 0.1], swapped=[-0.2, -0.1])
 
     top, contributions = api._compute_top_features(
-        object(), columns, transformed, -transformed, raw_row={"age_diff": 1.0}
+        object(),
+        columns,
+        transformed,
+        -transformed,
+        raw_row={"age_diff": 1.0, "espn_win_rate_red": 0.7},
     )
 
     assert [f["name"] for f in top] == ["age_diff", "espn_win_rate_red"]
-    assert top[1]["value"] == pytest.approx(0.7)
+    assert top[0]["value"] == pytest.approx(1.0)
+    assert top[1]["value"] is None
+    assert top[1]["contribution"] == pytest.approx(0.1)
     assert set(contributions) == {"age_diff", "espn_win_rate_red"}
