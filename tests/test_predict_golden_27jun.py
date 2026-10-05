@@ -1,15 +1,24 @@
-"""Golden of the served prediction with the committed 27-jun bundle.
+"""Golden of the served prediction with the 27-jun bundle.
 
 Phase 4 rewires the corner swap and the factor ranking for per-corner columns. The
 27-jun bundle has none of them (20 red-minus-blue diffs), so for it the new code
 must be INERT: same symmetrized probability, same topFeatures, same
-featureContributions and same methodPrediction, to 1e-12.
+featureContributions and same methodPrediction.
 
 The fixture was recorded with the code of 4dfeb86, BEFORE the phase-4 changes, on
 synthetic but realistic rows (veterans, debutants, missing physicals, unranked,
 zero takedown attempts, a few float NaN). It stores the rows themselves, so this
 test does not depend on the feature builders staying the same, and it runs the
 REAL api.predict with only the database reads stubbed.
+
+PERMANENT on purpose: the bundle is a byte copy of the committed 27-jun
+src/prediction/model.joblib (sha256 6ccb0e5e...), kept in tests/fixtures. When a new
+model.joblib is committed this still runs, and it is the net that proves a rollback
+to the 27-jun bundle keeps serving exactly what it served.
+
+Tolerance 1e-6: the golden was recorded on Windows and the CI runs on Linux, and the
+TreeSHAP contributions are float32. Still far below anything real: the old corner
+swap alone moved the probabilities by more than 1e-4.
 
 Re-recording (only ever with the pre-change code, or the golden proves nothing):
     PYTHONPATH=. .venv/Scripts/python.exe tests/test_predict_golden_27jun.py --record
@@ -36,9 +45,10 @@ from src.prediction.features import FighterHistorySummary, build_feature_row
 from src.prediction.features.method_features import build_method_feature_row
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BUNDLE_PATH = REPO_ROOT / "src" / "prediction" / "model.joblib"
+BUNDLE_PATH = REPO_ROOT / "tests" / "fixtures" / "model_27jun.joblib"
+BUNDLE_SHA256 = "6ccb0e5ef99efd5b9389e4aaa45ef3da8f2a1bd6531cec706ac04166a2dd5b4c"
 GOLDEN_PATH = REPO_ROOT / "tests" / "fixtures" / "predict_golden_27jun.json"
-TOLERANCE = 1e-12
+TOLERANCE = 1e-6
 
 RED_ID, BLUE_ID = 1, 2
 EMPTY = pd.DataFrame()
@@ -163,7 +173,7 @@ def _record_cases() -> list[dict]:
 
 
 def _load_bundle() -> dict:
-    """The committed bundle, loaded exactly like the service does."""
+    """The 27-jun bundle, loaded exactly like the service loads model.joblib."""
     with patch.object(api, "MODEL_PATH", BUNDLE_PATH):
         return api._load_model_bundle()
 
@@ -238,12 +248,12 @@ def _golden() -> dict:
     return json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
 
 
-def _require_recorded_bundle(golden: dict) -> None:
-    if _sha256(BUNDLE_PATH) != golden["bundle_sha256"]:
-        pytest.skip(
-            "src/prediction/model.joblib is no longer the bundle this golden was "
-            f"recorded with ({golden['bundle_trained_at']}): retire or re-record it."
-        )
+def test_fixture_is_the_27jun_bundle_the_golden_was_recorded_with():
+    """Never a skip: if the copy changes, this fails and says so."""
+    golden = _golden()
+    assert golden["bundle_sha256"] == BUNDLE_SHA256
+    assert _sha256(BUNDLE_PATH) == BUNDLE_SHA256
+    assert _load_bundle()["trained_at"] == golden["bundle_trained_at"] == "2026-06-27"
 
 
 def test_golden_covers_the_shapes_serving_sees():
@@ -265,7 +275,6 @@ def test_golden_covers_the_shapes_serving_sees():
 @pytest.mark.parametrize("index", range(20))
 def test_27jun_bundle_serves_exactly_the_recorded_prediction(index):
     golden = _golden()
-    _require_recorded_bundle(golden)
     case = golden["cases"][index]
     expected = case["expected"]
 
