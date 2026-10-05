@@ -168,7 +168,14 @@ def count_prior_ufc_fights(
     total_prior_fights whenever the summary exists. Unlike the summary it is never
     None: a debutant is an explicit 0. Once the winner CSV keeps debutants, their
     history diffs are NaN and a NaN does not say which corner is the new one; this
-    count does (phase 4, UFC_COUNT_COLUMNS)."""
+    count does (phase 4, UFC_COUNT_COLUMNS).
+
+    NOT the same as evaluate.count_prior_ufc_fights, despite the name: that one
+    takes the whole fights table, returns a frame for every bout and counts only
+    DECIDED bouts (a winner, not cancelled), the phase-3 tiers. This one also
+    counts draws and no contests, like total_prior_fights and api.py's
+    lowConfidence. The phase-4 pre-registration takes its tiers from this count
+    (the ufc_prev_fights_* columns of the CSV), never from evaluate's."""
     if history_df.empty:
         return 0
     # Filter by fighter first: the date comparison runs on object-dtype dates, so

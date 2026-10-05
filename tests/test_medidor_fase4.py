@@ -16,6 +16,7 @@ metric. src/prediction/model.joblib is only read (and its hash checked).
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -40,7 +41,7 @@ from src.prediction.features.types import (
     UFC_COUNT_COLUMNS,
     WINNER_FEATURE_COLUMNS,
 )
-from src.prediction.split import TEST_END
+from src.prediction.split import CAL_START, TEST_END, TEST_START
 
 COMMITTED_BUNDLE = (
     Path(__file__).resolve().parents[1] / "src" / "prediction" / "model.joblib"
@@ -747,3 +748,239 @@ def test_a_bundle_with_an_unknown_feature_set_fails_clearly(tmp_path, csv_full):
 
     with pytest.raises(RuntimeError, match="from_the_future"):
         evaluate.build_test_predictions(dataset_path=csv_full, bundle_path=bundle_path)
+
+
+# --- 11. --params is checked against XGBoost, never silently ignored ------------------
+
+
+@pytest.mark.parametrize(
+    ("bad", "named"),
+    [
+        # XGBoost's alias of random_state: it would override --seed and the bundle
+        # would record a train_seed that was not used.
+        ('{"seed": 5}', "seed"),
+        # A typo only gets an XGBoost warning: the arm trains with the default
+        # (max_depth 6) and the bundle keeps the typo as if it had been used.
+        ('{"n_estimators": 20, "max_dpeth": 2}', "max_dpeth"),
+        ('{"subsample": null}', "subsample"),
+    ],
+)
+def test_params_reject_seed_unknown_keys_and_nulls(bad, named, capsys):
+    with pytest.raises(SystemExit):
+        train.parse_args(["--params", bad])
+    assert named in capsys.readouterr().err
+
+
+def test_params_accept_any_key_xgboost_knows():
+    params = {"gamma": 0.1, "min_child_weight": 2, "reg_lambda": 1.5, "max_depth": 3}
+    assert set(params) <= set(XGBClassifier().get_params())
+
+    assert train.parse_args(["--params", json.dumps(params)]).params == params
+
+
+# --- 12. The served bundle only takes a phase-4 set on purpose ------------------------
+
+
+@pytest.fixture
+def served_bundle(tmp_path, monkeypatch) -> Path:
+    path = tmp_path / "served" / "model.joblib"
+    path.parent.mkdir()
+    shutil.copyfile(COMMITTED_BUNDLE, path)
+    monkeypatch.setattr(train, "MODEL_PATH", path)
+    return path
+
+
+def _train_argv(dataset: Path, *options: str) -> list[str]:
+    return [
+        "--dataset", str(dataset), "--no-test-report",
+        "--params", json.dumps(FAST_PARAMS), *options,
+    ]
+
+
+@pytest.mark.parametrize("feature_set", ["base", "preufc", "preufc_diff"])
+def test_train_refuses_a_phase4_set_into_the_served_bundle(
+    served_bundle, csv_full, feature_set
+):
+    before = _sha256(served_bundle)
+    other_spelling = served_bundle.parent / ".." / "served" / "model.joblib"
+
+    for bundle_option in ([], ["--bundle", str(other_spelling)]):
+        with pytest.raises(RuntimeError, match="--write-production-bundle"):
+            train.main(
+                _train_argv(csv_full, "--feature-set", feature_set, *bundle_option)
+            )
+
+    assert _sha256(served_bundle) == before
+
+
+def test_the_explicit_option_lets_a_phase4_set_into_the_served_bundle(
+    served_bundle, csv_full
+):
+    train.main(
+        _train_argv(csv_full, "--feature-set", "preufc", "--write-production-bundle")
+    )
+    assert joblib.load(served_bundle)["feature_set"] == "preufc"
+
+
+def test_legacy_into_the_served_bundle_needs_no_option(served_bundle, csv_full):
+    assert train.parse_args([]).write_production_bundle is False
+    train.main(_train_argv(csv_full))
+    assert joblib.load(served_bundle)["feature_set"] == "legacy"
+
+
+# --- 13. What the review's surviving mutants changed, now pinned ----------------------
+
+
+def test_the_grid_folds_use_grid_seed_whatever_seed_says(
+    tmp_path, csv_full, monkeypatch
+):
+    seeds: list[int] = []
+    real_build_model = train.build_model
+    monkeypatch.setattr(
+        train,
+        "build_model",
+        lambda params, seed: seeds.append(seed) or real_build_model(params, seed),
+    )
+    monkeypatch.setattr(
+        train,
+        "PARAMETER_GRID",
+        {
+            "n_estimators": [10, 20],
+            "max_depth": [2],
+            "learning_rate": [0.1],
+            "subsample": [0.8],
+            "colsample_bytree": [0.8],
+        },
+    )
+
+    _train(csv_full, tmp_path / "g.joblib", "--seed", "7", params=None)
+
+    # 2 grid points x 3 chronological folds with GRID_SEED, then the final fit.
+    assert seeds == [train.GRID_SEED] * 6 + [7]
+
+
+def test_evaluate_main_scores_the_bundle_it_is_given(
+    tmp_path, csv_full, monkeypatch, capsys
+):
+    bundle_path = tmp_path / "arm.joblib"
+    trained = _train(
+        csv_full, bundle_path, "--feature-set", "base", "--nan-policy", "native"
+    )
+    loaded: list = []
+    real_load = evaluate.load_model_bundle
+    monkeypatch.setattr(
+        evaluate,
+        "load_model_bundle",
+        lambda path=None: loaded.append(path) or real_load(path),
+    )
+    capsys.readouterr()
+
+    evaluate.main(
+        ["--dataset", str(csv_full), "--bundle", str(bundle_path), "--no-write"]
+    )
+
+    assert [Path(path) for path in loaded] == [bundle_path]
+    # The served bundle has a calibrator; this arm has none, so its headline is
+    # the uncalibrated variant.
+    out = capsys.readouterr().out
+    assert "Headline variant (production-equivalent): symmetrized, uncalibrated" in out
+    test_df, variants, _headline = evaluate.build_test_predictions(
+        dataset_path=csv_full, bundle_path=bundle_path
+    )
+    np.testing.assert_array_equal(
+        variants["raw_uncalibrated"], _predict(trained, test_df)
+    )
+
+
+@pytest.mark.parametrize(
+    "key", ["subsample", "colsample_bytree", "colsample_bylevel", "colsample_bynode"]
+)
+def test_any_subsampling_key_below_one_makes_the_seed_matter(key):
+    no_subsampling = {
+        "subsample": 1.0,
+        "colsample_bytree": 1.0,
+        "colsample_bylevel": 1.0,
+        "colsample_bynode": 1.0,
+    }
+    assert train.seed_is_inert(no_subsampling)
+    assert not train.seed_is_inert({**no_subsampling, key: 0.8})
+
+
+def test_no_inert_seed_warning_when_only_colsample_subsamples(
+    tmp_path, csv_full, monkeypatch, caplog
+):
+    monkeypatch.setattr(train, "PARAMETER_GRID", _one_point_grid(1.0, 0.8))
+    with caplog.at_level(logging.WARNING, logger=TRAIN_LOGGER):
+        _train(csv_full, tmp_path / "c.joblib", params=None)
+    assert not [r for r in caplog.records if "subsample" in r.getMessage()]
+
+
+def test_available_columns_are_decided_on_the_train_partition_only(tmp_path):
+    frame = _synthetic_dataset(columns=FEATURE_COLUMNS)
+    in_train = pd.to_datetime(frame["event_date"]) < pd.Timestamp(CAL_START)
+    frame.loc[in_train, "ranking_position_diff"] = np.nan  # values only later
+    assert frame["ranking_position_diff"].notna().any()
+    csv = _write_csv(frame, tmp_path / "late_column.csv")
+
+    trained = _train(csv, tmp_path / "late.joblib")
+
+    assert "ranking_position_diff" not in trained["feature_columns"]
+    assert len(trained["feature_columns"]) == len(FEATURE_COLUMNS) - 1
+
+
+TEST_ROW_MARK = 1.0e6
+
+
+def _csv_with_marked_test_rows(tmp_path) -> Path:
+    """Every row of the frozen test window carries an impossible height_cm_diff."""
+    frame = _synthetic_dataset(columns=FEATURE_COLUMNS)
+    in_test = pd.to_datetime(frame["event_date"]) >= pd.Timestamp(TEST_START)
+    frame.loc[in_test, "height_cm_diff"] = TEST_ROW_MARK
+    return _write_csv(frame, tmp_path / "marked.csv")
+
+
+@pytest.fixture
+def test_rows_scored(monkeypatch) -> list[bool]:
+    """One entry per predict_proba of ANY XGBoost model (fold, final, frozen inside
+    a calibrator): True when the rows it scored include a test-window row."""
+    seen: list[bool] = []
+    column = FEATURE_COLUMNS.index("height_cm_diff")
+    real_predict_proba = XGBClassifier.predict_proba
+
+    # wraps: sklearn resolves the response method by its __name__.
+    @functools.wraps(real_predict_proba)
+    def spy(self, X, *args, **kwargs):
+        rows = np.asarray(X, dtype=float)
+        seen.append(bool(np.any(rows[:, column] == TEST_ROW_MARK)))
+        return real_predict_proba(self, X, *args, **kwargs)
+
+    monkeypatch.setattr(XGBClassifier, "predict_proba", spy)
+    return seen
+
+
+def test_no_test_report_never_scores_a_test_row(
+    tmp_path, monkeypatch, test_rows_scored
+):
+    csv = _csv_with_marked_test_rows(tmp_path)
+    monkeypatch.setattr(train, "PARAMETER_GRID", _one_point_grid(0.8, 0.8))
+    bundle_path = tmp_path / "t.joblib"
+
+    _train(csv, bundle_path, params=None)  # grid folds + final fit
+    _calibrate(csv, bundle_path, "--no-test-report")
+
+    assert test_rows_scored  # models did predict (folds, calibration)...
+    assert not any(test_rows_scored)  # ...never on a test row
+
+
+def test_without_the_flag_the_spy_does_see_the_test_rows(tmp_path, test_rows_scored):
+    csv = _csv_with_marked_test_rows(tmp_path)
+    bundle_path = tmp_path / "t.joblib"
+
+    train.main(
+        ["--dataset", str(csv), "--bundle", str(bundle_path),
+         "--params", json.dumps(FAST_PARAMS)]
+    )
+    assert any(test_rows_scored)
+    test_rows_scored.clear()
+    _calibrate(csv, bundle_path)
+    assert any(test_rows_scored)

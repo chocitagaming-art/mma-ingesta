@@ -168,8 +168,10 @@ def _probability_variants(
 
     Production symmetrization: the method classes are invariant under a corner
     swap, so ``p_sym = (p(row) + p(swap_corners(row))) / 2`` per class. Reuses
-    ``api._swap_corners`` (negates ``*_diff``, passes the symmetric features
-    through) so this matches serving exactly.
+    ``api._swap_corners``, the alias of the strict corners.swap_corners, so this
+    matches serving exactly: it negates ``*_diff``, passes the method's listed
+    corner-invariant features through and raises on any other column (the method
+    rows carry no corner pair).
 
     Accepts either a single estimator or the served ENSEMBLE (a list plus its
     weights), so the reported metrics always describe what production returns.

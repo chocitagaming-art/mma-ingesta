@@ -5,13 +5,16 @@ regionales y, desde 17cdd3d, el Contender Series con su liga 3321) que pinta
 la ficha vive aquí y NUNCA entra en `fights` ni en las stats/rachas solo-UFC
 (que leen `fights`).
 
-El MODELO SÍ PUEDE LEERLA: la fase 4 del Contender Series la lleva al modelo
-de GANADOR, y solo a él, como bloque pre-UFC: src/prediction/features/db.py
-(load_espn_history_dataframe, sin filtro de liga) y features/preufc.py, con
-corte estricto por la fecha de cada pelea. El modelo de MÉTODO no la ve. La
-cabecera de db/migrations/016_espn_history.sql dice todavía que el modelo no
-la lee: esa migración ya está aplicada y no se retoca (decisión del 29-sep),
-así que en ese punto manda este docstring.
+QUIÉN LA LEE PARA EL MODELO (fase 4 del Contender Series): el bloque pre-UFC
+del modelo de GANADOR, src/prediction/features/preufc.py, con
+features/db.py (load_espn_history_dataframe, sin filtro de liga) y corte
+estricto por la fecha de cada pelea. El CSV de entrenamiento lleva esas
+columnas (también desde una foto: features/preufc_snapshot.py), pero solo un
+bundle entrenado con --feature-set preufc o preufc_diff las usa. Con el bundle
+legacy que sirve hoy producción, NINGÚN modelo la lee: ni el de ganador ni el de
+MÉTODO, que no la ve nunca. La cabecera de db/migrations/016_espn_history.sql
+dice que el modelo no la lee: esa migración ya está aplicada y no se retoca
+(decisión del 29-sep), así que en ese punto manda este docstring.
 """
 
 from __future__ import annotations

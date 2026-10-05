@@ -306,9 +306,11 @@ def _estimator_probabilities(
 
     ``symmetrized`` mirrors the production corner-symmetrization in api.predict:
     for each row ``p_sym = (p(row) + (1 - p(swap_corners(row)))) / 2``. The swap
-    negates every ``*_diff`` (all features are diffs now), reusing
-    ``api._swap_corners`` so this matches serving exactly. Both orientations pass
-    through the same fitted imputer and estimator.
+    is the strict one of corners.py (``api._swap_corners`` is its alias, so this
+    matches serving exactly): it negates every ``*_diff``, EXCHANGES each corner
+    pair ``{base}_red`` <-> ``{base}_blue`` (ufc_prev_fights, the pre-UFC block)
+    and raises on a column it does not know. Both orientations pass through the
+    same fitted imputer and estimator.
     """
     raw = estimator.predict_proba(imputer.transform(test_df[feature_columns]))[:, 1]
     swapped_records = [
