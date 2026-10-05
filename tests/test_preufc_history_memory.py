@@ -128,6 +128,14 @@ def test_the_espn_frame_is_built_from_plain_tuples_and_is_the_same_frame(rows):
         assert by_id.loc[12, "event_date"] is None
 
 
+def test_the_select_list_is_in_the_order_the_tuple_frame_labels_it():
+    # A plain cursor hands back bare tuples, so the frame is labelled by position:
+    # reordering the SELECT would silently swap columns in the service (the
+    # snapshot reads dicts, so training would not notice and parity would break).
+    select_list = ESPN_HISTORY_SQL.split("SELECT", 1)[1].split("FROM", 1)[0]
+    assert [name.strip() for name in select_list.split(",")] == ESPN_HISTORY_COLUMNS
+
+
 def test_the_tuple_frame_equals_the_dict_frame_on_a_large_random_table():
     rows = _random_rows(seed=5, n_rows=4_000, n_fighters=300)
     connection = _CursorFactoryConnection(rows)

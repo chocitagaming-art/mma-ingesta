@@ -60,7 +60,7 @@ from src.prediction.split import (
     chronological_three_way_split,
 )
 
-CSV_V2_COLUMNS =["fight_id", "event_date", *WINNER_FEATURE_COLUMNS, "target"]
+CSV_V2_COLUMNS = ["fight_id", "event_date", *WINNER_FEATURE_COLUMNS, "target"]
 SHARED_WITH_B2 = [
     "fight_id", "event_date", *FEATURE_COLUMNS, *UFC_COUNT_COLUMNS, "target"
 ]
