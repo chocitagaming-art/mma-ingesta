@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -30,10 +31,22 @@ from src.prediction.features import (
     load_base_dataframe,
     load_rankings_dataframe,
 )
+from src.prediction.features.db import (
+    index_espn_history,
+    load_espn_history_dataframe,
+    load_espn_known_fighter_ids,
+)
+from src.prediction.features.fighter_history import count_prior_ufc_fights
 from src.prediction.features.method_features import (
     METHOD_CLASSES,
     METHOD_FEATURE_COLUMNS,
     build_method_feature_row,
+)
+from src.prediction.features.preufc import build_preufc_block, preufc_diff_values
+from src.prediction.features.types import (
+    PREUFC_COLUMNS,
+    PREUFC_DIFF_COLUMNS,
+    UFC_COUNT_COLUMNS,
 )
 from src.scrapers.config import get_settings
 
@@ -199,6 +212,57 @@ def _load_fighter_physical(database_url: str, fighter_ids: list[int]) -> dict[in
     return physical
 
 
+@dataclass(frozen=True, eq=False)
+class PreUfcHistory:
+    """fight_history_espn as the winner row reads it (phase 4, the pre-UFC block).
+
+    ``by_fighter`` is db.index_espn_history(...), ``known_fighter_ids`` the fighters
+    whose ESPN history is known (db.load_espn_known_fighter_ids: anyone else gets
+    his whole corner as "unknown", see build_preufc_block) and ``rows`` the size of
+    the table, for /health. Read-only once built: the service shares one across
+    every request until its data TTL expires."""
+
+    by_fighter: Mapping[int, pd.DataFrame]
+    known_fighter_ids: frozenset[int]
+    rows: int
+
+    @classmethod
+    def from_frames(
+        cls, history: pd.DataFrame, known_fighter_ids: Iterable[int]
+    ) -> PreUfcHistory:
+        """Index ``history`` once, stable (event_date, id) order per fighter."""
+        return cls(
+            index_espn_history(history),
+            frozenset(int(fighter_id) for fighter_id in known_fighter_ids),
+            len(history),
+        )
+
+
+# Served when fight_history_espn could not be loaded: nobody is "known", so
+# build_preufc_block gives both corners their nine variables as None ("don't
+# know", has_history included), like a fighter the Tuesday cron has not swept.
+UNAVAILABLE_PREUFC_HISTORY = PreUfcHistory({}, frozenset(), 0)
+
+_PREUFC_HISTORY_COLUMNS = frozenset(PREUFC_COLUMNS + PREUFC_DIFF_COLUMNS)
+
+
+def needs_preufc_history(feature_columns: Iterable[str]) -> bool:
+    """True when a winner bundle with these columns reads fight_history_espn (the
+    per-corner block or its diffs). ufc_prev_fights alone comes from `fights`."""
+    return any(column in _PREUFC_HISTORY_COLUMNS for column in feature_columns)
+
+
+def load_preufc_history(database_url: str) -> PreUfcHistory:
+    """Every fight_history_espn row (the DWCS included) and the known-history ids,
+    read over ONE connection, with the per-fighter index built once."""
+    from src.scrapers.db import connect
+
+    with connect(database_url) as connection:
+        history = load_espn_history_dataframe(connection)
+        known_fighter_ids = load_espn_known_fighter_ids(connection)
+    return PreUfcHistory.from_frames(history, known_fighter_ids)
+
+
 AnchorKind = Literal["fight", "pending", "today", "none"]
 
 
@@ -328,6 +392,57 @@ def _is_low_confidence(
     )
 
 
+def _phase4_columns(
+    feature_columns: Collection[str],
+    history_df: pd.DataFrame,
+    red_id: int,
+    blue_id: int,
+    cutoff: date,
+    preufc_history: PreUfcHistory | None,
+) -> dict[str, Any]:
+    """The winner-only columns the bundle reads, composed exactly like the
+    training CSV composes them for a bout dated ``cutoff``:
+
+    * UFC_COUNT_COLUMNS: count_prior_ufc_fights per corner over the same
+      history_df (load_base_dataframe's population, cancelled bouts dropped);
+    * PREUFC_COLUMNS / PREUFC_DIFF_COLUMNS: build_preufc_block (with its
+      "unknown history" rule) and preufc_diff_values over ``preufc_history``.
+
+    A group goes in whole (both corners: the strict swap needs complete pairs)
+    and only when the bundle has any of its columns, in the order of
+    WINNER_FEATURE_COLUMNS. For the 27-jun bundle (20 diffs) nothing is added and
+    nothing is read."""
+    columns = set(feature_columns)
+    values: dict[str, Any] = {}
+    if columns.intersection(UFC_COUNT_COLUMNS):
+        counts = (
+            count_prior_ufc_fights(history_df, red_id, cutoff),
+            count_prior_ufc_fights(history_df, blue_id, cutoff),
+        )
+        values.update(zip(UFC_COUNT_COLUMNS, counts))
+    wants_block = bool(columns.intersection(PREUFC_COLUMNS))
+    wants_diffs = bool(columns.intersection(PREUFC_DIFF_COLUMNS))
+    if wants_block or wants_diffs:
+        if preufc_history is None:
+            raise ValueError(
+                "The bundle reads the pre-UFC block but no fight_history_espn was "
+                "given: pass preufc_history (UNAVAILABLE_PREUFC_HISTORY serves the "
+                "block as unknown)."
+            )
+        block = build_preufc_block(
+            red_id,
+            blue_id,
+            cutoff,
+            preufc_history.by_fighter,
+            preufc_history.known_fighter_ids,
+        )
+        if wants_block:
+            values.update(block)
+        if wants_diffs:
+            values.update(preufc_diff_values(block))
+    return values
+
+
 def _build_feature_row(
     fights_df: pd.DataFrame,
     rankings_df: pd.DataFrame,
@@ -336,7 +451,17 @@ def _build_feature_row(
     physical: dict[int, dict[str, Any]],
     history_df: pd.DataFrame | None = None,
     fight_id: int | None = None,
+    feature_columns: Collection[str] = (),
+    preufc_history: PreUfcHistory | None = None,
 ) -> tuple[dict[str, float | int | None], dict[str, float | int | None], dict[str, Any], bool]:
+    """The winner row, the method row, the context and the low-confidence flag.
+
+    ``feature_columns`` are the winner bundle's: beyond the 20 diffs, the row
+    carries only the phase-4 groups those columns name (``_phase4_columns``), cut
+    at the anchor's ``matchup_date`` (a ``date``, like the training rows' own
+    event_date). Without them (the default, and the 27-jun bundle) the row is
+    exactly the pre-phase-4 one. ``preufc_history`` is required only when the
+    bundle reads the pre-UFC block."""
     matchup = _get_latest_matchup_context(fights_df, red_id, blue_id, fight_id=fight_id)
     matchup_date, weight_class, scheduled_rounds, is_title_fight = matchup[:4]
     from src.prediction.features import build_fighter_history_dataframe
@@ -392,6 +517,13 @@ def _build_feature_row(
         weight_class=weight_class,
         is_title_fight=is_title_fight,
     )
+    # Phase 4, winner only: added AFTER the method row is built, so the method
+    # model (and its swap) never sees these columns.
+    feature_row.update(
+        _phase4_columns(
+            feature_columns, history_df, red_id, blue_id, matchup_date, preufc_history
+        )
+    )
 
     context = {
         "anchor": matchup.anchor,
@@ -431,8 +563,9 @@ def _attribution_factors(feature_columns: list[str]) -> list[tuple[str, list[int
     column. A per-corner pair ``{base}_red`` / ``{base}_blue`` is ONE factor named
     after its base, at the position of its first column: split in two, each half
     compares both fighters in the same slot, the concept shows up twice and each
-    half ranks lower than the whole. Half a pair (never produced by training,
-    which keeps or drops pairs whole) stays a factor of its own."""
+    half ranks lower than the whole. Half a pair (never produced by training:
+    train.get_available_feature_columns keeps or drops pairs whole) stays a
+    factor of its own, named after its column, whose value is None."""
     index_of = {column: index for index, column in enumerate(feature_columns)}
     factors: list[tuple[str, list[int]]] = []
     for index, column in enumerate(feature_columns):
@@ -487,9 +620,11 @@ def _compute_top_features(
     of the red column plus that of the blue one, which stays antisymmetric under
     a corner swap and only regroups terms, so the balance still closes. Its value
     is the raw red-minus-blue difference from ``raw_row`` (the row before
-    imputation), or None when a side is unknown or no raw row is given. The full
-    map uses the same factor names as the ranking, so a pair is never counted
-    twice by the UI.
+    imputation), or None when a side is unknown or no raw row is given. Half a
+    pair in the bundle also reports None: what the booster saw for that one
+    corner may be the imputer's median, and one fighter's number is not a
+    red-minus-blue difference anyway. The full map uses the same factor names as
+    the ranking, so a pair is never counted twice by the UI.
 
     Returns the ranked top five (signed contribution, direction, and for a
     ``*_diff`` the (imputed) forward value the model actually saw) plus the FULL
@@ -519,7 +654,11 @@ def _compute_top_features(
         if len(indices) == 1:
             index = indices[0]
             contribution = float(symmetrized[index])
-            value: float | None = float(transformed_row[0][index])
+            value: float | None = (
+                None
+                if feature_columns[index] in PAIR_BASE_BY_COLUMN
+                else float(transformed_row[0][index])
+            )
         else:
             red_index, blue_index = indices
             contribution = float(symmetrized[red_index]) + float(
@@ -664,20 +803,29 @@ def predict(
     rankings_df: pd.DataFrame | None = None,
     history_df: pd.DataFrame | None = None,
     fight_id: int | None = None,
+    preufc_history: PreUfcHistory | None = None,
 ) -> dict[str, Any]:
     """Win (and method) prediction for red vs blue.
 
     ``fight_id`` names the bout being predicted (the fight page sends its own):
     when it is these two fighters' bout, the prediction is anchored to it even
     if it is already decided; otherwise it is ignored and the pair rule applies
-    (see ``_get_latest_matchup_context``)."""
+    (see ``_get_latest_matchup_context``).
+
+    ``preufc_history`` is only read when the bundle carries the pre-UFC block.
+    The service passes its cached copy (or UNAVAILABLE_PREUFC_HISTORY when that
+    load failed); without one it is read from the database here, like the fights,
+    which is what the CLI and a shadow run with ``bundle=`` get."""
     settings = get_settings()
     if bundle is None:
         bundle = _load_model_bundle()
+    feature_columns = list(bundle["feature_columns"])
     if fights_df is None:
         fights_df = load_base_dataframe(settings.database_url)
     if rankings_df is None:
         rankings_df = load_rankings_dataframe(settings.database_url)
+    if preufc_history is None and needs_preufc_history(feature_columns):
+        preufc_history = load_preufc_history(settings.database_url)
     physical = _load_fighter_physical(settings.database_url, [red_fighter_id, blue_fighter_id])
     feature_row, method_feature_row, context, low_confidence = _build_feature_row(
         fights_df,
@@ -687,8 +835,9 @@ def predict(
         physical,
         history_df=history_df,
         fight_id=fight_id,
+        feature_columns=feature_columns,
+        preufc_history=preufc_history,
     )
-    feature_columns = bundle["feature_columns"]
     imputer = bundle["imputer"]
     model = bundle["model"]
 

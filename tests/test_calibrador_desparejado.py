@@ -479,7 +479,9 @@ def _filas(rojo: int, azul: int):
 def sin_base_de_datos(monkeypatch):
     """api.predict() sin Neon: los sitios que irian a la base, sustituidos."""
 
-    def construir(_fights, _rankings, rojo, azul, _fisico, history_df=None, fight_id=None):
+    def construir(
+        _fights, _rankings, rojo, azul, _fisico, history_df=None, fight_id=None, **_fase4
+    ):
         fila, fila_metodo, debutante = _filas(rojo, azul)
         return fila, fila_metodo, {"lowConfidence": debutante}, debutante
 
