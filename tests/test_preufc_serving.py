@@ -282,10 +282,16 @@ def test_served_row_with_fight_anchor_is_the_training_composition(fight_id, red,
     assert list(expected) == UFC_COUNT_COLUMNS + PREUFC_COLUMNS + PREUFC_DIFF_COLUMNS
     for column, value in expected.items():
         assert _same(row[column], value), (column, row[column], value)
-    # And the 20 diffs + ufc_prev_fights of the REAL training builder, same bout.
-    dataset = build_training_dataset(_card(), EMPTY_RANKINGS).dataset
+    # And the whole row of the REAL training builder (the CSV v2), same bout, same
+    # ESPN history and known ids: all 49 columns.
+    dataset = build_training_dataset(
+        _card(),
+        EMPTY_RANKINGS,
+        espn_by_fighter=index_espn_history(_espn()),
+        known_fighter_ids=KNOWN,
+    ).dataset
     training_row = dataset[dataset["fight_id"] == fight_id].iloc[0]
-    for column in FEATURE_COLUMNS + UFC_COUNT_COLUMNS:
+    for column in WINNER_FEATURE_COLUMNS:
         assert _same(row[column], training_row[column]), (
             column,
             row[column],
