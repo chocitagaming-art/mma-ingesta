@@ -757,8 +757,9 @@ def test_a_bundle_with_an_unknown_feature_set_fails_clearly(tmp_path, csv_full):
     ("bad", "named"),
     [
         # XGBoost's alias of random_state: it would override --seed and the bundle
-        # would record a train_seed that was not used.
-        ('{"seed": 5}', "seed"),
+        # would record a train_seed that was not used. Refused as reserved, with
+        # the way out, not merely as an unknown key.
+        ('{"seed": 5}', "the seed goes in --seed"),
         # A typo only gets an XGBoost warning: the arm trains with the default
         # (max_depth 6) and the bundle keeps the typo as if it had been used.
         ('{"n_estimators": 20, "max_dpeth": 2}', "max_dpeth"),
