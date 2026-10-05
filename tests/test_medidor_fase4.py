@@ -27,6 +27,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import pytest
+import xgboost
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import ParameterGrid
@@ -942,21 +943,55 @@ def _csv_with_marked_test_rows(tmp_path) -> Path:
 
 @pytest.fixture
 def test_rows_scored(monkeypatch) -> list[bool]:
-    """One entry per predict_proba of ANY XGBoost model (fold, final, frozen inside
-    a calibrator): True when the rows it scored include a test-window row."""
+    """One entry per prediction of ANY XGBoost booster (fold, final, frozen inside
+    a calibrator), whatever the route to it: predict_proba, predict or the Booster
+    itself. Every one of them ends in Booster.inplace_predict (an array) or
+    Booster.predict (a DMatrix), so the spy sits there. True when the rows it
+    scored include a test-window row."""
     seen: list[bool] = []
     column = FEATURE_COLUMNS.index("height_cm_diff")
-    real_predict_proba = XGBClassifier.predict_proba
+    real_inplace_predict = xgboost.Booster.inplace_predict
+    real_predict = xgboost.Booster.predict
 
-    # wraps: sklearn resolves the response method by its __name__.
-    @functools.wraps(real_predict_proba)
-    def spy(self, X, *args, **kwargs):
-        rows = np.asarray(X, dtype=float)
-        seen.append(bool(np.any(rows[:, column] == TEST_ROW_MARK)))
-        return real_predict_proba(self, X, *args, **kwargs)
+    def has_a_test_row(rows) -> bool:
+        rows = np.asarray(rows, dtype=float)
+        return bool(np.any(rows[:, column] == TEST_ROW_MARK))
 
-    monkeypatch.setattr(XGBClassifier, "predict_proba", spy)
+    @functools.wraps(real_inplace_predict)
+    def inplace_predict_spy(self, data, *args, **kwargs):
+        seen.append(has_a_test_row(data))
+        return real_inplace_predict(self, data, *args, **kwargs)
+
+    @functools.wraps(real_predict)
+    def predict_spy(self, data, *args, **kwargs):
+        # A DMatrix keeps its values: get_data() hands them back as CSR.
+        seen.append(has_a_test_row(data.get_data().toarray()))
+        return real_predict(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(xgboost.Booster, "inplace_predict", inplace_predict_spy)
+    monkeypatch.setattr(xgboost.Booster, "predict", predict_spy)
     return seen
+
+
+def test_the_spy_sees_every_route_to_the_booster(test_rows_scored):
+    """predict_proba, predict and the Booster directly, on an array and on a
+    DMatrix: each one is seen, with or without a test-window row."""
+    rng = np.random.default_rng(0)
+    rows = rng.normal(size=(60, len(FEATURE_COLUMNS)))
+    labels = (rows[:, 1] > 0).astype(int)
+    model = XGBClassifier(n_estimators=5, max_depth=2).fit(rows, labels)
+    marked = rows.copy()
+    marked[3, FEATURE_COLUMNS.index("height_cm_diff")] = TEST_ROW_MARK
+    booster = model.get_booster()
+
+    for scored in (rows, marked):
+        test_rows_scored.clear()
+        model.predict_proba(scored)
+        model.predict(scored)
+        booster.inplace_predict(scored)
+        booster.predict(xgboost.DMatrix(scored))
+        assert len(test_rows_scored) >= 4
+        assert all(seen is (scored is marked) for seen in test_rows_scored)
 
 
 def test_no_test_report_never_scores_a_test_row(
