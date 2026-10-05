@@ -55,7 +55,13 @@ jobs:
           else
             URL="${{ secrets.PREDICTION_SERVICE_URL }}/health"
           fi
-          curl -fsS --max-time 70 --retry 1 --retry-delay 5 --retry-all-errors "$URL"
+          #
+          # The body goes to a file written by curl itself (no pipe, which would
+          # hand the step the exit code of the last command and hide a failed
+          # curl): the pre-UFC check at the end of the job reads it.
+          curl -fsS --max-time 70 --retry 1 --retry-delay 5 --retry-all-errors             -o "$RUNNER_TEMP/health.json" "$URL"
+          cat "$RUNNER_TEMP/health.json"
+          echo
 
       # Deja constancia EN LA BASE de que el servicio contestó. Es lo único que
       # el panel /estado puede mirar sin sondear Render él mismo (una sonda con
@@ -79,3 +85,35 @@ jobs:
                SET last_ok_at = EXCLUDED.last_ok_at, detail = EXCLUDED.detail"
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      # Phase 4: when fight_history_espn fails to load, the service keeps
+      # answering 200 and serves the pre-UFC block as "unknown" in both corners
+      # (predictions go out, degraded). /health says so in preUfc.state, from
+      # memory and without touching Neon; this step turns it into a red run (and
+      # notify-on-failure into an Issue). It goes AFTER the heartbeat on purpose:
+      # the service DID answer, and the /estado panel has to know that. It runs on
+      # both passes: it only reads the body the ping already fetched.
+      - name: Comprobar el bloque pre-UFC
+        run: |
+          python3 - "$RUNNER_TEMP/health.json" <<'PY'
+          import json
+          import sys
+
+          try:
+              with open(sys.argv[1], encoding="utf-8") as handle:
+                  body = json.load(handle)
+          except (OSError, ValueError):
+              sys.exit(0)  # the ping above already proved the service answers
+          pre_ufc = body.get("preUfc") if isinstance(body, dict) else None
+          if (
+              isinstance(pre_ufc, dict)
+              and pre_ufc.get("needed") is True
+              and pre_ufc.get("state") == "unavailable"
+          ):
+              print(
+                  "::error::fight_history_espn no se pudo cargar: el modelo sirve el "
+                  "bloque pre-UFC como desconocido "
+                  f"({pre_ufc.get('degradedPredictions')} predicciones degradadas)."
+              )
+              sys.exit(1)
+          PY
