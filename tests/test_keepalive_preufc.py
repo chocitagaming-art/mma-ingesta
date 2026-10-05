@@ -66,6 +66,14 @@ def test_ping_keeps_the_body_without_a_pipe():
     assert "|" not in ping.replace("||", "")
 
 
+def test_the_curl_line_has_single_spaces():
+    """A lost line continuation left a run of spaces in the middle of the curl
+    command: bash still runs it, but it reads like a broken command."""
+    ping = _steps()[0]["run"]
+    curl = next(line for line in ping.splitlines() if "curl -fsS" in line).strip()
+    assert "  " not in curl, curl
+
+
 def test_check_runs_after_the_heartbeat():
     names = [step["name"] for step in _steps()]
     assert names.index(_check_step()["name"]) > names.index("Anotar el latido")

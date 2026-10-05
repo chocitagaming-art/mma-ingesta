@@ -59,7 +59,7 @@ jobs:
           # The body goes to a file written by curl itself (no pipe, which would
           # hand the step the exit code of the last command and hide a failed
           # curl): the pre-UFC check at the end of the job reads it.
-          curl -fsS --max-time 70 --retry 1 --retry-delay 5 --retry-all-errors             -o "$RUNNER_TEMP/health.json" "$URL"
+          curl -fsS --max-time 70 --retry 1 --retry-delay 5 --retry-all-errors -o "$RUNNER_TEMP/health.json" "$URL"
           cat "$RUNNER_TEMP/health.json"
           echo
 
