@@ -18,7 +18,6 @@ from .db import (
     load_espn_known_fighter_ids,
     load_rankings_dataframe,
 )
-from .preufc_snapshot import ESPN_HISTORY_FILE, load_snapshot, read_manifest
 from .training import build_training_dataset
 from .types import CORNER_SIDES, DatasetBuildResult, OUTPUT_CSV_PATH, OUTPUT_TABLE_NAME
 
@@ -102,6 +101,11 @@ def load_espn_inputs(
     v2 is generated from one). Otherwise from the database, both in ONE connection
     so they describe the same moment."""
     if snapshot_dir is not None:
+        # Imported here, not at the top: features/__init__ imports this module, and
+        # `python -m src.prediction.features.preufc_snapshot` must not find the
+        # snapshot module already imported (runpy would run it twice).
+        from .preufc_snapshot import load_snapshot
+
         return load_snapshot(snapshot_dir)
     with connect(database_url) as connection:
         espn_history = load_espn_history_dataframe(connection)
@@ -169,6 +173,8 @@ def _espn_source(snapshot_dir: Path | None, espn_rows: int, known_ids: int) -> s
     if snapshot_dir is None:
         source = "the database (live fight_history_espn and fighters)"
     else:
+        from .preufc_snapshot import ESPN_HISTORY_FILE, read_manifest  # see above
+
         manifest = read_manifest(snapshot_dir)
         sha256 = manifest["files"][ESPN_HISTORY_FILE]["sha256"]
         source = (

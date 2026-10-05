@@ -266,6 +266,31 @@ def _patch_cli(monkeypatch, connection):
     return sessions
 
 
+def test_running_the_cli_module_does_not_import_it_twice():
+    """`python -m src.prediction.features.preufc_snapshot` imports the package
+    first; if the package already imported this module, runpy warns that it runs
+    it a second time ("unpredictable behaviour"). Nothing in the package's import
+    may pull it in."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    probe = (
+        "import sys, src.prediction.features; "
+        "print('src.prediction.features.preufc_snapshot' in sys.modules)"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(root), "DATABASE_URL": ""},
+    )
+    assert completed.stdout.strip() == "False", completed.stderr
+
+
 def test_cli_aborts_when_the_session_is_not_read_only(fakedb, monkeypatch, tmp_path):
     connection = fakedb.Connection(_responder(read_only="off"))
     _patch_cli(monkeypatch, connection)
