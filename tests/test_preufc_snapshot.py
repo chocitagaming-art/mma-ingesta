@@ -245,6 +245,23 @@ def test_a_tampered_known_ids_file_is_refused(conn, tmp_path):
         load_snapshot(out)
 
 
+def test_a_known_ids_edit_that_keeps_the_row_count_is_refused(conn, tmp_path):
+    """One id swapped for another: same number of lines, so only the sha256 can
+    catch it, and it would silently change which corners are 'unknown history'
+    in the pre-registered snapshot."""
+    out = tmp_path / "snap"
+    take_snapshot(conn, out)
+    path = out / KNOWN_IDS_FILE
+    original = path.read_bytes()
+    edited = original.replace(b"\n40\n", b"\n41\n")
+    assert edited != original
+    assert edited.count(b"\n") == original.count(b"\n")
+    path.write_bytes(edited)
+
+    with pytest.raises(SnapshotError, match=f"{KNOWN_IDS_FILE}: sha256"):
+        load_snapshot(out)
+
+
 # --- CLI -----------------------------------------------------------------------------
 
 

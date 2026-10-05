@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.prediction.split import CAL_START, TEST_END, TEST_START
+from src.prediction.split import partition_masks
 from src.scrapers.config import get_settings
 from src.scrapers.db import connect
 
@@ -114,13 +114,14 @@ def load_espn_inputs(
 
 
 def metro_partition(event_dates: pd.Series) -> pd.Series:
-    """The metro partition of each date (split.py), 'fuera' after TEST_END. Unlike
-    chronological_three_way_split it never raises: it only labels."""
-    dates = pd.to_datetime(event_dates)
+    """The metro partition of each date, 'fuera' after TEST_END. The boundaries
+    are split.partition_masks', the same comparisons chronological_three_way_split
+    makes; unlike that function it never raises: it only labels."""
+    train, calibration, test = partition_masks(event_dates)
     labels = pd.Series("fuera", index=event_dates.index)
-    labels[dates <= pd.Timestamp(TEST_END)] = "test"
-    labels[dates < pd.Timestamp(TEST_START)] = "calibracion"
-    labels[dates < pd.Timestamp(CAL_START)] = "train"
+    labels[test] = "test"
+    labels[calibration] = "calibracion"
+    labels[train] = "train"
     return labels
 
 
@@ -173,13 +174,19 @@ def _espn_source(snapshot_dir: Path | None, espn_rows: int, known_ids: int) -> s
     if snapshot_dir is None:
         source = "the database (live fight_history_espn and fighters)"
     else:
-        from .preufc_snapshot import ESPN_HISTORY_FILE, read_manifest  # see above
+        from .preufc_snapshot import (  # see above
+            ESPN_HISTORY_FILE,
+            KNOWN_IDS_FILE,
+            read_manifest,
+        )
 
         manifest = read_manifest(snapshot_dir)
-        sha256 = manifest["files"][ESPN_HISTORY_FILE]["sha256"]
+        files = manifest["files"]
+        # Both files: known_fighter_ids.csv decides every unknown-history corner.
         source = (
             f"the snapshot {snapshot_dir} (taken {manifest['taken_at_utc']}, "
-            f"{ESPN_HISTORY_FILE} sha256 {sha256})"
+            f"{ESPN_HISTORY_FILE} sha256 {files[ESPN_HISTORY_FILE]['sha256']}, "
+            f"{KNOWN_IDS_FILE} sha256 {files[KNOWN_IDS_FILE]['sha256']})"
         )
     return (
         f"Pre-UFC block read from {source}: {espn_rows} ESPN rows, "

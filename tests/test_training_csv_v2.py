@@ -18,13 +18,14 @@ from __future__ import annotations
 
 import math
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import pytest
 
 import src.prediction.features.dataset_guard as dataset_guard
 import src.prediction.features.output as output
+from src.prediction import split
 from src.prediction.features.dataset_guard import check_winner_dataset
 from src.prediction.features.db import (
     ESPN_HISTORY_SQL,
@@ -37,7 +38,12 @@ from src.prediction.features.preufc import (
     build_preufc_block,
     preufc_diff_values,
 )
-from src.prediction.features.preufc_snapshot import take_snapshot
+from src.prediction.features.preufc_snapshot import (
+    ESPN_HISTORY_FILE,
+    KNOWN_IDS_FILE,
+    read_manifest,
+    take_snapshot,
+)
 from src.prediction.features.training import build_training_dataset
 from src.prediction.features.types import (
     FEATURE_COLUMNS,
@@ -47,8 +53,14 @@ from src.prediction.features.types import (
     UFC_COUNT_COLUMNS,
     WINNER_FEATURE_COLUMNS,
 )
+from src.prediction.split import (
+    CAL_START,
+    TEST_END,
+    TEST_START,
+    chronological_three_way_split,
+)
 
-CSV_V2_COLUMNS = ["fight_id", "event_date", *WINNER_FEATURE_COLUMNS, "target"]
+CSV_V2_COLUMNS =["fight_id", "event_date", *WINNER_FEATURE_COLUMNS, "target"]
 SHARED_WITH_B2 = [
     "fight_id", "event_date", *FEATURE_COLUMNS, *UFC_COUNT_COLUMNS, "target"
 ]
@@ -378,6 +390,65 @@ def test_preufc_coverage_counts_corners_per_partition(built):
     assert coverage.loc["train"].tolist() == [10, 1, 2, 7]
     assert coverage.loc["test"].tolist() == [2, 1, 1, 0]
     assert int(coverage["corners"].sum()) == 2 * len(built.dataset)
+
+
+# The three frontier dates of the frozen metro and the day on each side. The real
+# CSV has fights on them, so a slipped comparator would move the printed coverage
+# and the Annex A counts in silence.
+BOUNDARY_LABELS = {
+    CAL_START - timedelta(days=1): "train",
+    CAL_START: "calibracion",
+    TEST_START - timedelta(days=1): "calibracion",
+    TEST_START: "test",
+    TEST_END: "test",
+    TEST_END + timedelta(days=1): "fuera",
+}
+
+
+@pytest.mark.parametrize(
+    "as_text", [False, True], ids=["datetime.date", "iso-text-like-the-csv"]
+)
+def test_metro_partition_labels_the_frontier_dates(as_text):
+    dates = pd.Series(
+        [day.isoformat() if as_text else day for day in BOUNDARY_LABELS]
+    )
+
+    assert output.metro_partition(dates).tolist() == list(BOUNDARY_LABELS.values())
+
+
+def test_metro_partition_is_the_split_of_split_py(monkeypatch):
+    """The coverage table labels each row exactly as chronological_three_way_split
+    partitions it, and 'fuera' is what the split leaves out."""
+    monkeypatch.setattr(split, "MIN_TEST_ROWS", 1)
+    days = list(BOUNDARY_LABELS) + [
+        date(1999, 1, 1),
+        date(2022, 6, 1),
+        date(2025, 1, 1),
+        date(2027, 1, 1),
+    ]
+    frame = pd.DataFrame(
+        {"fight_id": range(len(days) * 2), "event_date": days + days[::-1]}
+    )
+
+    train, calibration, test = chronological_three_way_split(frame)
+    labels = output.metro_partition(frame["event_date"])
+
+    assert set(frame.index[labels == "train"]) == set(train.index)
+    assert set(frame.index[labels == "calibracion"]) == set(calibration.index)
+    assert set(frame.index[labels == "test"]) == set(test.index)
+    split_rows = set(train.index) | set(calibration.index) | set(test.index)
+    assert set(frame.index[labels == "fuera"]) == set(frame.index) - split_rows
+
+
+def test_the_generator_log_names_both_snapshot_files_by_sha256(generator, capsys):
+    """known_fighter_ids.csv decides every unknown-history corner: the log has to
+    tie the CSV to it, not only to espn_history.csv."""
+    output.main(espn_snapshot=generator["snapshot"])
+
+    out = capsys.readouterr().out
+    files = read_manifest(generator["snapshot"])["files"]
+    for name in (ESPN_HISTORY_FILE, KNOWN_IDS_FILE):
+        assert f"{name} sha256 {files[name]['sha256']}" in out, name
 
 
 def test_cli_accepts_the_snapshot_option(tmp_path):
