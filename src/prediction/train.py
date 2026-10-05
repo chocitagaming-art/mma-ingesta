@@ -14,9 +14,13 @@ which trains several arms x seeds without ever writing the served bundle:
                                      and its folds always use GRID_SEED
     --feature-set NAME               a named column set of features/types.py
     --params JSON                    fixed XGBoost hyperparameters, no grid search
+                                     (keys of XGBClassifier only, no nulls; the
+                                     seed goes in --seed)
     --nan-policy {median,native}     median imputer, or NaN straight to XGBoost
     --no-test-report                 no test-period metric computed, printed or
                                      written (model_metrics.md is left alone)
+    --write-production-bundle        let a feature set other than legacy into
+                                     MODEL_PATH (refused without it)
 
 The bundle records feature_set, nan_policy, xgb_params and train_seed, so a run
 can be reproduced with ``--params`` and ``--seed`` (bundle_io.winner_training_config).
@@ -93,7 +97,12 @@ PARAMETER_GRID: dict[str, list[int | float]] = {
 GRID_SEED = 42
 DEFAULT_SEED = 42
 # train.py sets these itself: --params cannot override them (--seed is the way).
-_RESERVED_XGB_KEYS = ("objective", "eval_metric", "random_state")
+# 'seed' is XGBoost's alias of random_state: it would override --seed and the bundle
+# would record a train_seed that was not the one used.
+_RESERVED_XGB_KEYS = ("objective", "eval_metric", "random_state", "seed")
+# The feature set the served bundle has always had. Any other one goes into
+# MODEL_PATH only with --write-production-bundle.
+SERVED_FEATURE_SET = "legacy"
 # XGBoost draws random numbers only to subsample rows or columns. With all of these
 # at 1.0 every seed gives the same model.
 _SUBSAMPLING_KEYS = (
@@ -466,6 +475,18 @@ def _xgb_params_arg(text: str) -> dict[str, int | float]:
         raise argparse.ArgumentTypeError(
             f"cannot set {reserved}: train.py fixes them (the seed goes in --seed)"
         )
+    # XGBoost only warns about a key it does not know and trains with its default,
+    # while the bundle would record the key as used: a typo must fail here.
+    unknown = sorted(set(params) - set(XGBClassifier().get_params()))
+    if unknown:
+        raise argparse.ArgumentTypeError(
+            f"unknown XGBClassifier parameters {unknown} (a typo?)"
+        )
+    nulls = sorted(key for key, value in params.items() if value is None)
+    if nulls:
+        raise argparse.ArgumentTypeError(
+            f"null values for {nulls}: give a value or leave the key out"
+        )
     return params
 
 
@@ -539,11 +560,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "medicion pre-registrada sin mirar el test."
         ),
     )
+    parser.add_argument(
+        "--write-production-bundle",
+        action="store_true",
+        help=(
+            f"Permite guardar en {MODEL_PATH} (el bundle que sirve produccion) un "
+            f"modelo con un --feature-set distinto de {SERVED_FEATURE_SET}. Sin "
+            "ella, train se niega: es el paso de un despliegue, no de una medicion."
+        ),
+    )
     return parser.parse_args(argv)
+
+
+def _is_served_bundle(path: Path) -> bool:
+    return Path(path).resolve() == Path(MODEL_PATH).resolve()
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    if (
+        args.feature_set != SERVED_FEATURE_SET
+        and _is_served_bundle(args.bundle)
+        and not args.write_production_bundle
+    ):
+        # Checked before any work: forgetting --bundle in one arm of a measurement
+        # must not replace the served model.
+        raise RuntimeError(
+            f"train will not write a '{args.feature_set}' model into {MODEL_PATH}, "
+            "the bundle production serves. Pass --bundle for a measurement, or "
+            "--write-production-bundle if this IS the production retrain."
+        )
     candidate_columns = feature_set_columns(args.feature_set)
     dataset = load_dataset(args.dataset, candidate_columns)
     # Base model trains on train_df ONLY; calibration_df is the out-of-sample

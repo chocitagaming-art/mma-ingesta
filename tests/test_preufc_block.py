@@ -126,6 +126,20 @@ def test_method_search_is_case_insensitive_substring_as_in_the_experiment():
     assert features["espn_win_rate"] == 1.0
 
 
+def test_ko_is_found_anywhere_in_the_method_not_only_at_the_start():
+    # 625 methods are free text from ESPN's displayName: a 'TKO' that does not
+    # start with 'KO' is still a KO win (substring search, as in the experiment).
+    history = _history([
+        _row(1, 7, date(2021, 1, 1), "win", "TKO - Doctor Stoppage"),
+        _row(2, 7, date(2022, 1, 1), "win", "U-DEC"),
+    ])
+
+    features = espn_features_for_fighter(history, 7, FIGHT_DAY)
+
+    assert features["espn_ko_rate"] == 0.5
+    assert features["espn_sub_rate"] == 0.0
+
+
 def test_only_a_result_starting_with_w_is_a_win_and_the_rest_break_the_streak():
     history = _history([
         _row(1, 7, date(2019, 1, 1), "loss"),
@@ -331,28 +345,37 @@ def test_known_fighter_ids_need_espn_id_and_a_finished_sweep(fakedb):
 
     known = load_espn_known_fighter_ids(conn)
 
+    # The whole statement, normalized: BOTH conditions are required. An OR would
+    # count a linked but never-swept fighter as known and switch the rule off.
     sql = " ".join(ESPN_KNOWN_FIGHTERS_SQL.split()).upper()
-    assert "ESPN_ID IS NOT NULL" in sql
-    assert "ESPN_HISTORY_CHECKED_AT IS NOT NULL" in sql
+    assert sql == (
+        "SELECT ID FROM FIGHTERS "
+        "WHERE ESPN_ID IS NOT NULL AND ESPN_HISTORY_CHECKED_AT IS NOT NULL"
+    )
+    assert " OR " not in sql
     assert known == {3, 11}
     assert all(type(fighter_id) is int for fighter_id in known)
     assert fakedb.mutating_statements(conn) == []
 
 
 def test_index_groups_by_fighter_and_sorts_stably_by_date_then_id():
-    table = _history([
+    # Deliberately out of order: id 12 before 10 on the same day, and the oldest
+    # row (2017) last. An index that does not sort would keep [12, 10, 11].
+    rows = [
         _row(12, 1, date(2019, 5, 1)),
         _row(10, 1, date(2019, 5, 1)),
         _row(3, 2, date(2018, 1, 1)),
         _row(11, 1, date(2017, 1, 1)),
-    ])
+    ]
 
-    index = index_espn_history(table.sample(frac=1, random_state=3))
+    for ordering in (rows, list(reversed(rows))):
+        index = index_espn_history(_history(ordering))
 
-    assert set(index) == {1, 2}
-    assert all(type(fighter_id) is int for fighter_id in index)
-    assert list(index[1]["id"]) == [11, 10, 12]
-    assert list(index[2]["id"]) == [3]
+        assert set(index) == {1, 2}
+        assert all(type(fighter_id) is int for fighter_id in index)
+        assert list(index[1]["id"]) == [11, 10, 12]
+        assert list(index[2]["id"]) == [3]
+        assert list(index[1].index) == [0, 1, 2]
 
 
 def test_index_does_not_modify_its_input():

@@ -151,6 +151,9 @@ def ganador(monkeypatch, tmp_path):
     monkeypatch.setattr(output, "get_settings", lambda: _Settings())
     monkeypatch.setattr(output, "load_base_dataframe", lambda _url: pd.DataFrame())
     monkeypatch.setattr(output, "load_rankings_dataframe", lambda _url: pd.DataFrame())
+    monkeypatch.setattr(
+        output, "load_espn_inputs", lambda _url, _snapshot: (pd.DataFrame(), set())
+    )
     monkeypatch.setattr(output, "build_training_dataset", _construir)
     monkeypatch.setattr(
         output,

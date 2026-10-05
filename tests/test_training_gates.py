@@ -29,14 +29,20 @@ import pandas as pd
 import pytest
 
 import src.prediction.features.output as output
-from src.prediction.features import fighter_history
+from src.prediction.features import fighter_history, training
 from src.prediction.features.fighter_history import (
     build_fighter_history_dataframe,
     compute_fighter_history,
 )
 from src.prediction.features.method_training import build_method_training_dataset
+from src.prediction.features.preufc import ESPN_HISTORY_COLUMNS
 from src.prediction.features.training import build_training_dataset
-from src.prediction.features.types import FEATURE_COLUMNS, UFC_COUNT_COLUMNS
+from src.prediction.features.types import (
+    FEATURE_COLUMNS,
+    UFC_COUNT_COLUMNS,
+    WINNER_FEATURE_COLUMNS,
+    FighterHistorySummary,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 WINNER_GOLDEN = FIXTURES / "training_gates_winner_golden.csv"
@@ -211,10 +217,18 @@ def _golden_text(path: Path) -> str:
     return path.read_text(encoding="utf-8").replace("\r\n", "\n")
 
 
+def _build(fights: pd.DataFrame, rankings: pd.DataFrame):
+    # No ESPN rows and no fighter with known history: the gates do not depend on
+    # the pre-UFC block (tests/test_training_csv_v2.py covers it).
+    return build_training_dataset(
+        fights, rankings, espn_by_fighter={}, known_fighter_ids=set()
+    )
+
+
 @pytest.fixture(scope="module")
 def built():
     fights, rankings = _league()
-    return build_training_dataset(fights, rankings)
+    return _build(fights, rankings)
 
 
 def _row(result, fight_id: int) -> pd.Series:
@@ -298,32 +312,78 @@ def test_zero_sig_strike_attempts_row_kept_with_nan(built):
 # ---------------------------------------------------------------- spot checks
 
 
-def test_spot_checks_tolerate_none_history(built):
-    # The first fights of the league are all debutants: no AttributeError, and
-    # the check reports them with 0 prior fights and no latest date.
-    assert len(built.spot_checks) == 3
+def test_spot_checks_skip_rows_without_both_summaries(built):
+    # The first fights of the league are debutants: a leak check on them compares
+    # no date at all. The checks come from the first rows where BOTH corners have
+    # a UFC summary (fight 9 counts: its takedown accuracy None is not a summary
+    # missing), so the log shows real prior dates to compare.
+    assert [check["fight_id"] for check in built.spot_checks] == [4, 6, 9]
+    for check in built.spot_checks:
+        assert check["red_latest_prior_fight_date"] is not None
+        assert check["blue_latest_prior_fight_date"] is not None
+        assert check["used_only_prior_data"] is True
     first = built.spot_checks[0]
-    assert first["fight_id"] == 1
-    assert first["red_prior_fights"] == 0
-    assert first["blue_prior_fights"] == 0
-    assert first["red_latest_prior_fight_date"] is None
-    assert first["blue_latest_prior_fight_date"] is None
-    assert first["used_only_prior_data"] is True
-    assert all(check["used_only_prior_data"] for check in built.spot_checks)
+    assert (first["red_prior_fights"], first["blue_prior_fights"]) == (1, 1)
 
 
 def test_spot_checks_keep_reading_the_summary_when_it_exists():
     fights, rankings = _league()
-    # Fights 1 and 2 seed the history; fight 4 takes the third and last spot.
-    result = build_training_dataset(
-        fights[fights["fight_id"].isin([1, 2, 4])], rankings
-    )
-    assert [c["fight_id"] for c in result.spot_checks] == [1, 2, 4]
-    check = result.spot_checks[2]
+    # Fights 1 and 2 seed the history (debutants: no check); fight 4 is checked.
+    result = _build(fights[fights["fight_id"].isin([1, 2, 4])], rankings)
+    assert [c["fight_id"] for c in result.spot_checks] == [4]
+    check = result.spot_checks[0]
     assert check["red_prior_fights"] == 1
     assert check["blue_prior_fights"] == 1
     assert check["red_latest_prior_fight_date"] == "2010-01-10"
     assert check["used_only_prior_data"] is True
+
+
+def _summary(total_prior_fights: int, latest: date) -> FighterHistorySummary:
+    return FighterHistorySummary(
+        total_prior_fights=total_prior_fights,
+        total_rounds_fought=3 * total_prior_fights,
+        sig_strikes_landed_per_fight=30.0,
+        sig_strike_accuracy=0.5,
+        knockdowns_per_fight=0.0,
+        takedowns_landed_per_fight=1.0,
+        takedown_accuracy=0.4,
+        submission_attempts_per_fight=0.0,
+        control_time_seconds_per_fight=60.0,
+        win_streak=1,
+        wins_last_5=1,
+        pct_wins_by_ko=None,
+        pct_wins_by_submission=None,
+        pct_wins_by_decision=None,
+        days_since_last_fight=100,
+        ranking_position=None,
+        sig_strikes_absorbed_per_fight=20.0,
+        sig_strike_defense=0.6,
+        takedowns_absorbed_per_fight=0.5,
+        takedown_defense=0.7,
+        avg_opponent_prior_win_rate=None,
+        latest_prior_fight_date=latest,
+    )
+
+
+@pytest.mark.parametrize("same_day_side", ["red", "blue"])
+def test_spot_check_flags_a_summary_dated_on_the_fight_day(same_day_side):
+    """The leak flag: a summary whose latest prior fight is the fight's own day
+    used data that is not prior. Asymmetric counts pin which corner is which."""
+    event_date = date(2012, 6, 1)
+    earlier = date(2012, 1, 1)
+    red = _summary(2, event_date if same_day_side == "red" else earlier)
+    blue = _summary(5, event_date if same_day_side == "blue" else earlier)
+
+    check = training._spot_check(
+        {"fight_id": 77, "event_date": event_date}, red, blue, 2, 5
+    )
+
+    assert check["red_prior_fights"] == 2
+    assert check["blue_prior_fights"] == 5
+    assert check["used_only_prior_data"] is False
+    assert check[f"{same_day_side}_latest_prior_fight_date"] == "2012-06-01"
+    other = "blue" if same_day_side == "red" else "red"
+    assert check[f"{other}_latest_prior_fight_date"] == "2012-01-01"
 
 
 # ------------------------------------------------------ rows that already entered
@@ -359,8 +419,10 @@ def test_inclusion_counters_mirror_the_old_exclusions(built):
 
 def test_winner_csv_column_order_and_ufc_counts_never_nan(built):
     dataset = built.dataset
+    # The CSV v2 order: the 20 legacy diffs and the UFC counts lead the 49.
+    assert WINNER_FEATURE_COLUMNS[:22] == [*FEATURE_COLUMNS, *UFC_COUNT_COLUMNS]
     assert list(dataset.columns) == [
-        "fight_id", "event_date", *FEATURE_COLUMNS, *UFC_COUNT_COLUMNS, "target"
+        "fight_id", "event_date", *WINNER_FEATURE_COLUMNS, "target"
     ]
     for column in UFC_COUNT_COLUMNS:
         assert dataset[column].notna().all()
@@ -445,6 +507,11 @@ def test_output_main_writes_the_new_columns_and_logs_the_inclusions(
     monkeypatch.setattr(output, "get_settings", lambda: _Settings())
     monkeypatch.setattr(output, "load_base_dataframe", lambda _url: fights)
     monkeypatch.setattr(output, "load_rankings_dataframe", lambda _url: rankings)
+    monkeypatch.setattr(
+        output,
+        "load_espn_inputs",
+        lambda _url, _snapshot: (pd.DataFrame(columns=ESPN_HISTORY_COLUMNS), set()),
+    )
     monkeypatch.setattr(output, "OUTPUT_CSV_PATH", tmp_path / "training_dataset.csv")
     monkeypatch.setattr(
         output, "create_output_table", lambda *a, **k: pytest.fail("touched the DB")
@@ -454,7 +521,7 @@ def test_output_main_writes_the_new_columns_and_logs_the_inclusions(
 
     written = pd.read_csv(tmp_path / "training_dataset.csv")
     assert list(written.columns) == [
-        "fight_id", "event_date", *FEATURE_COLUMNS, *UFC_COUNT_COLUMNS, "target"
+        "fight_id", "event_date", *WINNER_FEATURE_COLUMNS, "target"
     ]
     assert written[UFC_COUNT_COLUMNS].notna().all().all()
     log = capsys.readouterr().out
