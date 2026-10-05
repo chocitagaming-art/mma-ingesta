@@ -32,8 +32,8 @@ from src.prediction.features import (
     load_rankings_dataframe,
 )
 from src.prediction.features.db import (
+    CompactEspnIndex,
     begin_read_only_snapshot,
-    index_espn_history,
     load_espn_history_dataframe,
     load_espn_known_fighter_ids,
 )
@@ -217,7 +217,9 @@ def _load_fighter_physical(database_url: str, fighter_ids: list[int]) -> dict[in
 class PreUfcHistory:
     """fight_history_espn as the winner row reads it (phase 4, the pre-UFC block).
 
-    ``by_fighter`` is db.index_espn_history(...), ``known_fighter_ids`` the fighters
+    ``by_fighter`` maps a fighter to his rows exactly as db.index_espn_history
+    does (from_frames keeps the db.CompactEspnIndex form: one frame plus offsets,
+    the same rows for a fraction of the RAM), ``known_fighter_ids`` the fighters
     whose ESPN history is known (db.load_espn_known_fighter_ids: anyone else gets
     his whole corner as "unknown", see build_preufc_block) and ``rows`` the size of
     the table, for /health. Read-only once built: the service shares one across
@@ -233,7 +235,7 @@ class PreUfcHistory:
     ) -> PreUfcHistory:
         """Index ``history`` once, stable (event_date, id) order per fighter."""
         return cls(
-            index_espn_history(history),
+            CompactEspnIndex(history),
             frozenset(int(fighter_id) for fighter_id in known_fighter_ids),
             len(history),
         )

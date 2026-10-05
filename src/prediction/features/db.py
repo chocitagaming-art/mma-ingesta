@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
+
+import numpy as np
 import pandas as pd
 from psycopg2.extensions import connection as PgConnection
 
@@ -135,7 +138,8 @@ def begin_read_only_snapshot(connection: PgConnection) -> None:
 
 def fetch_espn_history_rows(connection: PgConnection) -> list[dict]:
     """The raw rows of ESPN_HISTORY_SQL, as psycopg2 hands them back (int, date,
-    str, bool, None). preufc_snapshot.py freezes exactly these."""
+    str, bool, None), one dict per row. preufc_snapshot.py freezes exactly these;
+    load_espn_history_dataframe runs the same SQL with a plain cursor."""
     with cursor(connection) as db_cursor:
         db_cursor.execute(ESPN_HISTORY_SQL)
         return db_cursor.fetchall()
@@ -147,8 +151,15 @@ def load_espn_history_dataframe(connection: PgConnection) -> pd.DataFrame:
     Takes an open connection (read-only is enough) so the caller decides whether it
     is pooled. An empty table still yields the ESPN_HISTORY_COLUMNS, so the index
     and the block keep working on it.
+
+    Plain tuples, not RealDictCursor rows: the frame is the same one (rows, order,
+    dtypes and values, pinned by tests/test_preufc_history_memory.py), but the ~36k
+    dicts a RealDictCursor builds and throws away are never made. In the
+    long-lived service they left heap behind at every refresh (B6, steady RSS).
     """
-    rows = fetch_espn_history_rows(connection)
+    with connection.cursor() as db_cursor:
+        db_cursor.execute(ESPN_HISTORY_SQL)
+        rows = db_cursor.fetchall()
     return pd.DataFrame(rows, columns=ESPN_HISTORY_COLUMNS)
 
 
@@ -164,7 +175,8 @@ def index_espn_history(history: pd.DataFrame) -> dict[int, pd.DataFrame]:
     """fighter_id -> that fighter's rows, sorted stably by (event_date, id).
 
     Built once so each corner of each bout reads a handful of rows instead of the
-    whole table. The input frame is not modified.
+    whole table. The input frame is not modified. The training CSV uses it;
+    the long-lived service keeps CompactEspnIndex instead (same rows, less RAM).
     """
     if history.empty:
         return {}
@@ -173,3 +185,52 @@ def index_espn_history(history: pd.DataFrame) -> dict[int, pd.DataFrame]:
         int(fighter_id): group.reset_index(drop=True)
         for fighter_id, group in ordered.groupby("fighter_id", sort=False)
     }
+
+
+class CompactEspnIndex(Mapping[int, pd.DataFrame]):
+    """index_espn_history as ONE frame plus offsets, for the long-lived service.
+
+    A dict of ~2,600 small DataFrames costs far more than their rows (B6: 10.8
+    MiB of index for a 10.8 MiB table, +42 MiB of steady RSS on Windows). This
+    keeps a single copy of the table, sorted by fighter, and each fighter's
+    [start, stop) in it. ``index[fighter_id]`` hands back exactly the frame
+    index_espn_history would: the same rows in the same order (stably by
+    (event_date, id), then the input order), the same dtypes and a fresh 0..n-1
+    index (tests/test_preufc_history_memory.py). Missing fighters raise KeyError,
+    so ``.get(fighter_id, default)`` works as on the dict. Read-only: nothing in
+    the block writes to the frames it is handed. Iteration goes by fighter id.
+
+    The input frame is not modified."""
+
+    def __init__(self, history: pd.DataFrame) -> None:
+        # The same stable (event_date, id) sort as index_espn_history, THEN a stable
+        # sort by fighter: inside each fighter the first order is kept exactly.
+        # groupby drops a NULL key; so does this (fighter_id is NOT NULL anyway).
+        ordered = history.sort_values(["event_date", "id"], kind="stable")
+        ordered = ordered[ordered["fighter_id"].notna()]
+        self._frame = ordered.sort_values("fighter_id", kind="stable").reset_index(
+            drop=True
+        )
+        fighter_ids = self._frame["fighter_id"].to_numpy()
+        if len(fighter_ids) == 0:
+            self._bounds: dict[int, tuple[int, int]] = {}
+            return
+        starts = np.flatnonzero(np.r_[True, fighter_ids[1:] != fighter_ids[:-1]])
+        stops = np.r_[starts[1:], len(fighter_ids)]
+        self._bounds = {
+            int(fighter_ids[start]): (int(start), int(stop))
+            for start, stop in zip(starts, stops)
+        }
+
+    def __getitem__(self, fighter_id: int) -> pd.DataFrame:
+        start, stop = self._bounds[fighter_id]
+        return self._frame.iloc[start:stop].reset_index(drop=True)
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(self._bounds)
+
+    def __len__(self) -> int:
+        return len(self._bounds)
+
+    def __contains__(self, fighter_id: object) -> bool:
+        return fighter_id in self._bounds

@@ -120,8 +120,9 @@ def build_preufc_block(
 ) -> dict[str, Any]:
     """The 18 PREUFC_COLUMNS of a bout ({base}_red, {base}_blue per base, in order).
 
-    `espn_by_fighter` is db.index_espn_history(...): a fighter missing from it has no
-    rows. `cutoff` is the date of the bout (training) or of the matchup (serving).
+    `espn_by_fighter` is db.index_espn_history(...) (training) or the equivalent
+    db.CompactEspnIndex (serving): a fighter missing from it has no rows. `cutoff`
+    is the date of the bout (training) or of the matchup (serving).
 
     UNKNOWN HISTORY (deliberate deviation from the experiment, which had no such
     rule): a fighter NOT in `known_fighter_ids` (db.load_espn_known_fighter_ids: an
