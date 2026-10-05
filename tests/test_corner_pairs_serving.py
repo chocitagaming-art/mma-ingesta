@@ -387,7 +387,10 @@ def test_each_pair_is_one_factor_named_after_its_base(serve, pair_bundle, red, b
     result = serve(pair_bundle, red, blue)
     contributions = result["featureContributions"]
 
-    assert set(contributions) == set(FEATURE_COLUMNS) | set(CORNER_PAIR_BASES)
+    # total_prior_fights_diff rides inside the ufc_prev_fights factor (see below).
+    assert set(contributions) == (
+        set(FEATURE_COLUMNS) - {"total_prior_fights_diff"}
+    ) | set(CORNER_PAIR_BASES)
     for name in [f["name"] for f in result["topFeatures"]] + list(contributions):
         assert not name.endswith(("_red", "_blue")), name
     # Same keys as topFeatures, or the web's "rest" bar counts a pair twice.
@@ -430,26 +433,32 @@ def test_factors_still_add_up_to_the_symmetrized_margin(serve, pair_bundle, red,
     )
 
 
-def test_pair_factor_is_the_sum_of_both_corners(serve, pair_bundle):
-    """contribution(base) = symmetrized contribution of {base}_red + of {base}_blue."""
-    columns = pair_bundle["feature_columns"]
-    booster = pair_bundle["model"].get_booster()
+def _symmetrized_contributions(bundle: dict, red: int, blue: int) -> np.ndarray:
+    """(TreeSHAP(row(red, blue)) - TreeSHAP(row(blue, red))) / 2, per column."""
+    columns = bundle["feature_columns"]
+    booster = bundle["model"].get_booster()
 
     def contributions(row: dict) -> np.ndarray:
         frame = pd.DataFrame([{c: row.get(c) for c in columns}])
-        matrix = pair_bundle["imputer"].transform(frame)
+        matrix = bundle["imputer"].transform(frame)
         return booster.predict(DMatrix(matrix), pred_contribs=True)[0][:-1]
 
-    symmetrized = (
-        contributions(_row(TWIN_STRONG, TWIN_WEAK))
-        - contributions(_row(TWIN_WEAK, TWIN_STRONG))
-    ) / 2.0
+    return (contributions(_row(red, blue)) - contributions(_row(blue, red))) / 2.0
+
+
+def test_pair_factor_is_the_sum_of_both_corners(serve, pair_bundle):
+    """contribution(base) = symmetrized contribution of {base}_red + of {base}_blue
+    (+ total_prior_fights_diff for ufc_prev_fights, the factor that absorbs it)."""
+    columns = pair_bundle["feature_columns"]
+    symmetrized = _symmetrized_contributions(pair_bundle, TWIN_STRONG, TWIN_WEAK)
     result = serve(pair_bundle, TWIN_STRONG, TWIN_WEAK)
 
     for base in CORNER_PAIR_BASES:
         expected = float(symmetrized[columns.index(f"{base}_red")]) + float(
             symmetrized[columns.index(f"{base}_blue")]
         )
+        if base == "ufc_prev_fights":
+            expected += float(symmetrized[columns.index("total_prior_fights_diff")])
         assert result["featureContributions"][base] == pytest.approx(
             expected, abs=1e-12
         ), base
@@ -547,3 +556,128 @@ def test_half_a_pair_in_a_bundle_stays_its_own_factor(monkeypatch):
     assert top[1]["value"] is None
     assert top[1]["contribution"] == pytest.approx(0.1)
     assert set(contributions) == {"age_diff", "espn_win_rate_red"}
+
+
+# --- One quantity, one bar: total_prior_fights_diff inside ufc_prev_fights ---------
+#
+# Both say how many UFC fights each corner had: total_prior_fights_diff (NaN for a
+# debutant once the gates are open) and the ufc_prev_fights pair (never NaN). Shown
+# apart they were two bars with almost the same meaning ("Experiencia (peleas
+# previas)" next to "Peleas en UFC"). With both in the bundle they are ONE factor,
+# named ufc_prev_fights: the three symmetrized contributions added up, and the raw
+# red-minus-blue of the pair as its value. Without the pair nothing changes.
+
+
+def test_total_prior_fights_merges_into_the_ufc_count_factor(monkeypatch):
+    columns = [
+        "total_prior_fights_diff",
+        "age_diff",
+        "ufc_prev_fights_red",
+        "ufc_prev_fights_blue",
+    ]
+    transformed = np.array([[2.0, 1.5, 7.0, 4.0]])
+    # symmetrized = (forward - swapped) / 2 = [0.20, 0.05, 0.125, -0.10]
+    _pin_raw_contributions(
+        monkeypatch,
+        forward=[0.30, 0.05, 0.20, -0.10],
+        swapped=[-0.10, -0.05, -0.05, 0.10],
+    )
+
+    top, contributions = api._compute_top_features(
+        object(),
+        columns,
+        transformed,
+        transformed,
+        raw_row={
+            "total_prior_fights_diff": None,  # a debutant's NaN diff: never the value
+            "age_diff": 1.5,
+            "ufc_prev_fights_red": 7,
+            "ufc_prev_fights_blue": 4,
+        },
+    )
+
+    assert [f["name"] for f in top] == ["ufc_prev_fights", "age_diff"]
+    merged = top[0]
+    assert merged["contribution"] == pytest.approx(0.20 + 0.125 - 0.10)
+    assert merged["value"] == pytest.approx(7 - 4)
+    assert merged["direction"] == "red"
+    assert contributions == pytest.approx(
+        {"ufc_prev_fights": 0.225, "age_diff": 0.05}
+    )
+    assert "total_prior_fights_diff" not in contributions
+
+
+@pytest.mark.parametrize(("red", "blue"), MATCHUPS, ids=MATCHUP_IDS)
+def test_the_merged_factor_is_antisymmetric_and_the_balance_closes(
+    serve, pair_bundle, red, blue
+):
+    forward = serve(pair_bundle, red, blue)
+    backward = serve(pair_bundle, blue, red)
+    columns = pair_bundle["feature_columns"]
+    symmetrized = _symmetrized_contributions(pair_bundle, red, blue)
+
+    for result in (forward, backward):
+        assert "total_prior_fights_diff" not in result["featureContributions"]
+        assert all(f["name"] != "total_prior_fights_diff" for f in result["topFeatures"])
+    merged = forward["featureContributions"]["ufc_prev_fights"]
+    expected = sum(
+        float(symmetrized[columns.index(column)])
+        for column in (
+            "ufc_prev_fights_red",
+            "ufc_prev_fights_blue",
+            "total_prior_fights_diff",
+        )
+    )
+    assert merged == pytest.approx(expected, abs=1e-12)
+    assert backward["featureContributions"]["ufc_prev_fights"] == pytest.approx(
+        -merged, abs=1e-12
+    )
+    margin = (
+        _margin(pair_bundle, _row(red, blue)) - _margin(pair_bundle, _row(blue, red))
+    ) / 2.0
+    assert sum(forward["featureContributions"].values()) == pytest.approx(
+        margin, abs=1e-5
+    )
+    # Its value, wherever it ranks: the raw count difference of the pair.
+    _top, _ = api._compute_top_features(
+        pair_bundle["model"],
+        columns,
+        pair_bundle["imputer"].transform(
+            pd.DataFrame([{c: _row(red, blue).get(c) for c in columns}])
+        ),
+        pair_bundle["imputer"].transform(
+            pd.DataFrame([{c: _row(blue, red).get(c) for c in columns}])
+        ),
+        raw_row=_row(red, blue),
+    )
+    by_name = {f["name"]: f for f in _top}
+    if "ufc_prev_fights" in by_name:
+        assert by_name["ufc_prev_fights"]["value"] == pytest.approx(
+            FIGHTERS[red]["ufc_prev_fights"] - FIGHTERS[blue]["ufc_prev_fights"]
+        )
+
+
+def test_the_merge_needs_the_whole_pair_and_leaves_the_legacy_bundle_alone():
+    # The 27-jun schema: 20 factors, one per column, exactly as before (the golden
+    # of tests/test_predict_golden_27jun.py pins the whole served output).
+    assert api._attribution_factors(list(FEATURE_COLUMNS)) == [
+        (column, [index]) for index, column in enumerate(FEATURE_COLUMNS)
+    ]
+    # Half the pair: nothing to merge into.
+    assert api._attribution_factors(
+        ["total_prior_fights_diff", "ufc_prev_fights_red"]
+    ) == [("total_prior_fights_diff", [0]), ("ufc_prev_fights_red", [1])]
+    # The pair without total_prior_fights_diff: a plain pair.
+    assert api._attribution_factors(
+        ["age_diff", "ufc_prev_fights_red", "ufc_prev_fights_blue"]
+    ) == [("age_diff", [0]), ("ufc_prev_fights", [1, 2])]
+    # Arm A ('base') and B ('preufc') carry both: one factor, at the pair's place.
+    for name in ("base", "preufc", "preufc_diff"):
+        columns = FEATURE_SETS[name]
+        factors = dict(api._attribution_factors(columns))
+        assert "total_prior_fights_diff" not in factors, name
+        assert factors["ufc_prev_fights"] == [
+            columns.index("ufc_prev_fights_red"),
+            columns.index("ufc_prev_fights_blue"),
+            columns.index("total_prior_fights_diff"),
+        ], name

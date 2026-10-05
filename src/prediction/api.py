@@ -568,6 +568,15 @@ def _raw_contributions(model: Any, transformed_row: np.ndarray) -> np.ndarray | 
     return booster.predict(dmatrix, pred_contribs=True)[0][:-1]
 
 
+# A single column whose factor is folded INTO a pair's factor when the bundle has
+# the whole pair: the same quantity in two encodings would otherwise be two bars
+# with almost the same meaning. total_prior_fights_diff (NaN for a debutant once
+# the gates are open) and the ufc_prev_fights pair (never NaN) both count each
+# corner's prior UFC fights (count_prior_ufc_fights == total_prior_fights whenever
+# the summary exists). Absorbed column -> the pair base that absorbs it.
+ABSORBED_BY_PAIR: dict[str, str] = {"total_prior_fights_diff": "ufc_prev_fights"}
+
+
 def _attribution_factors(feature_columns: list[str]) -> list[tuple[str, list[int]]]:
     """The factors shown to the user, as (name, indices into feature_columns).
 
@@ -577,19 +586,39 @@ def _attribution_factors(feature_columns: list[str]) -> list[tuple[str, list[int
     compares both fighters in the same slot, the concept shows up twice and each
     half ranks lower than the whole. Half a pair (never produced by training:
     train.get_available_feature_columns keeps or drops pairs whole) stays a
-    factor of its own, named after its column, whose value is None."""
+    factor of its own, named after its column, whose value is None.
+
+    A column of ABSORBED_BY_PAIR is no factor of its own when its pair is whole in
+    the bundle: its index goes after the pair's two (red, blue, absorbed...), and
+    the pair's factor carries it. Without the whole pair it stays its own factor,
+    so a bundle without the pair (the 27-jun one) gets exactly one factor per
+    column, as before."""
     index_of = {column: index for index, column in enumerate(feature_columns)}
+    whole_pairs = {
+        base
+        for base, (red, blue) in CORNER_PAIRS.items()
+        if red in index_of and blue in index_of
+    }
+    absorbed_into: dict[str, list[int]] = {}
+    for column, base in ABSORBED_BY_PAIR.items():
+        if column in index_of and base in whole_pairs:
+            absorbed_into.setdefault(base, []).append(index_of[column])
+    absorbed = {index for indices in absorbed_into.values() for index in indices}
     factors: list[tuple[str, list[int]]] = []
     for index, column in enumerate(feature_columns):
+        if index in absorbed:
+            continue
         base = PAIR_BASE_BY_COLUMN.get(column)
         if base is None:
             factors.append((column, [index]))
             continue
         red, blue = CORNER_PAIRS[base]
-        if red not in index_of or blue not in index_of:
+        if base not in whole_pairs:
             factors.append((column, [index]))
         elif index == min(index_of[red], index_of[blue]):
-            factors.append((base, [index_of[red], index_of[blue]]))
+            factors.append(
+                (base, [index_of[red], index_of[blue], *absorbed_into.get(base, [])])
+            )
     return factors
 
 
@@ -629,14 +658,16 @@ def _compute_top_features(
 
     Per-corner pairs are merged into one factor per base (see
     ``_attribution_factors``): its contribution is the symmetrized contribution
-    of the red column plus that of the blue one, which stays antisymmetric under
-    a corner swap and only regroups terms, so the balance still closes. Its value
-    is the raw red-minus-blue difference from ``raw_row`` (the row before
-    imputation), or None when a side is unknown or no raw row is given. Half a
-    pair in the bundle also reports None: what the booster saw for that one
-    corner may be the imputer's median, and one fighter's number is not a
-    red-minus-blue difference anyway. The full map uses the same factor names as
-    the ranking, so a pair is never counted twice by the UI.
+    of the red column plus that of the blue one (plus that of any column the
+    pair absorbs: total_prior_fights_diff inside ufc_prev_fights), which stays
+    antisymmetric under a corner swap and only regroups terms, so the balance
+    still closes. Its value is the raw red-minus-blue difference of the PAIR from
+    ``raw_row`` (the row before imputation), or None when a side is unknown or no
+    raw row is given. Half a pair in the bundle also reports None: what the
+    booster saw for that one corner may be the imputer's median, and one
+    fighter's number is not a red-minus-blue difference anyway. The full map uses
+    the same factor names as the ranking, so a pair (or an absorbed column) is
+    never counted twice by the UI.
 
     Returns the ranked top five (signed contribution, direction, and for a
     ``*_diff`` the (imputed) forward value the model actually saw) plus the FULL
@@ -672,10 +703,13 @@ def _compute_top_features(
                 else float(transformed_row[0][index])
             )
         else:
-            red_index, blue_index = indices
+            # A pair (red, blue), plus any column it absorbs: every term added.
+            red_index, blue_index, *absorbed = indices
             contribution = float(symmetrized[red_index]) + float(
                 symmetrized[blue_index]
             )
+            for index in absorbed:
+                contribution += float(symmetrized[index])
             value = _raw_pair_difference(
                 raw_row, feature_columns[red_index], feature_columns[blue_index]
             )

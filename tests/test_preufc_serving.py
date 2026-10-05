@@ -895,9 +895,13 @@ def test_the_merged_pre_ufc_factor_comes_out(offline_api, bundles):
     )
 
     contributions = result["featureContributions"]
-    assert set(contributions) == set(FEATURE_COLUMNS) | set(CORNER_PAIR_BASES)
+    # total_prior_fights_diff is inside the ufc_prev_fights factor (one bar).
+    assert set(contributions) == (
+        set(FEATURE_COLUMNS) - {"total_prior_fights_diff"}
+    ) | set(CORNER_PAIR_BASES)
     names = [factor["name"] for factor in result["topFeatures"]] + list(contributions)
     assert not any(name.endswith(("_red", "_blue")) for name in names)
+    assert "total_prior_fights_diff" not in names
     # The label leans on it: it leads, as one factor, with the raw red-minus-blue
     # difference as its value (A 2/3, B 2/2 before FIGHT_DAY).
     top = result["topFeatures"][0]
