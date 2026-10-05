@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import math
+from contextlib import contextmanager
 from datetime import date
 from types import SimpleNamespace
 
@@ -41,12 +42,17 @@ from sklearn.impute import SimpleImputer
 from xgboost import XGBClassifier
 
 import src.prediction.service as service
+import src.scrapers.db as scrapers_db
 from src.prediction import api
 from src.prediction.features import (
     build_fighter_history_dataframe,
     build_training_dataset,
 )
-from src.prediction.features.db import index_espn_history
+from src.prediction.features.db import (
+    ESPN_HISTORY_SQL,
+    ESPN_KNOWN_FIGHTERS_SQL,
+    index_espn_history,
+)
 from src.prediction.features.fighter_history import count_prior_ufc_fights
 from src.prediction.features.preufc import (
     ESPN_HISTORY_COLUMNS,
@@ -503,6 +509,172 @@ def test_preufc_history_from_frames_indexes_once_and_counts():
     assert list(history.by_fighter[A]["id"]) == [101, 102, 103, 104, 105]
     assert api.UNAVAILABLE_PREUFC_HISTORY.known_fighter_ids == frozenset()
     assert api.UNAVAILABLE_PREUFC_HISTORY.rows == 0
+
+
+# ------------------------------------------- load_preufc_history: one consistent read
+
+SWEPT = 9  # swept for the first time by the Tuesday cron WHILE the service loads
+
+
+class _SweepRaceDatabase:
+    """fight_history_espn and fighters as Postgres shows them. The Tuesday cron
+    commits SWEPT's first sweep (his rows plus espn_history_checked_at, in one
+    commit) right after the load's FIRST SELECT, whichever that is."""
+
+    def __init__(self):
+        self.rows = list(ESPN_ROWS)
+        self.known = set(KNOWN)
+        self.selects = 0
+
+    def committed(self):
+        return list(self.rows), set(self.known)
+
+    def after_select(self):
+        self.selects += 1
+        if self.selects == 1:
+            self.rows.append(
+                (901, SWEPT, date(2024, 2, 2), "win", "KO/TKO", False, "8")
+            )
+            self.known.add(SWEPT)
+
+
+class _RaceConnection:
+    """A psycopg2 connection over _SweepRaceDatabase. READ COMMITTED by default:
+    each SELECT sees the latest commit. ``SET TRANSACTION ... REPEATABLE READ``
+    (honoured only inside a transaction, as with autocommit off) must come before
+    any query, and then every SELECT sees the snapshot of the first one."""
+
+    def __init__(self, database: _SweepRaceDatabase, honours_set_transaction: bool):
+        self.database = database
+        self.honours_set_transaction = honours_set_transaction
+        self.statements: list[str] = []
+        self.queries = 0
+        self.isolation = "read committed"
+        self.read_only = False
+        self.snapshot = None
+
+    def cursor(self, cursor_factory=None):
+        return _RaceCursor(self, as_dicts=cursor_factory is not None)
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        pass
+
+
+class _RaceCursor:
+    def __init__(self, connection: _RaceConnection, as_dicts: bool):
+        self.connection = connection
+        self.as_dicts = as_dicts
+        self._rows: list = []
+
+    def execute(self, sql, params=None):
+        connection = self.connection
+        normalized = " ".join(sql.split())
+        connection.statements.append(normalized)
+        if normalized.upper().startswith("SET TRANSACTION"):
+            if connection.queries:
+                raise AssertionError(
+                    "SET TRANSACTION ISOLATION LEVEL must be called before any query"
+                )
+            if connection.honours_set_transaction:
+                upper = normalized.upper()
+                if "REPEATABLE READ" in upper:
+                    connection.isolation = "repeatable read"
+                connection.read_only = "READ ONLY" in upper
+            self._rows = []
+            return
+        connection.queries += 1
+        if connection.isolation == "repeatable read":
+            if connection.snapshot is None:
+                connection.snapshot = connection.database.committed()
+            rows, known = connection.snapshot
+        else:
+            rows, known = connection.database.committed()
+        if sql == ESPN_KNOWN_FIGHTERS_SQL:
+            result = [{"id": f} if self.as_dicts else (f,) for f in sorted(known)]
+        elif sql == ESPN_HISTORY_SQL:
+            ordered = sorted(rows, key=lambda row: (row[1], row[2], row[0]))
+            result = [
+                dict(zip(ESPN_HISTORY_COLUMNS, row)) if self.as_dicts else row
+                for row in ordered
+            ]
+        else:
+            raise AssertionError(f"unexpected SQL: {normalized}")
+        connection.database.after_select()
+        self._rows = result
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _connect_to(monkeypatch, connection: _RaceConnection) -> None:
+    """load_preufc_history imports connect from src.scrapers.db when called."""
+
+    @contextmanager
+    def fake_connect(database_url):
+        assert database_url == STUB_URL
+        yield connection
+
+    monkeypatch.setattr(scrapers_db, "connect", fake_connect)
+
+
+@pytest.mark.parametrize(
+    "honours_set_transaction", [True, False], ids=["repeatable-read", "autocommit"]
+)
+def test_a_sweep_committed_mid_load_never_makes_a_known_fighter_without_rows(
+    monkeypatch, honours_set_transaction
+):
+    """The Tuesday cron commits a fighter's rows and his sweep stamp together. A
+    load that read the rows BEFORE that commit and the known ids AFTER it would
+    serve him as known with no prior fight (has_history 0, the 35.8 % penalty the
+    unknown-history rule exists to avoid) for a whole TTL. Read in one snapshot,
+    or at least the known ids first, the same race gives "don't know" (None)."""
+    database = _SweepRaceDatabase()
+    _connect_to(monkeypatch, _RaceConnection(database, honours_set_transaction))
+
+    history = api.load_preufc_history(STUB_URL)
+
+    assert database.selects == 2  # the sweep did land between the two reads
+    assert SWEPT not in history.known_fighter_ids or SWEPT in history.by_fighter
+    block = build_preufc_block(
+        SWEPT, A, FIGHT_DAY, history.by_fighter, history.known_fighter_ids
+    )
+    assert block["espn_has_history_red"] is None
+    assert block["espn_prev_fights_red"] is None
+
+
+def test_load_preufc_history_reads_the_known_ids_first_in_one_read_only_snapshot(
+    monkeypatch,
+):
+    connection = _RaceConnection(_SweepRaceDatabase(), honours_set_transaction=True)
+    _connect_to(monkeypatch, connection)
+
+    history = api.load_preufc_history(STUB_URL)
+
+    assert connection.statements == [
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+        " ".join(ESPN_KNOWN_FIGHTERS_SQL.split()),
+        " ".join(ESPN_HISTORY_SQL.split()),
+    ]
+    assert connection.isolation == "repeatable read"
+    assert connection.read_only is True
+    # One snapshot: what was committed when the first SELECT ran.
+    assert history.known_fighter_ids == KNOWN
+    assert history.rows == len(ESPN_ROWS)
 
 
 # ------------------------------------------------------------ api.predict end to end

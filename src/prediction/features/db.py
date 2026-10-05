@@ -27,6 +27,11 @@ ESPN_KNOWN_FIGHTERS_SQL = """
         AND espn_history_checked_at IS NOT NULL
 """
 
+# One consistent, read-only view for the SELECTs that follow on the same connection
+# (begin_read_only_snapshot). It has to be the FIRST statement of the transaction,
+# and it lasts only for that transaction, so a pooled connection keeps its defaults.
+READ_ONLY_SNAPSHOT_SQL = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+
 
 def load_base_dataframe(database_url: str) -> pd.DataFrame:
     query = """
@@ -112,6 +117,20 @@ def load_rankings_dataframe(database_url: str) -> pd.DataFrame:
         return dataframe
     dataframe["snapshot_date"] = pd.to_datetime(dataframe["snapshot_date"]).dt.date
     return dataframe
+
+
+def begin_read_only_snapshot(connection: PgConnection) -> None:
+    """Make the rest of this transaction ONE read-only REPEATABLE READ snapshot.
+
+    Call it before any other statement on a connection that is not in a
+    transaction yet (a fresh one, or one the pool rolled back on return): psycopg2
+    opens the transaction with this statement, every later SELECT sees what was
+    committed when the first of them ran, and the setting ends with the
+    transaction (src.scrapers.db.connect rolls back a pooled connection, a direct
+    one is closed). On an autocommit connection PostgreSQL only warns and the
+    SELECTs fall back to one READ COMMITTED transaction each."""
+    with cursor(connection) as db_cursor:
+        db_cursor.execute(READ_ONLY_SNAPSHOT_SQL)
 
 
 def fetch_espn_history_rows(connection: PgConnection) -> list[dict]:

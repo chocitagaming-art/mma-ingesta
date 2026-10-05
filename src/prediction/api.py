@@ -32,6 +32,7 @@ from src.prediction.features import (
     load_rankings_dataframe,
 )
 from src.prediction.features.db import (
+    begin_read_only_snapshot,
     index_espn_history,
     load_espn_history_dataframe,
     load_espn_known_fighter_ids,
@@ -254,12 +255,21 @@ def needs_preufc_history(feature_columns: Iterable[str]) -> bool:
 
 def load_preufc_history(database_url: str) -> PreUfcHistory:
     """Every fight_history_espn row (the DWCS included) and the known-history ids,
-    read over ONE connection, with the per-fighter index built once."""
+    read over ONE connection, with the per-fighter index built once.
+
+    Both reads go in one read-only REPEATABLE READ transaction, and the known ids
+    go FIRST. The Tuesday cron commits a fighter's rows and his sweep stamp
+    together; rows read before that commit and ids read after it would serve him
+    as KNOWN WITHOUT ROWS (has_history 0) for a whole TTL, the very penalty the
+    unknown-history rule avoids. One snapshot rules that out, and should the
+    snapshot not apply (an autocommit connection) the order alone turns the same
+    race into "unknown" (None), the safe side."""
     from src.scrapers.db import connect
 
     with connect(database_url) as connection:
-        history = load_espn_history_dataframe(connection)
+        begin_read_only_snapshot(connection)
         known_fighter_ids = load_espn_known_fighter_ids(connection)
+        history = load_espn_history_dataframe(connection)
     return PreUfcHistory.from_frames(history, known_fighter_ids)
 
 
