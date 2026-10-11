@@ -1,0 +1,25 @@
+-- 030_drop_gyms.sql — Se borra la tabla de gimnasios de OpenStreetMap.
+--
+-- La sección Gimnasios se quitó entera de la web el 11-oct-2026 (decisión del
+-- dueño del 9-oct): mma-app b09a4df borró /gimnasios y /api/gyms, que era el
+-- ÚNICO lector, y mma-ingesta ce963b9 borró el scraper gyms_osm.py y su cron
+-- refresh-gyms.yml, que era el único escritor. El dueño dio el OK a borrar la
+-- tabla el mismo 11-oct.
+--
+-- ⚠️ NO es el gimnasio del luchador. El que sale en su ficha es la columna
+-- fighters.trains_at (enrich_photos_ufc / enrich_fullbody), que no se toca y no
+-- tiene ninguna relación con esta tabla (0 coincidencias de nombre, medido).
+--
+-- Antes de borrar: 252 filas, sin claves foráneas que apunten a ella, sin vistas
+-- y sin funciones. Copia en
+-- mma-docs/ARCHIVO/correcciones-datos/2026-10-11/gyms_antes_de_borrar.csv
+-- (253 líneas con la cabecera), y en la copia diaria de la base de ese día.
+-- El permiso SELECT de mma_app_readonly sobre la tabla se va con ella.
+--
+-- 🪤 La puerta de cordura de la copia diaria (mma-docs, backup-db.yml) da ROJO
+-- cuando una tabla DESAPARECE. Tras aplicar esto, relanzar esa copia a mano con
+-- forzar=true; si no, el cron del día siguiente se para.
+--
+-- 023_gyms.sql se queda en el repo como historia.
+
+DROP TABLE IF EXISTS gyms;
