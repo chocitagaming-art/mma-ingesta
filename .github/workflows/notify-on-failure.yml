@@ -42,7 +42,6 @@ on:
       # los crons del repo a los 60 días de inactividad.
       - "Keepalive commit"
       - "Match face-off videos"
-      - "Refresh gyms (OSM)"
       - "Backfill standing photos"
       - "Backfill cards"
       - "Consolidate results (post-event)"
