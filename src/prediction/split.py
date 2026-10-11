@@ -78,21 +78,32 @@ def _event_dates(dataset: pd.DataFrame) -> pd.Series:
     return event_dates
 
 
+def partition_masks(event_dates: pd.Series) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Boolean masks (train, calibration, test) of each date by the frozen dates.
+
+    The one place the three comparisons live: the split below and the coverage
+    table of features/output.py (metro_partition) both use it. No validation: a
+    date after TEST_END, or a missing one, is in none of the three."""
+    dates = pd.to_datetime(event_dates)
+    cal_start = pd.Timestamp(CAL_START)
+    test_start = pd.Timestamp(TEST_START)
+    test_end = pd.Timestamp(TEST_END)
+    return (
+        dates < cal_start,
+        (dates >= cal_start) & (dates < test_start),
+        (dates >= test_start) & (dates <= test_end),
+    )
+
+
 def _partition_masks(dataset: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Series]:
     """Boolean masks (train, calibration, test) over ``dataset``, validated.
 
     Logs the rows that fall after TEST_END (they belong to no partition) and
     raises when a partition is empty or the test is below MIN_TEST_ROWS."""
     event_dates = _event_dates(dataset)
-    cal_start = pd.Timestamp(CAL_START)
-    test_start = pd.Timestamp(TEST_START)
-    test_end = pd.Timestamp(TEST_END)
+    train_mask, calibration_mask, test_mask = partition_masks(event_dates)
 
-    train_mask = event_dates < cal_start
-    calibration_mask = (event_dates >= cal_start) & (event_dates < test_start)
-    test_mask = (event_dates >= test_start) & (event_dates <= test_end)
-
-    left_out = int((event_dates > test_end).sum())
+    left_out = int((event_dates > pd.Timestamp(TEST_END)).sum())
     if left_out:
         logger.warning(
             "%d peleas posteriores al metro, fuera (event_date > %s): no entran "

@@ -1,8 +1,12 @@
 """Training-dataset builder for the win-METHOD model.
 
-Mirrors ``training.build_training_dataset`` (same leak-free per-corner history
-computation, same missing-history/missing-stats exclusion policy) but labels
-each fight with HOW it ended instead of WHO won:
+Uses the same leak-free per-corner history computation as
+``training.build_training_dataset`` but keeps the PRE-phase-4 exclusion policy:
+a fight with a corner without a UFC summary (a debutant, or prior fights without
+fight_stats) or with a core aggregate None (zero attempts) is excluded. The winner
+pipeline no longer excludes those since phase 4 (it keeps them with NaN diffs, plus
+the pre-UFC block); the method model was left as it was (20-jul bundle, owner's
+decision of 5-oct). It labels each fight with HOW it ended instead of WHO won:
 
 * target = index into ``METHOD_CLASSES`` (decision / ko / submission), derived
   from ``fights.method`` via ``classify_win_method``.
@@ -11,10 +15,10 @@ each fight with HOW it ended instead of WHO won:
 * CNC / DQ / Overturned / upcoming (NULL method) rows are excluded: they have
   no clean method outcome to learn.
 
-The exclusion policy for histories/stats deliberately duplicates the winner
-pipeline's checks instead of importing its loop: ``training.py`` is the frozen
-winner pipeline ("DO NOT MODIFY" territory) and sharing internals would couple
-the two lifecycles. The golden tests pin both policies.
+The exclusion checks live here instead of importing the winner loop: sharing
+internals would couple the two lifecycles, and phase 4 proved it (the winner gates
+opened, these did not). The golden tests pin both policies
+(tests/test_training_gates.py, tests/test_method_features.py).
 """
 
 from __future__ import annotations
@@ -41,7 +45,8 @@ class MethodDatasetBuildResult:
 
 
 def _missing_core_stats(red_history, blue_history) -> bool:
-    """Same core per-fight aggregate requirement as the winner pipeline."""
+    """The core per-fight aggregate requirement (the winner pipeline's until
+    phase 4, which turned it into NaN instead of an exclusion)."""
     return any(
         value is None
         for value in (

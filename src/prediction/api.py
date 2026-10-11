@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -19,9 +20,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.prediction.bundle_io import discard_stale_calibrators
+from src.prediction.corners import CORNER_PAIRS, PAIR_BASE_BY_COLUMN, swap_corners
 from src.prediction.features import (
     DEFAULT_SCHEDULED_ROUNDS,
-    FEATURE_COLUMNS,
     FighterHistorySummary,
     _coerce_scheduled_rounds,
     build_feature_row,
@@ -30,10 +31,23 @@ from src.prediction.features import (
     load_base_dataframe,
     load_rankings_dataframe,
 )
+from src.prediction.features.db import (
+    CompactEspnIndex,
+    begin_read_only_snapshot,
+    load_espn_history_dataframe,
+    load_espn_known_fighter_ids,
+)
+from src.prediction.features.fighter_history import count_prior_ufc_fights
 from src.prediction.features.method_features import (
     METHOD_CLASSES,
     METHOD_FEATURE_COLUMNS,
     build_method_feature_row,
+)
+from src.prediction.features.preufc import build_preufc_block, preufc_diff_values
+from src.prediction.features.types import (
+    PREUFC_COLUMNS,
+    PREUFC_DIFF_COLUMNS,
+    UFC_COUNT_COLUMNS,
 )
 from src.scrapers.config import get_settings
 
@@ -199,6 +213,68 @@ def _load_fighter_physical(database_url: str, fighter_ids: list[int]) -> dict[in
     return physical
 
 
+@dataclass(frozen=True, eq=False)
+class PreUfcHistory:
+    """fight_history_espn as the winner row reads it (phase 4, the pre-UFC block).
+
+    ``by_fighter`` maps a fighter to his rows exactly as db.index_espn_history
+    does (from_frames keeps the db.CompactEspnIndex form: one frame plus offsets,
+    the same rows for a fraction of the RAM), ``known_fighter_ids`` the fighters
+    whose ESPN history is known (db.load_espn_known_fighter_ids: anyone else gets
+    his whole corner as "unknown", see build_preufc_block) and ``rows`` the size of
+    the table, for /health. Read-only once built: the service shares one across
+    every request until its data TTL expires."""
+
+    by_fighter: Mapping[int, pd.DataFrame]
+    known_fighter_ids: frozenset[int]
+    rows: int
+
+    @classmethod
+    def from_frames(
+        cls, history: pd.DataFrame, known_fighter_ids: Iterable[int]
+    ) -> PreUfcHistory:
+        """Index ``history`` once, stable (event_date, id) order per fighter."""
+        return cls(
+            CompactEspnIndex(history),
+            frozenset(int(fighter_id) for fighter_id in known_fighter_ids),
+            len(history),
+        )
+
+
+# Served when fight_history_espn could not be loaded: nobody is "known", so
+# build_preufc_block gives both corners their nine variables as None ("don't
+# know", has_history included), like a fighter the Tuesday cron has not swept.
+UNAVAILABLE_PREUFC_HISTORY = PreUfcHistory({}, frozenset(), 0)
+
+_PREUFC_HISTORY_COLUMNS = frozenset(PREUFC_COLUMNS + PREUFC_DIFF_COLUMNS)
+
+
+def needs_preufc_history(feature_columns: Iterable[str]) -> bool:
+    """True when a winner bundle with these columns reads fight_history_espn (the
+    per-corner block or its diffs). ufc_prev_fights alone comes from `fights`."""
+    return any(column in _PREUFC_HISTORY_COLUMNS for column in feature_columns)
+
+
+def load_preufc_history(database_url: str) -> PreUfcHistory:
+    """Every fight_history_espn row (the DWCS included) and the known-history ids,
+    read over ONE connection, with the per-fighter index built once.
+
+    Both reads go in one read-only REPEATABLE READ transaction, and the known ids
+    go FIRST. The Tuesday cron commits a fighter's rows and his sweep stamp
+    together; rows read before that commit and ids read after it would serve him
+    as KNOWN WITHOUT ROWS (has_history 0) for a whole TTL, the very penalty the
+    unknown-history rule avoids. One snapshot rules that out, and should the
+    snapshot not apply (an autocommit connection) the order alone turns the same
+    race into "unknown" (None), the safe side."""
+    from src.scrapers.db import connect
+
+    with connect(database_url) as connection:
+        begin_read_only_snapshot(connection)
+        known_fighter_ids = load_espn_known_fighter_ids(connection)
+        history = load_espn_history_dataframe(connection)
+    return PreUfcHistory.from_frames(history, known_fighter_ids)
+
+
 AnchorKind = Literal["fight", "pending", "today", "none"]
 
 
@@ -328,6 +404,57 @@ def _is_low_confidence(
     )
 
 
+def _phase4_columns(
+    feature_columns: Collection[str],
+    history_df: pd.DataFrame,
+    red_id: int,
+    blue_id: int,
+    cutoff: date,
+    preufc_history: PreUfcHistory | None,
+) -> dict[str, Any]:
+    """The winner-only columns the bundle reads, composed exactly like the
+    training CSV composes them for a bout dated ``cutoff``:
+
+    * UFC_COUNT_COLUMNS: count_prior_ufc_fights per corner over the same
+      history_df (load_base_dataframe's population, cancelled bouts dropped);
+    * PREUFC_COLUMNS / PREUFC_DIFF_COLUMNS: build_preufc_block (with its
+      "unknown history" rule) and preufc_diff_values over ``preufc_history``.
+
+    A group goes in whole (both corners: the strict swap needs complete pairs)
+    and only when the bundle has any of its columns, in the order of
+    WINNER_FEATURE_COLUMNS. For the 27-jun bundle (20 diffs) nothing is added and
+    nothing is read."""
+    columns = set(feature_columns)
+    values: dict[str, Any] = {}
+    if columns.intersection(UFC_COUNT_COLUMNS):
+        counts = (
+            count_prior_ufc_fights(history_df, red_id, cutoff),
+            count_prior_ufc_fights(history_df, blue_id, cutoff),
+        )
+        values.update(zip(UFC_COUNT_COLUMNS, counts))
+    wants_block = bool(columns.intersection(PREUFC_COLUMNS))
+    wants_diffs = bool(columns.intersection(PREUFC_DIFF_COLUMNS))
+    if wants_block or wants_diffs:
+        if preufc_history is None:
+            raise ValueError(
+                "The bundle reads the pre-UFC block but no fight_history_espn was "
+                "given: pass preufc_history (UNAVAILABLE_PREUFC_HISTORY serves the "
+                "block as unknown)."
+            )
+        block = build_preufc_block(
+            red_id,
+            blue_id,
+            cutoff,
+            preufc_history.by_fighter,
+            preufc_history.known_fighter_ids,
+        )
+        if wants_block:
+            values.update(block)
+        if wants_diffs:
+            values.update(preufc_diff_values(block))
+    return values
+
+
 def _build_feature_row(
     fights_df: pd.DataFrame,
     rankings_df: pd.DataFrame,
@@ -336,7 +463,17 @@ def _build_feature_row(
     physical: dict[int, dict[str, Any]],
     history_df: pd.DataFrame | None = None,
     fight_id: int | None = None,
+    feature_columns: Collection[str] = (),
+    preufc_history: PreUfcHistory | None = None,
 ) -> tuple[dict[str, float | int | None], dict[str, float | int | None], dict[str, Any], bool]:
+    """The winner row, the method row, the context and the low-confidence flag.
+
+    ``feature_columns`` are the winner bundle's: beyond the 20 diffs, the row
+    carries only the phase-4 groups those columns name (``_phase4_columns``), cut
+    at the anchor's ``matchup_date`` (a ``date``, like the training rows' own
+    event_date). Without them (the default, and the 27-jun bundle) the row is
+    exactly the pre-phase-4 one. ``preufc_history`` is required only when the
+    bundle reads the pre-UFC block."""
     matchup = _get_latest_matchup_context(fights_df, red_id, blue_id, fight_id=fight_id)
     matchup_date, weight_class, scheduled_rounds, is_title_fight = matchup[:4]
     from src.prediction.features import build_fighter_history_dataframe
@@ -392,6 +529,13 @@ def _build_feature_row(
         weight_class=weight_class,
         is_title_fight=is_title_fight,
     )
+    # Phase 4, winner only: added AFTER the method row is built, so the method
+    # model (and its swap) never sees these columns.
+    feature_row.update(
+        _phase4_columns(
+            feature_columns, history_df, red_id, blue_id, matchup_date, preufc_history
+        )
+    )
 
     context = {
         "anchor": matchup.anchor,
@@ -418,10 +562,79 @@ def _raw_contributions(model: Any, transformed_row: np.ndarray) -> np.ndarray | 
     # model is trained on a numpy array (feature_names is None), so forcing names
     # here would raise a feature-name mismatch; a DataFrame-trained booster carries
     # names and must get them. Either way pred_contribs returns contributions in
-    # column order (= FEATURE_COLUMNS order), so we map back by index below.
+    # column order (= the bundle's feature_columns), so we map back by index below.
     dmatrix = xgb.DMatrix(transformed_row, feature_names=booster.feature_names)
     # Shape (1, n_features + 1); the trailing column is the bias term, dropped here.
     return booster.predict(dmatrix, pred_contribs=True)[0][:-1]
+
+
+# A single column whose factor is folded INTO a pair's factor when the bundle has
+# the whole pair: the same quantity in two encodings would otherwise be two bars
+# with almost the same meaning. total_prior_fights_diff (NaN for a debutant once
+# the gates are open) and the ufc_prev_fights pair (never NaN) both count each
+# corner's prior UFC fights (count_prior_ufc_fights == total_prior_fights whenever
+# the summary exists). Absorbed column -> the pair base that absorbs it.
+ABSORBED_BY_PAIR: dict[str, str] = {"total_prior_fights_diff": "ufc_prev_fights"}
+
+
+def _attribution_factors(feature_columns: list[str]) -> list[tuple[str, list[int]]]:
+    """The factors shown to the user, as (name, indices into feature_columns).
+
+    A ``*_diff`` (or any other single column) is its own factor, named after the
+    column. A per-corner pair ``{base}_red`` / ``{base}_blue`` is ONE factor named
+    after its base, at the position of its first column: split in two, each half
+    compares both fighters in the same slot, the concept shows up twice and each
+    half ranks lower than the whole. Half a pair (never produced by training:
+    train.get_available_feature_columns keeps or drops pairs whole) stays a
+    factor of its own, named after its column, whose value is None.
+
+    A column of ABSORBED_BY_PAIR is no factor of its own when its pair is whole in
+    the bundle: its index goes after the pair's two (red, blue, absorbed...), and
+    the pair's factor carries it. Without the whole pair it stays its own factor,
+    so a bundle without the pair (the 27-jun one) gets exactly one factor per
+    column, as before."""
+    index_of = {column: index for index, column in enumerate(feature_columns)}
+    whole_pairs = {
+        base
+        for base, (red, blue) in CORNER_PAIRS.items()
+        if red in index_of and blue in index_of
+    }
+    absorbed_into: dict[str, list[int]] = {}
+    for column, base in ABSORBED_BY_PAIR.items():
+        if column in index_of and base in whole_pairs:
+            absorbed_into.setdefault(base, []).append(index_of[column])
+    absorbed = {index for indices in absorbed_into.values() for index in indices}
+    factors: list[tuple[str, list[int]]] = []
+    for index, column in enumerate(feature_columns):
+        if index in absorbed:
+            continue
+        base = PAIR_BASE_BY_COLUMN.get(column)
+        if base is None:
+            factors.append((column, [index]))
+            continue
+        red, blue = CORNER_PAIRS[base]
+        if base not in whole_pairs:
+            factors.append((column, [index]))
+        elif index == min(index_of[red], index_of[blue]):
+            factors.append(
+                (base, [index_of[red], index_of[blue], *absorbed_into.get(base, [])])
+            )
+    return factors
+
+
+def _raw_pair_difference(
+    raw_row: dict[str, Any] | None, red_column: str, blue_column: str
+) -> float | None:
+    """Raw red-minus-blue value of a pair, from the row BEFORE imputation; None
+    when either side is unknown. The imputed median of someone without a record
+    is a made-up number and must never be reported as the difference."""
+    if raw_row is None:
+        return None
+    red, blue = raw_row.get(red_column), raw_row.get(blue_column)
+    if red is None or blue is None or pd.isna(red) or pd.isna(blue):
+        return None
+    value = float(red) - float(blue)
+    return value if np.isfinite(value) else None
 
 
 def _compute_top_features(
@@ -429,6 +642,7 @@ def _compute_top_features(
     feature_columns: list[str],
     transformed_row: np.ndarray,
     swapped_transformed_row: np.ndarray,
+    raw_row: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, float] | None]:
     """SYMMETRIZED per-prediction feature attributions from the XGBoost booster.
 
@@ -442,9 +656,22 @@ def _compute_top_features(
     symmetrized contributions sum EXACTLY to the symmetrized margin: the UI can
     close the balance with a "rest of factors" bar.
 
-    Returns the ranked top five (signed contribution, direction, and the
-    (imputed) forward value the model actually saw) plus the FULL name ->
-    contribution map (None when the estimator has no booster).
+    Per-corner pairs are merged into one factor per base (see
+    ``_attribution_factors``): its contribution is the symmetrized contribution
+    of the red column plus that of the blue one (plus that of any column the
+    pair absorbs: total_prior_fights_diff inside ufc_prev_fights), which stays
+    antisymmetric under a corner swap and only regroups terms, so the balance
+    still closes. Its value is the raw red-minus-blue difference of the PAIR from
+    ``raw_row`` (the row before imputation), or None when a side is unknown or no
+    raw row is given. Half a pair in the bundle also reports None: what the
+    booster saw for that one corner may be the imputer's median, and one
+    fighter's number is not a red-minus-blue difference anyway. The full map uses
+    the same factor names as the ranking, so a pair (or an absorbed column) is
+    never counted twice by the UI.
+
+    Returns the ranked top five (signed contribution, direction, and for a
+    ``*_diff`` the (imputed) forward value the model actually saw) plus the FULL
+    name -> contribution map (None when the estimator has no booster).
 
     No non-finite number leaves this function. A value the booster saw as NaN
     (XGBoost routes a missing value natively) or as infinite has no JSON form:
@@ -466,17 +693,34 @@ def _compute_top_features(
     contributions_map: dict[str, float] = {}
     ranked: list[dict[str, Any]] = []
     dropped: list[str] = []
-    for index, feature_name in enumerate(feature_columns):
-        contribution = float(symmetrized[index])
+    for feature_name, indices in _attribution_factors(feature_columns):
+        if len(indices) == 1:
+            index = indices[0]
+            contribution = float(symmetrized[index])
+            value: float | None = (
+                None
+                if feature_columns[index] in PAIR_BASE_BY_COLUMN
+                else float(transformed_row[0][index])
+            )
+        else:
+            # A pair (red, blue), plus any column it absorbs: every term added.
+            red_index, blue_index, *absorbed = indices
+            contribution = float(symmetrized[red_index]) + float(
+                symmetrized[blue_index]
+            )
+            for index in absorbed:
+                contribution += float(symmetrized[index])
+            value = _raw_pair_difference(
+                raw_row, feature_columns[red_index], feature_columns[blue_index]
+            )
         if not np.isfinite(contribution):
             dropped.append(feature_name)
             continue
         contributions_map[feature_name] = contribution
-        value = float(transformed_row[0][index])
         ranked.append(
             {
                 "name": feature_name,
-                "value": value if np.isfinite(value) else None,
+                "value": value if value is not None and np.isfinite(value) else None,
                 "contribution": contribution,
                 "direction": "red" if contribution >= 0 else "blue",
             }
@@ -489,23 +733,11 @@ def _compute_top_features(
     return ranked[:5], contributions_map
 
 
-def _swap_corners(feature_row: dict[str, float | int | None]) -> dict[str, float | int | None]:
-    """Mirror a feature row to the opposite corner assignment.
-
-    Every model feature is a red-minus-blue diff, so swapping the two corners
-    negates each diff (``diff(a, b) == -diff(b, a)``). A missing diff stays None
-    so the imputer fills the same training median in both orientations. The None
-    pattern is identical across corners (a diff is missing iff either fighter's
-    value is missing), so this reproduces the genuine swapped row exactly. The
-    non-``_diff`` passthrough branch is kept defensively for any future
-    corner-independent column."""
-    swapped: dict[str, float | int | None] = {}
-    for column, value in feature_row.items():
-        if column.endswith("_diff") and value is not None:
-            swapped[column] = -value
-        else:
-            swapped[column] = value
-    return swapped
+# The strict, shared corner swap lives in corners.py (diffs negate, per-corner
+# pairs exchange, the method model's symmetric columns pass, anything else
+# raises). Kept under its old name: evaluate.py and train_method.py import it
+# from here, so they symmetrize exactly like serving without touching an import.
+_swap_corners = swap_corners
 
 
 def _red_win_probability(
@@ -514,8 +746,14 @@ def _red_win_probability(
     model: Any,
     feature_columns: list[str],
 ) -> tuple[float, np.ndarray]:
-    """Return P(red wins) for a raw feature row plus the transformed matrix."""
-    feature_frame = pd.DataFrame([{column: feature_row.get(column) for column in FEATURE_COLUMNS}])
+    """Return P(red wins) for a raw feature row plus the transformed matrix.
+
+    The frame is built from the BUNDLE's feature_columns, not from the constant
+    FEATURE_COLUMNS: a bundle with columns beyond the 27-jun schema (the phase-4
+    pairs) would otherwise be a KeyError, a 500 for every prediction. A column the
+    row does not carry yet comes in as None, for the bundle's imputer (or the
+    booster's native NaN routing) to handle."""
+    feature_frame = pd.DataFrame([{column: feature_row.get(column) for column in feature_columns}])
     transformed = imputer.transform(feature_frame[feature_columns])
     probabilities = model.predict_proba(transformed)[0]
     return float(probabilities[1]), transformed
@@ -528,7 +766,7 @@ def _predict_method(
 
     The method classes do not change when the corners are swapped, so the exact
     symmetrization is the plain per-class average of the forward and swapped
-    predictions (the ``*_diff`` features negate under ``_swap_corners`` and every
+    predictions (the ``*_diff`` features negate under ``swap_corners`` and every
     added method feature is swap-invariant): probabilities(A, B) ==
     probabilities(B, A). Probabilities come from the calibrated estimator when
     the bundle carries one, like the winner path. Returning None (instead of
@@ -572,7 +810,7 @@ def _predict_method(
         )
 
     forward = class_probabilities(method_feature_row)
-    swapped = class_probabilities(_swap_corners(method_feature_row))
+    swapped = class_probabilities(swap_corners(method_feature_row))
     symmetrized = (forward + swapped) / 2.0
     # predict_proba columns follow estimator.classes_ (the integer targets);
     # map each back to its class name instead of assuming they are sorted.
@@ -611,20 +849,29 @@ def predict(
     rankings_df: pd.DataFrame | None = None,
     history_df: pd.DataFrame | None = None,
     fight_id: int | None = None,
+    preufc_history: PreUfcHistory | None = None,
 ) -> dict[str, Any]:
     """Win (and method) prediction for red vs blue.
 
     ``fight_id`` names the bout being predicted (the fight page sends its own):
     when it is these two fighters' bout, the prediction is anchored to it even
     if it is already decided; otherwise it is ignored and the pair rule applies
-    (see ``_get_latest_matchup_context``)."""
+    (see ``_get_latest_matchup_context``).
+
+    ``preufc_history`` is only read when the bundle carries the pre-UFC block.
+    The service passes its cached copy (or UNAVAILABLE_PREUFC_HISTORY when that
+    load failed); without one it is read from the database here, like the fights,
+    which is what the CLI and a shadow run with ``bundle=`` get."""
     settings = get_settings()
     if bundle is None:
         bundle = _load_model_bundle()
+    feature_columns = list(bundle["feature_columns"])
     if fights_df is None:
         fights_df = load_base_dataframe(settings.database_url)
     if rankings_df is None:
         rankings_df = load_rankings_dataframe(settings.database_url)
+    if preufc_history is None and needs_preufc_history(feature_columns):
+        preufc_history = load_preufc_history(settings.database_url)
     physical = _load_fighter_physical(settings.database_url, [red_fighter_id, blue_fighter_id])
     feature_row, method_feature_row, context, low_confidence = _build_feature_row(
         fights_df,
@@ -634,8 +881,9 @@ def predict(
         physical,
         history_df=history_df,
         fight_id=fight_id,
+        feature_columns=feature_columns,
+        preufc_history=preufc_history,
     )
-    feature_columns = bundle["feature_columns"]
     imputer = bundle["imputer"]
     model = bundle["model"]
 
@@ -651,18 +899,21 @@ def predict(
     # Corner symmetry (#26): the model was trained on raw red-blue diffs, so the
     # bare P(red wins) is not invariant to which fighter is labelled "red". We
     # average the forward estimate with the mirror estimate (the swapped row,
-    # where every diff is negated). With red_sym = (p_forward + (1 - p_swapped)) /
+    # where every diff is negated and every per-corner pair exchanged, see
+    # corners.py). With red_sym = (p_forward + (1 - p_swapped)) /
     # 2 the prediction satisfies redProbability(A, B) == blueProbability(B, A)
     # exactly, so predict(A, B) and predict(B, A) sum to 1. Both terms pass
     # through the same estimator, so calibration keeps this identity.
     forward_red_prob, transformed = _red_win_probability(feature_row, imputer, proba_estimator, feature_columns)
     swapped_red_prob, swapped_transformed = _red_win_probability(
-        _swap_corners(feature_row), imputer, proba_estimator, feature_columns
+        swap_corners(feature_row), imputer, proba_estimator, feature_columns
     )
     red_probability = (forward_red_prob + (1.0 - swapped_red_prob)) / 2.0
     blue_probability = 1.0 - red_probability
+    # Pairs are reported as ONE factor whose value is the raw red-minus-blue
+    # difference, read from the row before imputation.
     top_features, feature_contributions = _compute_top_features(
-        model, feature_columns, transformed, swapped_transformed
+        model, feature_columns, transformed, swapped_transformed, raw_row=feature_row
     )
     method_prediction = _predict_method(bundle, method_feature_row)
     profiles = _load_fighter_profiles(settings.database_url, [red_fighter_id, blue_fighter_id])

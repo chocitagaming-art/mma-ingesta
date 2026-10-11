@@ -164,12 +164,24 @@ def test_predict_accepts_frontend_env_key_name(client, monkeypatch):
     assert client.post("/predict", json={"red": 1, "blue": 2}).status_code == 401
 
 
+# Phase 4 added these to /health (commit, model and the pre-UFC block, all read
+# from memory; see tests/test_preufc_serving.py). The fields below are today's.
+PHASE4_HEALTH_FIELDS = {"commit", "model", "preUfc"}
+
+
+def _todays_fields(body: dict) -> dict:
+    assert PHASE4_HEALTH_FIELDS <= set(body), body
+    return {
+        key: value for key, value in body.items() if key not in PHASE4_HEALTH_FIELDS
+    }
+
+
 def test_health_ok_when_model_and_db_ready(client, monkeypatch):
     monkeypatch.setattr(service, "_get_bundle", lambda: {"ready": True})
     monkeypatch.setattr(service, "_db_ping", lambda: None)
     response = client.get("/health?deep=true")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "db": "up"}
+    assert _todays_fields(response.json()) == {"status": "ok", "db": "up"}
 
 
 def test_shallow_health_never_touches_the_database(client, monkeypatch):
@@ -190,7 +202,7 @@ def test_shallow_health_never_touches_the_database(client, monkeypatch):
     response = client.get("/health")
     assert response.status_code == 200
     # "skipped" y no "up": el 200 superficial no afirma nada sobre Neon.
-    assert response.json() == {"status": "ok", "db": "skipped"}
+    assert _todays_fields(response.json()) == {"status": "ok", "db": "skipped"}
 
 
 def test_health_tells_when_a_calibrator_was_discarded(client, monkeypatch):
@@ -202,7 +214,7 @@ def test_health_tells_when_a_calibrator_was_discarded(client, monkeypatch):
     )
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {
+    assert _todays_fields(response.json()) == {
         "status": "ok",
         "db": "skipped",
         "discardedCalibrators": ["calibrator"],
@@ -214,7 +226,7 @@ def test_health_body_unchanged_when_nothing_was_discarded(client, monkeypatch):
     monkeypatch.setattr(service, "_get_bundle", lambda: {DISCARDED_CALIBRATORS_KEY: []})
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "db": "skipped"}
+    assert _todays_fields(response.json()) == {"status": "ok", "db": "skipped"}
 
 
 @pytest.fixture

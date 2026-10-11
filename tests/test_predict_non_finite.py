@@ -597,7 +597,14 @@ VETERAN_HISTORIES = {VETERAN_RED: _summary(3.0), VETERAN_BLUE: _summary(1.0)}
 
 
 def _veteran_feature_rows(
-    _fights, _rankings, red_id, blue_id, physical, history_df=None, fight_id=None
+    _fights,
+    _rankings,
+    red_id,
+    blue_id,
+    physical,
+    history_df=None,
+    fight_id=None,
+    **_phase4,
 ):
     """What _build_feature_row returns for two fighters with a full history."""
     red, blue = VETERAN_HISTORIES[red_id], VETERAN_HISTORIES[blue_id]

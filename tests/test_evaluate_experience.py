@@ -454,7 +454,9 @@ def test_el_resumen_avisa_si_falta_el_recuento(capsys):
 @pytest.fixture
 def _sin_modelo(monkeypatch, tmp_path):
     """main() sin dataset, sin modelo y sin tocar el model_metrics.md del repo."""
-    monkeypatch.setattr(evaluate, "build_test_predictions", lambda: _test_slice())
+    monkeypatch.setattr(
+        evaluate, "build_test_predictions", lambda **_paths: _test_slice()
+    )
     destino = tmp_path / "model_metrics.md"
     monkeypatch.setattr(evaluate, "METRICS_PATH", destino)
     return destino

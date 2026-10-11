@@ -7,8 +7,24 @@ Python subprocess for /api/predict. This exposes the exact same JSON that
 adds it with the Anthropic SDK; this service only does the ML prediction.
 
 Contract (see PREDICTION_MICROSERVICE_HANDOFF.md):
-    GET  /health  -> 200 {"status": "ok"} when the model is loaded and the DB
-                     answers; 503 {"status": "unhealthy"} otherwise.
+    GET  /health[?deep=true]
+        200 -> {"status": "ok",
+                "db": "up" (deep: Neon answered SELECT 1) | "skipped" (shallow),
+                "discardedCalibrators": [...]  only when the bundle load dropped a
+                                               calibrator wrapping another model,
+                "commit": RENDER_GIT_COMMIT cut to 7 characters, or null,
+                "model": {"trainedAt", "featureSet", "nanPolicy", "featureCount"},
+                "preUfc": {"needed", "state", "rows", "knownFighters",
+                           "loadedAt", "degradedPredictions"}}
+               Everything but "db" with deep=true comes from memory: the shallow
+               probe never reaches the database nor the loaders (keep-alive every
+               10 min, the 18-ago quota outage). preUfc.state is "not_needed" (the
+               bundle does not read fight_history_espn), "not_loaded" (it does, no
+               /predict has loaded the data yet), "ok" or "unavailable" (the last
+               load failed: predictions go out with the block as unknown and are
+               counted in degradedPredictions).
+        503 -> {"status": "unhealthy"}  the model is not loaded or, with deep=true,
+               the DB does not answer.
     POST /predict  body {"red": <id>, "blue": <id>, "fightId": <id> (optional)}
                fightId anchors the prediction to that bout of the two fighters
                (context.anchor "fight"); without it, or when it is not their
@@ -23,7 +39,10 @@ Contract (see PREDICTION_MICROSERVICE_HANDOFF.md):
 Performance: the model bundle is loaded once at startup (fail-fast on a missing or
 corrupt model.joblib); the fight/ranking dataframes are cached in-process with a TTL
 (PREDICTION_DATA_TTL_SECONDS, default 600s) so repeated predictions don't re-query Neon
-every time. Set the TTL to 0 to always reload.
+every time. Set the TTL to 0 to always reload. When (and only when) the bundle reads
+the pre-UFC block, fight_history_espn and the known-history ids are loaded in the
+same refresh, with the same TTL; a failure there degrades instead of failing (see
+/health above).
 
 Auth: if an API key is configured (PREDICTION_API_KEY or PREDICTION_SERVICE_API_KEY),
 requests must send a matching X-API-Key header (compared with hmac.compare_digest). When
@@ -43,6 +62,7 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -57,11 +77,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.prediction.api import (
+    UNAVAILABLE_PREUFC_HISTORY,
+    PreUfcHistory,
     _load_model_bundle,
+    load_preufc_history,
     model_trained_at,
+    needs_preufc_history,
     predict,
 )
-from src.prediction.bundle_io import DISCARDED_CALIBRATORS_KEY
+from src.prediction.bundle_io import DISCARDED_CALIBRATORS_KEY, winner_training_config
 from src.prediction.features import (
     build_fighter_history_dataframe,
     load_base_dataframe,
@@ -147,17 +171,36 @@ app = FastAPI(
 )
 
 # In-process caches: the model never changes at runtime; dataframes refresh on a TTL.
+# preufc_history (fight_history_espn, indexed) refreshes with them, and only for a
+# bundle that reads the pre-UFC block; None otherwise.
 _cache: dict[str, Any] = {
     "bundle": None,
     "fights_df": None,
     "rankings_df": None,
     "history_df": None,
+    "preufc_history": None,
     "loaded_at": 0.0,
 }
 # Guard the lazy bundle load and the TTL refresh so a burst of concurrent
 # requests does a single load instead of a thundering herd of redundant ones.
 _bundle_lock = threading.Lock()
 _data_lock = threading.Lock()
+
+# What /health reports about the pre-UFC block, kept in memory so the probe never
+# has to ask the database. "state" is not_loaded / ok / unavailable (not_needed is
+# derived from the bundle at /health time); rows, known_fighters and loaded_at
+# describe the data being served (None when there is none);
+# degraded_predictions counts the 200s served with the block as unknown because
+# the load failed, since the process started.
+_PREUFC_STATE_AT_START: dict[str, Any] = {
+    "state": "not_loaded",
+    "rows": None,
+    "known_fighters": None,
+    "loaded_at": None,
+    "degraded_predictions": 0,
+}
+_preufc_state: dict[str, Any] = dict(_PREUFC_STATE_AT_START)
+_preufc_counter_lock = threading.Lock()
 
 
 class PredictRequest(BaseModel):
@@ -225,6 +268,46 @@ def _get_bundle() -> dict[str, Any]:
     return _cache["bundle"]
 
 
+def _bundle_reads_preufc(bundle: Any) -> bool:
+    """Whether the served winner bundle reads fight_history_espn. Tolerates the
+    partial bundles of the tests (no feature_columns: a pre-phase-4 bundle)."""
+    if not isinstance(bundle, dict):
+        return False
+    return needs_preufc_history(bundle.get("feature_columns") or ())
+
+
+def _load_preufc_history_or_degrade(database_url: str) -> PreUfcHistory:
+    """fight_history_espn for the next TTL window, or UNAVAILABLE_PREUFC_HISTORY.
+
+    A failure here does not fail the refresh: the fights are fine, and the block
+    has a meaning for "don't know" (every corner None, the unknown-history rule).
+    Predictions keep going out with 200 and are counted as degraded; /health and
+    the keep-alive say "unavailable" until a later refresh loads it."""
+    try:
+        history = load_preufc_history(database_url)
+    except Exception:  # noqa: BLE001 - any failure degrades, none is fatal
+        LOGGER.exception(
+            "Pre-UFC history (fight_history_espn) failed to load: every corner's "
+            "block is served as unknown (None) until the next refresh"
+        )
+        _preufc_state.update(
+            state="unavailable", rows=None, known_fighters=None, loaded_at=None
+        )
+        return UNAVAILABLE_PREUFC_HISTORY
+    LOGGER.info(
+        "Loaded fight_history_espn: %d rows, %d fighters with known history",
+        history.rows,
+        len(history.known_fighter_ids),
+    )
+    _preufc_state.update(
+        state="ok",
+        rows=history.rows,
+        known_fighters=len(history.known_fighter_ids),
+        loaded_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    )
+    return history
+
+
 def _get_dataframes():
     now = time.monotonic()
     fresh = _cache["fights_df"] is not None and (now - _cache["loaded_at"]) <= DATA_TTL_SECONDS
@@ -241,12 +324,75 @@ def _get_dataframes():
             rankings_df = load_rankings_dataframe(database_url)
             # Derive the per-fighter history once per refresh and reuse it across
             # every prediction until the TTL expires (it is O(all fights) to build).
+            # It is also the population training counts ufc_prev_fights over
+            # (build_training_dataset starts from the same load_base_dataframe).
             history_df = build_fighter_history_dataframe(fights_df)
+            # Phase 4: fight_history_espn rides on the same refresh and TTL, and
+            # only for a bundle that reads it (none with the 27-jun bundle).
+            preufc_history = (
+                _load_preufc_history_or_degrade(database_url)
+                if _bundle_reads_preufc(_get_bundle())
+                else None
+            )
             _cache["fights_df"] = fights_df
             _cache["rankings_df"] = rankings_df
             _cache["history_df"] = history_df
+            _cache["preufc_history"] = preufc_history
             _cache["loaded_at"] = time.monotonic()
     return _cache["fights_df"], _cache["rankings_df"], _cache["history_df"]
+
+
+def _preufc_history_for(bundle: Any) -> PreUfcHistory | None:
+    """What /predict hands to api.predict as ``preufc_history``.
+
+    None when the bundle does not read the block (api.predict never looks at it
+    then). Otherwise the copy loaded with the dataframes, or
+    UNAVAILABLE_PREUFC_HISTORY when there is none: api.predict must never fall
+    back to reading the database per request. Read right after
+    _get_dataframes(); a refresh in between only makes this copy one TTL newer
+    than the fights, both genuine snapshots."""
+    if not _bundle_reads_preufc(bundle):
+        return None
+    history = _cache["preufc_history"]
+    return history if history is not None else UNAVAILABLE_PREUFC_HISTORY
+
+
+def _count_degraded_prediction() -> None:
+    with _preufc_counter_lock:
+        _preufc_state["degraded_predictions"] += 1
+
+
+def _commit() -> str | None:
+    """The deployed commit, as Render exposes it (RENDER_GIT_COMMIT), cut to 7."""
+    value = (os.getenv("RENDER_GIT_COMMIT") or "").strip()
+    return value[:7] or None
+
+
+def _model_health(bundle: Any) -> dict[str, Any]:
+    """The served winner model, from the bundle in memory (no file, no DB)."""
+    bundle = bundle if isinstance(bundle, dict) else {}
+    config = winner_training_config(bundle)
+    feature_columns = bundle.get("feature_columns")
+    trained_at = bundle.get("trained_at")
+    return {
+        "trainedAt": str(trained_at) if trained_at else None,
+        "featureSet": config["feature_set"],
+        "nanPolicy": config["nan_policy"],
+        "featureCount": len(feature_columns) if feature_columns is not None else None,
+    }
+
+
+def _preufc_health(bundle: Any) -> dict[str, Any]:
+    state = dict(_preufc_state)
+    needed = _bundle_reads_preufc(bundle)
+    return {
+        "needed": needed,
+        "state": state["state"] if needed else "not_needed",
+        "rows": state["rows"] if needed else None,
+        "knownFighters": state["known_fighters"] if needed else None,
+        "loadedAt": state["loaded_at"] if needed else None,
+        "degradedPredictions": state["degraded_predictions"],
+    }
 
 
 def _db_ping() -> None:
@@ -294,7 +440,12 @@ def health(deep: bool = False) -> JSONResponse:
     Si al cargar el bundle se descarto un calibrador porque envolvia OTRO modelo
     (ver api._load_model_bundle), sigue siendo 200 -- el servicio predice, con el
     modelo correcto y sin calibrar -- pero lo dice en `discardedCalibrators`. El
-    campo solo aparece entonces: el cuerpo normal es el de siempre.
+    campo solo aparece entonces.
+
+    Phase 4 adds `commit`, `model` and `preUfc` (module docstring), all read from
+    memory: RENDER_GIT_COMMIT, the bundle already loaded and the state the last
+    data refresh left behind. Nothing here may call a loader or the database, so
+    right after a deploy preUfc.state is "not_loaded" until the first /predict.
     """
     try:
         bundle = _get_bundle()
@@ -311,6 +462,9 @@ def health(deep: bool = False) -> JSONResponse:
     discarded = isinstance(bundle, dict) and bundle.get(DISCARDED_CALIBRATORS_KEY)
     if discarded:
         content["discardedCalibrators"] = list(discarded)
+    content["commit"] = _commit()
+    content["model"] = _model_health(bundle)
+    content["preUfc"] = _preufc_health(bundle)
     return JSONResponse(status_code=200, content=content)
 
 
@@ -337,6 +491,7 @@ def predict_endpoint(
 
         bundle = _get_bundle()
         fights_df, rankings_df, history_df = _get_dataframes()
+        preufc_history = _preufc_history_for(bundle)
         result = predict(
             body.red,
             body.blue,
@@ -345,6 +500,7 @@ def predict_endpoint(
             rankings_df=rankings_df,
             history_df=history_df,
             fight_id=body.fightId,
+            preufc_history=preufc_history,
         )
         # Expose the model's training date so the UI can show it (#29).
         result["modelTrainedAt"] = model_trained_at(bundle)
@@ -379,6 +535,10 @@ def predict_endpoint(
                 body.fightId,
                 ", ".join(replaced),
             )
+        # Served, but with the pre-UFC block as unknown because its load failed:
+        # counted for /health (the ERROR went to the log once, at load time).
+        if preufc_history is UNAVAILABLE_PREUFC_HISTORY:
+            _count_degraded_prediction()
         return payload
     except Exception:  # noqa: BLE001 - surface as a clean 500 for the frontend
         LOGGER.exception(
