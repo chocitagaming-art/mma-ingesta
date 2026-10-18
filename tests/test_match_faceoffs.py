@@ -1414,8 +1414,11 @@ def test_main_rss_caido_con_clave_no_aborta_y_usa_la_api(monkeypatch, fakedb, ca
 def test_main_rss_caido_sin_clave_sigue_abortando(monkeypatch, fakedb):
     visto = {}
     _main_sin_red(monkeypatch, fakedb, rss=[], api=[], key=False, visto=visto)
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc:
         match_faceoffs.main()
+    # The owner's alert hangs on this exit code: 0/None would leave the job
+    # green and notify-on-failure silent.
+    assert exc.value.code not in (0, None)
     assert "run" not in visto
 
 
@@ -1423,8 +1426,9 @@ def test_main_rss_y_api_caidos_a_la_vez_aborta(monkeypatch, fakedb):
     for api in ([], RuntimeError("quotaExceeded")):
         visto = {}
         _main_sin_red(monkeypatch, fakedb, rss=[], api=api, key=True, visto=visto)
-        with pytest.raises(SystemExit):
+        with pytest.raises(SystemExit) as exc:
             match_faceoffs.main()
+        assert exc.value.code not in (0, None), api
         assert "run" not in visto
 
 
@@ -1458,3 +1462,76 @@ def test_main_corre_el_pesaje_despues_del_careo_con_los_dos_feeds(monkeypatch, f
     assert [v.video_id for v in visto["weighins"]["videos"]] == ["EWTYRIk_pcw", "solo_api"]
     assert visto["weighins"]["apply"] is False
     assert visto["weighins"]["durations"] == {}
+
+
+# ------------------------------- main(): un pase que revienta no tumba al otro
+# Review of 18-oct: if run() raised, the weigh-in pass was never tried (and
+# Friday is its only window); if the weigh-in pass raised, the JSON never came
+# out. Each pass now fails on its own, the JSON is always printed, and the run
+# still exits non-zero so notify-on-failure opens the Issue.
+
+
+def test_main_si_el_careo_revienta_el_pesaje_se_intenta(monkeypatch, fakedb, capsys):
+    visto = {}
+    _main_sin_red(monkeypatch, fakedb, rss=_RSS_STUB, api=[], key=False, visto=visto)
+
+    def boom(conn, **kwargs):
+        raise RuntimeError("careo roto")
+
+    def fake_weighins(conn, **kwargs):
+        visto["weighins"] = True
+        return Counter(weighin_targets=1, weighin_written=1)
+
+    monkeypatch.setattr(match_faceoffs, "run", boom)
+    monkeypatch.setattr(match_faceoffs, "run_weighins", fake_weighins)
+    with pytest.raises(SystemExit) as exc:
+        match_faceoffs.main()
+    assert exc.value.code not in (0, None), "the job must go red"
+    assert visto.get("weighins") is True, "the weigh-in pass still runs"
+    assert '"weighin_written": 1' in capsys.readouterr().out
+
+
+def test_main_si_el_pesaje_revienta_imprime_el_json_y_sale_con_error(
+    monkeypatch, fakedb, capsys
+):
+    visto = {}
+    _main_sin_red(monkeypatch, fakedb, rss=_RSS_STUB, api=[], key=False, visto=visto)
+    conn = fakedb.Connection(lambda sql, params=None: [])
+    monkeypatch.setattr(match_faceoffs, "connect", lambda url: _FakeConnCtx(conn))
+    monkeypatch.setattr(
+        match_faceoffs, "run", lambda c, **k: Counter(targets=2, written=1)
+    )
+
+    def boom(conn, **kwargs):
+        raise RuntimeError("pesaje roto")
+
+    monkeypatch.setattr(match_faceoffs, "run_weighins", boom)
+    with pytest.raises(SystemExit) as exc:
+        match_faceoffs.main()
+    assert exc.value.code not in (0, None)
+    assert '"written": 1' in capsys.readouterr().out
+    assert conn.rollbacks >= 1, "the failed pass is rolled back"
+
+
+def test_main_rss_caido_etiqueta_el_pase_1_como_api(monkeypatch, fakedb):
+    visto = {}
+    api = [FeedVideo("resc", "UFC Edmonton: Fighter Face-offs", date(2026, 10, 16))]
+    _main_sin_red(monkeypatch, fakedb, rss=api, api=api, key=True, visto=visto)
+    match_faceoffs.main()
+    assert visto["run"].get("feed_source", "rss") == "rss"
+    _main_sin_red(monkeypatch, fakedb, rss=[], api=api, key=True, visto=visto)
+    match_faceoffs.main()
+    assert "api" in visto["run"]["feed_source"]
+
+
+def test_run_registra_el_origen_real_del_pase_1(fakedb, caplog):
+    fila = (1093, "UFC 333: Volkanovski vs. Evloev", "Etihad Arena, Abu Dhabi", date(2026, 10, 24))
+    conn = fakedb.Connection(lambda sql, params=None: [fila])
+    feed = [FeedVideo("fo333", "UFC 333: Fighter Face-offs", date(2026, 10, 23))]
+    with caplog.at_level("INFO"):
+        counts = match_faceoffs.run(
+            conn, apply=False, feed=feed, feed_source="api (rss caído)"
+        )
+    assert counts["matched"] == 1
+    lineas = [r.getMessage() for r in caplog.records if "fo333" in r.getMessage()]
+    assert lineas and all("(api (rss caído))" in m for m in lineas), lineas

@@ -323,6 +323,7 @@ def test_set_event_weighin_video_id_y_titulo_juntos(fakedb):
         "ufc333wi",
         "Volkanovski vs Evloev Weigh-Ins | UFC 333",
         1093,
+        "ufc333wi",
     )
 
 
@@ -364,16 +365,25 @@ def test_get_weighin_target_events_ventana_y_guardas(fakedb):
     assert "event_date BETWEEN CURRENT_DATE - 1 AND CURRENT_DATE + 2" in sql
 
 
-def _run_responder(update_rows):
+def _responder(targets, neighbors, update_rows):
+    """Fake DB for run_weighins: the targets SELECT, the neighbours SELECT
+    (the one that also reads weighin_video_id) and the guarded UPDATE."""
+
     def responder(sql, params=None):
         upper = " ".join(sql.split()).upper()
+        if upper.startswith("SELECT") and "WEIGHIN_VIDEO_ID FROM" in upper:
+            return neighbors
         if upper.startswith("SELECT"):
-            return [_ROW_1093]
+            return targets
         if upper.startswith("UPDATE"):
             return update_rows
         return []
 
     return responder
+
+
+def _run_responder(update_rows):
+    return _responder([_ROW_1093], [(*_ROW_1093, None)], update_rows)
 
 
 def test_run_weighins_escribe_y_commitea(fakedb, caplog):
@@ -387,7 +397,7 @@ def test_run_weighins_escribe_y_commitea(fakedb, caplog):
     assert conn.commits == 1
     updates = fakedb.mutating_statements(conn)
     assert len(updates) == 1 and "weighin_video_id IS NULL" in updates[0]
-    assert ("ufc333wi", "Volkanovski vs Evloev Weigh-Ins | UFC 333", 1093) == _params(conn)
+    assert ("ufc333wi", "Volkanovski vs Evloev Weigh-Ins | UFC 333", 1093, "ufc333wi") == _params(conn)
     assert any(
         "weigh-in ufc333wi" in r.getMessage() and "1093" in r.getMessage()
         for r in caplog.records
@@ -446,3 +456,158 @@ def test_los_tres_pesajes_de_la_base_salen_del_canal_oficial(event_id):
         1090: "k1968bd6pTg",
         1089: "EWTYRIk_pcw",
     }[event_id]
+
+
+# ------------------------------------- review of 18-oct: two cards back to back
+# The REAL rows 316 and 317 (read 18-oct-2026): two cards in the same city on
+# consecutive days. Road to UFC has no matchup in its name, so before this fix
+# the Fight Night weigh-in ("<A> vs <B> Weigh-Ins | UFC Shanghai", the real
+# shape of EWtcsj7jMr8) matched BOTH through "shanghai" and was written twice.
+
+_ROW_316 = (316, "UFC Fight Night: Walker vs. Zhang", "Shanghai, Hebei, China", date(2025, 8, 23))
+_ROW_317 = (317, "UFC - Road to UFC 4.6", "Shanghai, Hebei, China", date(2025, 8, 22))
+# SIMULATED titles in the real format.
+_WI_316 = _v("FN0000000WI", "Walker vs Zhang Weigh-Ins | UFC Shanghai", date(2025, 8, 22))
+_WI_317 = _v("RTU000000WI", "Smith vs Jones Weigh-Ins | Road to UFC Shanghai", date(2025, 8, 21))
+
+
+def _written(conn):
+    """(video_id, event_id) of every UPDATE the pass sent."""
+    out = []
+    for cur in conn.cursors:
+        for sql, params in cur.executed:
+            if " ".join(sql.split()).upper().startswith("UPDATE"):
+                out.append((params[0], params[2]))
+    return out
+
+
+def test_con_estelar_exige_un_apellido_en_el_titulo():
+    fn = TargetEvent(*_ROW_316)
+    # The Road to UFC weigh-in shares city, window and "ufc" with 316, but
+    # neither Walker nor Zhang: it is not this card's weigh-in.
+    assert _match(fn, [_WI_317], {}) is None
+    assert _match(fn, [_WI_316], {}) == "FN0000000WI"
+    # A surname only in the CARD half does not count: it has to be the bout.
+    raro = _v("x", "Smith vs Jones Weigh-Ins | UFC Shanghai Walker", date(2025, 8, 22))
+    assert _match(fn, [raro], {}) is None
+    # Road to UFC has no matchup in its name: the other hints still work.
+    assert _match(TargetEvent(*_ROW_317), [_WI_317], {}) == "RTU000000WI"
+
+
+def test_run_weighins_316_317_el_pesaje_de_la_fight_night_va_solo_a_la_suya(fakedb):
+    conn = fakedb.Connection(
+        _responder([_ROW_317, _ROW_316], [(*_ROW_317, None), (*_ROW_316, None)], [(1,)])
+    )
+    counts = mf.run_weighins(conn, apply=True, videos=[_WI_316], durations={})
+    assert _written(conn) == [("FN0000000WI", 316)]
+    assert counts["weighin_written"] == 1
+    assert counts["weighin_matched"] == 1
+    assert counts["weighin_no_match"] == 1
+
+
+def test_run_weighins_316_317_el_jueves_el_de_road_to_ufc_no_cae_en_la_fight_night(fakedb):
+    conn = fakedb.Connection(
+        _responder([_ROW_317, _ROW_316], [(*_ROW_317, None), (*_ROW_316, None)], [(1,)])
+    )
+    mf.run_weighins(conn, apply=True, videos=[_WI_317], durations={})
+    assert _written(conn) == [("RTU000000WI", 317)]
+
+
+def test_run_weighins_no_reutiliza_el_video_de_otra_velada(fakedb):
+    # 316 already holds it (set by hand or by an earlier run): 317, the only
+    # target left, must not take it on the next run.
+    conn = fakedb.Connection(
+        _responder([_ROW_317], [(*_ROW_317, None), (*_ROW_316, "FN0000000WI")], [(1,)])
+    )
+    counts = mf.run_weighins(conn, apply=True, videos=[_WI_316], durations={})
+    assert _written(conn) == []
+    assert counts["weighin_written"] == 0
+    # 316 holds ANOTHER id (a third-party upload picked by hand, like 1090):
+    # the video still names 316's main event, so it is never 317's.
+    conn = fakedb.Connection(
+        _responder([_ROW_317], [(*_ROW_317, None), (*_ROW_316, "enkyfSnB0r0")], [(1,)])
+    )
+    mf.run_weighins(conn, apply=True, videos=[_WI_316], durations={})
+    assert _written(conn) == []
+
+
+def test_run_weighins_un_video_para_dos_veladas_sin_apellidos_no_escribe(fakedb, caplog):
+    # SIMULATED: two cards without a matchup in the name, same city, same
+    # weekend. Nothing tells them apart, so neither gets it.
+    otra = (318, "UFC Fight Night", "Shanghai, Hebei, China", date(2025, 8, 23))
+    conn = fakedb.Connection(
+        _responder([_ROW_317, otra], [(*_ROW_317, None), (*otra, None)], [(1,)])
+    )
+    with caplog.at_level("WARNING"):
+        counts = mf.run_weighins(conn, apply=True, videos=[_WI_317], durations={})
+    assert _written(conn) == []
+    assert counts["weighin_written"] == 0
+    assert any("varias veladas" in r.getMessage() for r in caplog.records)
+
+
+def test_get_weighin_neighbor_events_lee_todas_las_de_la_ventana(fakedb):
+    captured = {}
+
+    def responder(sql, params=None):
+        captured["sql"] = " ".join(sql.split())
+        return [(*_ROW_316, "FN0000000WI")]
+
+    conn = fakedb.Connection(responder)
+    assert mf.get_weighin_neighbor_events(conn) == [
+        (TargetEvent(*_ROW_316), "FN0000000WI")
+    ]
+    sql = captured["sql"]
+    # Any status and any weigh-in value: a completed or already filled card
+    # still owns its own weigh-in.
+    assert "status" not in sql
+    assert "weighin_video_id IS NULL" not in sql
+    assert "event_date BETWEEN CURRENT_DATE - 3 AND CURRENT_DATE + 2" in sql
+
+
+def test_set_event_weighin_video_no_repite_un_video_ya_usado(fakedb):
+    conn = fakedb.Connection(lambda sql, params=None: [(1,)])
+    events_repo.set_event_weighin_video(conn, 317, "FN0000000WI", "t")
+    sql = _sql(conn, fakedb)
+    assert "NOT EXISTS (SELECT 1 FROM events o WHERE o.weighin_video_id = %s)" in sql
+    assert _params(conn)[-1] == "FN0000000WI"
+
+
+def test_rechaza_boxeo_y_bjj_aunque_digan_ufc():
+    # SIMULATED, against Freedom 250 (no matchup in the name, so the surname
+    # rule does not protect it): the same channel uploads Zuffa Boxing and BJJ.
+    dia = date.fromordinal(EVENTS[1084].event_date.toordinal() - 1)
+    for titulo in (
+        "Smith vs Jones Weigh-Ins | Zuffa Boxing x UFC Freedom 250",
+        "Smith vs Jones Weigh-Ins | UFC BJJ Freedom 250",
+    ):
+        assert _match(1084, [_v("x", titulo, dia)], {}) is None, titulo
+    # The control: the same shape with a plain UFC card does match.
+    assert _match(1084, [_v("x", "Smith vs Jones Weigh-Ins | UFC Freedom 250", dia)], {}) == "x"
+
+
+def test_rechaza_directos_y_series_con_la_forma_estricta():
+    # SIMULATED traps against the real 1093 (none exists in the real data).
+    d = date(2026, 10, 23)
+    for titulo in (
+        "Volkanovski vs Evloev Weigh-Ins | UFC 333 Live",
+        "Volkanovski vs Evloev Morning Weigh-Ins | UFC 333",
+        "Volkanovski vs Evloev Weigh-Ins | UFC 333 Embedded",
+    ):
+        assert _match(1093, [_v("x", titulo, d)], {}) is None, titulo
+
+
+def test_duracion_larga_rechaza():
+    video = _v("w", "Volkanovski vs Evloev Weigh-Ins | UFC 333", date(2026, 10, 23))
+    assert _match(1093, [video], {"w": 7200}) is None
+    assert _match(1093, [video], {"w": mf.MAX_WEIGHIN_SECONDS}) == "w"
+    assert mf.MAX_WEIGHIN_SECONDS == 1800
+    # Real: the official ones last 304-915 s; the shortest ceremonial with a
+    # known duration lasts 3071 s.
+    oficiales = [DURATIONS[v] for v in DATA["expected"].values() if v]
+    assert max(oficiales) == 915 < mf.MAX_WEIGHIN_SECONDS
+    ceremoniales = [
+        DURATIONS[u.video_id]
+        for u in UPLOADS
+        if "Ceremonial" in u.title and u.video_id in DURATIONS
+    ]
+    assert min(ceremoniales) == 3071 > mf.MAX_WEIGHIN_SECONDS

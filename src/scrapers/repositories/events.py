@@ -153,12 +153,16 @@ def set_event_weighin_video(
 ) -> bool:
     """Store the official UFC weigh-in (pesaje) video of an UPCOMING event.
 
-    Written by the weigh-in pass of match_faceoffs. Two guards in the WHERE, and
-    both are the point of this function:
+    Written by the weigh-in pass of match_faceoffs. Three guards in the WHERE,
+    and they are the point of this function:
       - ``weighin_video_id IS NULL``: it NEVER overwrites a value, so whatever
         the operator set by hand (scripts/fijar_videos_evento.py --pesaje, which
         does overwrite on purpose) always wins and re-runs are idempotent;
-      - ``status = 'upcoming'``: it NEVER touches a completed card.
+      - ``status = 'upcoming'``: it NEVER touches a completed card;
+      - ``NOT EXISTS (... o.weighin_video_id = video_id)``: one weigh-in, one
+        card. Two cards in the same city on back-to-back days (Road to UFC +
+        Fight Night in Shanghai) could otherwise both get the same video, one
+        run after the other.
     The id and its title travel together, the same rule as fijar_videos_evento:
     the page prints the title under the player, so an id without the title it
     was matched on would be a video nobody checked.
@@ -175,8 +179,9 @@ def set_event_weighin_video(
             WHERE id = %s
               AND status = 'upcoming'
               AND weighin_video_id IS NULL
+              AND NOT EXISTS (SELECT 1 FROM events o WHERE o.weighin_video_id = %s)
             """,
-            (video_id, title, event_id),
+            (video_id, title, event_id, video_id),
         )
         return cursor.rowcount > 0
 
