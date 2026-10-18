@@ -1,12 +1,23 @@
 name: Seed Hall of Fame
 
-# Aplica la migración 014 (aditiva, idempotente: ADD COLUMN IF NOT EXISTS bio) y
-# luego seedea el Salón de la Fama (src/scrapers/seed_hall_of_fame.py): upsert
-# idempotente por (wing, display_name) que refresca los enlaces a fighters y
-# puebla subtitle/photo_url/bio de las alas Contributor y Fight (mostrados en el
-# modal del Salón). Manual (workflow_dispatch): re-ejecutar es siempre seguro.
-# Requiere la migración 013 ya aplicada (tabla hall_of_fame). Escribe a la BD de
-# prod (secrets.DATABASE_URL), como los demás refresh-*/enrich-* workflows.
+# Aplica las migraciones del Salón (014 y 031, aditivas e idempotentes), seedea el
+# Salón de la Fama (src/scrapers/seed_hall_of_fame.py) y mide qué fotos vienen
+# recortadas (src/scrapers/measure_photo_cutout.py).
+#   - 014: ADD COLUMN IF NOT EXISTS bio.
+#   - 031: video_id/video_start/video_end y photo_focus en hall_of_fame, y la tabla
+#     photo_cutout (con su GRANT a mma_app_readonly).
+#   - El seed: upsert idempotente por (wing, display_name) que refresca los enlaces
+#     a fighters y escribe subtitle/photo_url/photo_focus/bio y el vídeo de cada
+#     pelea del Ala de Combate. El seed MANDA: lo editado a mano en esas columnas
+#     se pisa en la siguiente ejecución.
+#   - La medida: descarga solo las fotos del Salón que no se han medido, que tienen
+#     más de 30 días o cuya última descarga falló, y hace upsert en photo_cutout.
+# Manual (workflow_dispatch): re-ejecutar es siempre seguro. Requiere la migración
+# 013 ya aplicada (tabla hall_of_fame). Escribe a la BD de prod
+# (secrets.DATABASE_URL), como los demás refresh-*/enrich-* workflows.
+#
+# Después, la web no lo ve hasta que caduque su caché de 1 día o se invalide el
+# tag 'hall-of-fame' con /api/revalidate.
 on:
   workflow_dispatch:
 
@@ -24,13 +35,22 @@ jobs:
         with:
           python-version: "3.12"
       # El seed solo necesita el driver de Postgres y dotenv (config = dataclass +
-      # dotenv; matching = stdlib). Instalación mínima y rápida.
-      - run: pip install psycopg2-binary python-dotenv
+      # dotenv; matching = stdlib). La medida de fotos añade requests (descarga) y
+      # Pillow (canal alfa); Pillow está en requirements-scrapers.txt para el CI.
+      - run: pip install psycopg2-binary python-dotenv requests pillow
       - name: Apply migration 014 (additive, idempotent)
         run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/014_hall_of_fame_bio.sql
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - name: Apply migration 031 (additive, idempotent)
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/031_salon_video_recortes.sql
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
       - name: Seed Hall of Fame
         run: python -m src.scrapers.seed_hall_of_fame
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - name: Measure photo cutouts
+        run: python -m src.scrapers.measure_photo_cutout
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

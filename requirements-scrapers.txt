@@ -13,3 +13,7 @@ anthropic
 # Deportes and ufcespanol.com block plain requests by JA3, not headers.
 # Pinned: the impersonation targets are version-sensitive native code.
 curl_cffi==0.15.0
+# Canal alfa de las fotos del Salón de la Fama (src/scrapers/measure_photo_cutout.py:
+# ¿viene recortada o con fondo?). Lo instala también seed-hall-of-fame.yml, y el CI
+# lo recibe por aquí: sin él, tests/test_measure_photo_cutout.py no importaría.
+pillow
