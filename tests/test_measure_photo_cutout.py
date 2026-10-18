@@ -140,6 +140,20 @@ def test_measure_bytes_network_error_has_no_status():
 def test_measure_bytes_html_instead_of_image_is_framed():
     result = m.measure_bytes("u", 200, b"<!doctype html><title>Not found</title>")
     assert result == m.Measurement("u", False, None, None, 200)
+    # A 200 without an image is a FAILED measurement, not a verdict.
+    assert result.valid is False and result.gone is False
+
+
+def test_measurement_validity_and_gone():
+    assert m.measure_bytes("u", 200, _png(headshot_cutout())).valid is True
+    assert m.measure_bytes("u", 200, _jpg(opaque_photo())).valid is True
+    assert m.measure_bytes("u", 200, b"").valid is False
+    for status in (404, 410):
+        result = m.measure_bytes("u", status, None)
+        assert result.valid is False and result.gone is True
+    for status in (None, 403, 429, 500, 503):
+        result = m.measure_bytes("u", status, None)
+        assert result.valid is False and result.gone is False
 
 
 def test_measure_bytes_truncated_image_is_framed():
@@ -158,6 +172,63 @@ def test_local_paths_are_fetched_from_the_site():
 def test_remote_url_is_requested_verbatim_with_literal_amp():
     url = "https://www.ufc.com/images/x.png?VersionId=abc&amp;itok=9THc76zi"
     assert m.fetch_url_for(url) == url
+
+
+# ------------------------------------------------------------- download
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int, content: bytes):
+        self.status_code = status_code
+        self.content = content
+
+    @property
+    def ok(self) -> bool:
+        return self.status_code < 400
+
+
+class _FakeSession:
+    """Records the URL actually requested: download() must go through
+    fetch_url_for(), or a local '/fighters/…' path is requested as a relative
+    URL and every pass fails."""
+
+    def __init__(self, response=None, exc: Exception | None = None):
+        self.response = response
+        self.exc = exc
+        self.requested: list[tuple[str, object]] = []
+
+    def get(self, url, timeout=None):
+        self.requested.append((url, timeout))
+        if self.exc is not None:
+            raise self.exc
+        return self.response
+
+
+def test_download_requests_local_paths_from_the_site():
+    session = _FakeSession(_FakeResponse(200, b"img"))
+    assert m.download(session, "/fighters/forrest-griffin.webp") == (200, b"img")
+    assert session.requested == [
+        ("https://mmastatus.app/fighters/forrest-griffin.webp", m.REQUEST_TIMEOUT_SECONDS),
+    ]
+
+
+def test_download_requests_remote_url_verbatim_with_literal_amp():
+    url = "https://www.ufc.com/images/x.png?VersionId=abc&amp;itok=9THc76zi"
+    session = _FakeSession(_FakeResponse(200, b"img"))
+    m.download(session, url)
+    assert session.requested[0][0] == url
+
+
+def test_download_http_error_keeps_status_and_drops_body():
+    session = _FakeSession(_FakeResponse(503, b"<html>busy</html>"))
+    assert m.download(session, "https://x/y.png") == (503, None)
+
+
+def test_download_network_error_has_no_status():
+    import requests
+
+    session = _FakeSession(exc=requests.Timeout("slow"))
+    assert m.download(session, "https://x/y.png") == (None, None)
 
 
 # ------------------------------------------------------------- the pass
@@ -203,9 +274,11 @@ def test_run_measures_only_stale_urls_and_upserts_exact_keys(fakedb):
 
     assert calls == stale
     assert summary == {
-        "salon_urls": 4, "measured": 3, "cutouts": 1, "framed": 2,
-        "fetch_errors": [DEAD_URL], "written": 3, "dry_run": False,
+        "salon_urls": 4, "measured": 3, "cutouts": 1, "framed": 1,
+        "fetch_errors": [DEAD_URL], "gone": [DEAD_URL], "written": 3, "dry_run": False,
     }
+    # A 404 is a dead link in the data, not a failed run.
+    assert m.exit_code(summary) == 0
     upserts = [p for cur in conn.cursors for sql, p in cur.executed if "INSERT INTO photo_cutout" in sql]
     assert upserts == [
         (AMP_URL, False, 200, 150, 200),   # key keeps the literal '&amp;'
@@ -245,10 +318,52 @@ def test_salon_query_covers_person_photo_and_both_corners():
 
 
 def test_stale_query_rechecks_old_and_failed_rows():
+    # Shape only: the real semantics run against Postgres in
+    # test_measure_photo_cutout_pg.py (CI integration step).
     sql = " ".join(m.STALE_SQL.split())
     assert "pc.url IS NULL" in sql
     assert "make_interval(days => %s)" in sql
     assert "pc.http_status IS DISTINCT FROM 200" in sql
+    assert "pc.width IS NULL" in sql
+
+
+def test_upsert_only_lets_valid_or_gone_measurements_replace_the_verdict():
+    sql = " ".join(m.UPSERT_SQL.split())
+    keep = "EXCLUDED.width IS NOT NULL OR EXCLUDED.http_status IN (404, 410)"
+    for column in ("is_cutout", "width", "height", "checked_at"):
+        assert f"{column} = CASE WHEN {keep} THEN EXCLUDED.{column} ELSE photo_cutout.{column} END" in sql
+    assert "http_status = EXCLUDED.http_status" in sql
+    assert m.GONE_STATUSES == (404, 410)
+
+
+# ------------------------------------------------------------- exit code
+
+
+def _summary(errors, gone):
+    return {"fetch_errors": errors, "gone": gone}
+
+
+def test_exit_code_clean_run_is_zero():
+    assert m.exit_code(_summary([], [])) == 0
+
+
+def test_exit_code_only_dead_links_is_zero():
+    assert m.exit_code(_summary([DEAD_URL], [DEAD_URL])) == 0
+
+
+def test_exit_code_any_retryable_failure_is_one():
+    # Timeout / 5xx / 403 / non-image 200: the job must go red so it is re-run.
+    assert m.exit_code(_summary([CUT_URL], [])) == 1
+    assert m.exit_code(_summary([CUT_URL, DEAD_URL], [DEAD_URL])) == 1
+
+
+def test_run_counts_non_image_200_and_timeouts_as_errors(fakedb):
+    conn = fakedb.Connection(_responder([AMP_URL, CUT_URL], [AMP_URL, CUT_URL]))
+    payloads = {AMP_URL: (200, b"<!doctype html>challenge"), CUT_URL: (None, None)}
+    summary = m.run(conn, payloads.__getitem__, sleep=lambda _s: None)
+    assert summary["fetch_errors"] == [AMP_URL, CUT_URL]
+    assert summary["gone"] == [] and summary["framed"] == 0 and summary["cutouts"] == 0
+    assert m.exit_code(summary) == 1
 
 
 def test_does_not_ask_for_avif_or_webp():

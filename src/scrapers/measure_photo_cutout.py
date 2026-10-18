@@ -14,6 +14,13 @@ headshot_url of both corners of each Fight Wing bout. Local paths ('/fighters/�
 are fetched from https://mmastatus.app + path. Only the URLs with no row, a row
 older than 30 days or a failed last fetch are measured; then upsert.
 
+A failed fetch never throws away a good verdict: a timeout, a 5xx, a 429/403 or
+a 200 that is not an image keeps the previous is_cutout/width/height/checked_at
+(only http_status records the failure, so the next pass retries it). Only a
+404/410 — the photo is gone — resets the row to framed. And the exit code is 1
+when any URL failed for a reason other than 404/410, so the workflow goes red
+instead of hiding that every download was blocked.
+
 🪤 The key is the EXACT string stored in the DB: 643 headshot_url carry a literal
 '&amp;' and the browser requests that very string. Never normalise it.
 
@@ -74,9 +81,15 @@ SALON_URLS_SQL = """
     ORDER BY url
 """
 
+# HTTP codes that mean "this photo no longer exists": the only failures allowed
+# to overwrite a previous verdict, and the only ones that do not turn the run red.
+GONE_STATUSES = (404, 410)
+
 # The ones that need (re)measuring: never measured, measured more than
-# RECHECK_AFTER_DAYS ago, or last fetch not a 200 (a transient error should not
-# leave a photo framed for a month).
+# RECHECK_AFTER_DAYS ago, last fetch not a 200 (a transient error should not
+# leave a photo framed for a month), or no dimensions (a 200 that was not a
+# readable image — an HTML error page, an empty or truncated body — is a failed
+# measurement too).
 STALE_SQL = """
     SELECT u.url
     FROM unnest(%s::text[]) AS u(url)
@@ -84,18 +97,28 @@ STALE_SQL = """
     WHERE pc.url IS NULL
        OR pc.checked_at < NOW() - make_interval(days => %s)
        OR pc.http_status IS DISTINCT FROM 200
+       OR pc.width IS NULL
     ORDER BY u.url
 """
 
+# A measurement is VALID when it produced dimensions (HTTP 200 + readable image).
+# On conflict: a valid one, or a 404/410 (photo gone), replaces the verdict; any
+# other failure keeps the previous is_cutout/width/height/checked_at and only
+# records its http_status. Keeping checked_at is what makes the row stale again
+# on the next pass even when the failure was a 200 with a non-image body.
 UPSERT_SQL = """
     INSERT INTO photo_cutout (url, is_cutout, width, height, http_status, checked_at)
     VALUES (%s, %s, %s, %s, %s, NOW())
     ON CONFLICT (url) DO UPDATE SET
-        is_cutout   = EXCLUDED.is_cutout,
-        width       = EXCLUDED.width,
-        height      = EXCLUDED.height,
+        is_cutout   = CASE WHEN EXCLUDED.width IS NOT NULL OR EXCLUDED.http_status IN (404, 410)
+                           THEN EXCLUDED.is_cutout ELSE photo_cutout.is_cutout END,
+        width       = CASE WHEN EXCLUDED.width IS NOT NULL OR EXCLUDED.http_status IN (404, 410)
+                           THEN EXCLUDED.width ELSE photo_cutout.width END,
+        height      = CASE WHEN EXCLUDED.width IS NOT NULL OR EXCLUDED.http_status IN (404, 410)
+                           THEN EXCLUDED.height ELSE photo_cutout.height END,
         http_status = EXCLUDED.http_status,
-        checked_at  = EXCLUDED.checked_at
+        checked_at  = CASE WHEN EXCLUDED.width IS NOT NULL OR EXCLUDED.http_status IN (404, 410)
+                           THEN EXCLUDED.checked_at ELSE photo_cutout.checked_at END
 """
 
 
@@ -106,6 +129,15 @@ class Measurement:
     width: int | None
     height: int | None
     http_status: int | None
+
+    @property
+    def valid(self) -> bool:
+        """HTTP 200 and a readable image: the only result that is a real verdict."""
+        return self.width is not None
+
+    @property
+    def gone(self) -> bool:
+        return self.http_status in GONE_STATUSES
 
 
 # --------------------------------------------------------------- pure helpers
@@ -149,7 +181,9 @@ def fetch_url_for(url: str) -> str:
 
 def measure_bytes(url: str, status: int | None, content: bytes | None) -> Measurement:
     """Verdict for one downloaded image. Anything that is not a readable image
-    (HTTP error, HTML error page, truncated file) is stored as not-a-cutout."""
+    (HTTP error, HTML error page, truncated file) comes back as not-a-cutout with
+    NO dimensions: a failed measurement (``valid`` False), which the upsert does
+    not let overwrite a previous good verdict unless it is a 404/410."""
     if status != 200 or not content:
         return Measurement(url, False, None, None, status)
     try:
@@ -207,7 +241,7 @@ def measure_all(
         measurement = measure_bytes(url, status, content)
         LOGGER.info(
             "%s %s %sx%s HTTP %s",
-            "RECORTE " if measurement.is_cutout else "ENMARCAR",
+            "FALLO   " if not measurement.valid else "RECORTE " if measurement.is_cutout else "ENMARCAR",
             url, measurement.width, measurement.height, measurement.http_status,
         )
         measurements.append(measurement)
@@ -234,11 +268,27 @@ def run(connection, fetch, *, dry_run: bool = False, sleep=time.sleep) -> dict[s
         "salon_urls": len(urls),
         "measured": len(measurements),
         "cutouts": sum(1 for m in measurements if m.is_cutout),
-        "framed": sum(1 for m in measurements if not m.is_cutout),
-        "fetch_errors": [m.url for m in measurements if m.http_status != 200],
+        "framed": sum(1 for m in measurements if m.valid and not m.is_cutout),
+        # Every URL without a real verdict (non-200 OR a 200 that was no image)...
+        "fetch_errors": [m.url for m in measurements if not m.valid],
+        # ...of which these are photos that no longer exist (404/410).
+        "gone": [m.url for m in measurements if m.gone],
         "written": written,
         "dry_run": dry_run,
     }
+
+
+def exit_code(summary: dict[str, object]) -> int:
+    """1 when a URL failed for a reason other than 404/410 (timeout, 5xx, 429,
+    403, a non-image body): the job must go red so someone re-runs it — the
+    workflow is manual, nothing retries on its own. A 404/410 is a dead link in
+    the data, not a failed run, so it is reported but does not fail."""
+    gone = set(summary["gone"])  # type: ignore[arg-type]
+    retryable = [url for url in summary["fetch_errors"] if url not in gone]  # type: ignore[union-attr]
+    if retryable:
+        LOGGER.error("%d photo(s) could not be measured; re-run to retry: %s", len(retryable), retryable)
+        return 1
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -252,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     with connect(settings.database_url) as connection:
         summary = run(connection, lambda url: download(session, url), dry_run=args.dry_run)
     print(json.dumps(summary, indent=2, ensure_ascii=False))
-    return 0
+    return exit_code(summary)
 
 
 if __name__ == "__main__":

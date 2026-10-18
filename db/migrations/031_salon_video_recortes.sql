@@ -5,9 +5,31 @@
 -- como la 014. Aplicación MANUAL o vía el workflow seed-hall-of-fame.yml, que la
 -- aplica antes de correr el seed y después mide las fotos.
 --
+-- Atómica: va entera en una transacción (ADD COLUMN, CREATE TABLE, COMMENT y GRANT
+-- son transaccionales en Postgres). Si un ADD CONSTRAINT falla en una
+-- re-ejecución (una fila editada a mano que viola la regla), el DROP de ese mismo
+-- constraint se deshace con él y la tabla NO se queda sin el CHECK. Y con
+-- lock_timeout: el ADD CONSTRAINT pide ACCESS EXCLUSIVE sobre hall_of_fame; si
+-- tropieza con una transacción abierta, falla a los 5 s en vez de esperar sin
+-- límite con los lectores de la web en cola detrás.
+--
 -- La web (mma-app, getHallOfFame) la lee con una reserva: si estas columnas o la
 -- tabla photo_cutout aún no existen, el Salón se pinta igual, todo «enmarcado» y
--- sin vídeo. O sea que da igual qué se despliegue antes.
+-- sin vídeo. Eso NO quiere decir que dé igual el orden de despliegue:
+--   1. merge a main de mma-ingesta (el workflow_dispatch corre el YAML de la rama
+--      por defecto: antes del merge lanzaría el seed viejo);
+--   2. seed-hall-of-fame.yml: esta migración + seed + medida de fotos;
+--   3. SOLO ENTONCES desplegar la web que borra public/hof/charles-mask-lewis.webp
+--      y art-davie.webp: hasta el seed, sus filas apuntan a esos ficheros y las
+--      dos tarjetas darían 404;
+--   4. POST /api/revalidate (el último paso del workflow ya lo hace, pero el tag
+--      'hall-of-fame' solo existe con la web nueva: tras desplegarla, repetirlo).
+-- Al revés (seed antes que web nueva) no se rompe nada: la web vieja pinta los
+-- retratos 16:9 de ufc.com en su cuadrado sin photo_focus, solo un rato.
+
+BEGIN;
+
+SET LOCAL lock_timeout = '5s';
 
 -- ============================================================================
 -- 1) EL VÍDEO DE LA PELEA (Ala de Combate)
@@ -102,13 +124,18 @@ CREATE TABLE IF NOT EXISTS photo_cutout (
     url          TEXT PRIMARY KEY,
     -- Recortada = RGBA, alfa 0 en las dos esquinas de arriba y ≥ 90 % de píxeles
     -- transparentes en el borde de arriba más los laterales (el de abajo no
-    -- cuenta: los hombros lo tocan). Si la descarga falla se guarda FALSE.
+    -- cuenta: los hombros lo tocan). Una medida fallida (sin width) NO pisa el
+    -- veredicto anterior, salvo un 404/410 (la foto ya no existe), que lo deja
+    -- en FALSE. Una URL que nunca se pudo medir nace FALSE (enmarcada).
     is_cutout    BOOLEAN NOT NULL,
     width        INTEGER,
     height       INTEGER,
-    -- El código HTTP de la última medida: así nos enteramos de una foto que
-    -- ufc.com ha borrado (p. ej. la de Gerbasi se llama 'DO-NOT-USE-…').
+    -- El código HTTP del ÚLTIMO intento, haya salido bien o no: así nos
+    -- enteramos de una foto que ufc.com ha borrado (p. ej. la de Gerbasi se
+    -- llama 'DO-NOT-USE-…'), y el script reintenta lo que no sea un 200.
     http_status  INTEGER,
+    -- Cuándo se midió con éxito (o se vio que la foto ya no existe). Un fallo
+    -- pasajero no lo mueve, para que la fila siga «caducada» y se reintente.
     checked_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -119,3 +146,5 @@ COMMENT ON TABLE photo_cutout IS
 -- reventaría con "permission denied" (la web tiene reserva, pero se quedaría
 -- todo enmarcado para siempre sin que nadie supiera por qué).
 GRANT SELECT ON TABLE photo_cutout TO mma_app_readonly;
+
+COMMIT;

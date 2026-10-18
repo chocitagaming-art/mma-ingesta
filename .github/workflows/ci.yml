@@ -20,7 +20,8 @@ jobs:
     services:
       # Postgres de usar y tirar para los tests de integración. NO hace falta el
       # esquema de producción: test_db_pool solo hace SELECT pg_backend_pid() y
-      # test_upcoming_fmid_dedup crea su propia TEMP TABLE que sombrea `fights`.
+      # test_upcoming_fmid_dedup crea su propia TEMP TABLE que sombrea `fights`
+      # (test_measure_photo_cutout_pg, igual, con hall_of_fame/fighters/photo_cutout).
       postgres:
         image: postgres:16-alpine
         env:
@@ -74,12 +75,12 @@ jobs:
         # A propósito NO se exporta DATABASE_URL al paso anterior: hay 12 ficheros
         # de test que miran esa variable y algunos esperan datos REALES, así que
         # ponerla global despertaría tests que fallarían contra una base vacía.
-        # Aquí se apunta solo a los dos que necesitan un Postgres de verdad.
+        # Aquí se apunta solo a los que necesitan un Postgres de verdad.
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/mma_test
         run: |
           set -euo pipefail
-          output=$(python -m pytest tests/test_db_pool.py tests/test_upcoming_fmid_dedup.py -v -rs)
+          output=$(python -m pytest tests/test_db_pool.py tests/test_upcoming_fmid_dedup.py tests/test_measure_photo_cutout_pg.py -v -rs)
           echo "$output"
           # Estos tests se auto-saltan si falta DATABASE_URL. Un "skipped" aquí
           # significaría que el servicio de Postgres no llegó, y el paso pasaría

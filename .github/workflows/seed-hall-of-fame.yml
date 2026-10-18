@@ -12,12 +12,17 @@ name: Seed Hall of Fame
 #     se pisa en la siguiente ejecución.
 #   - La medida: descarga solo las fotos del Salón que no se han medido, que tienen
 #     más de 30 días o cuya última descarga falló, y hace upsert en photo_cutout.
+#     Un fallo pasajero no pisa un veredicto bueno, y el paso sale en ROJO si alguna
+#     foto falló por algo que no sea 404/410: re-lanzar el workflow la reintenta.
 # Manual (workflow_dispatch): re-ejecutar es siempre seguro. Requiere la migración
 # 013 ya aplicada (tabla hall_of_fame). Escribe a la BD de prod
 # (secrets.DATABASE_URL), como los demás refresh-*/enrich-* workflows.
 #
-# Después, la web no lo ve hasta que caduque su caché de 1 día o se invalide el
-# tag 'hall-of-fame' con /api/revalidate.
+# Al final invalida la caché de la web (/api/revalidate, tag 'hall-of-fame'): sin
+# eso el Salón tardaría hasta 1 día en enseñar lo nuevo. 🪤 El tag solo lo invalida
+# la web del rediseño (18-oct-2026); con la web anterior la llamada responde 200 y
+# refresca el resto de tags, pero no el Salón. Orden de despliegue: ver la cabecera
+# de db/migrations/031_salon_video_recortes.sql.
 on:
   workflow_dispatch:
 
@@ -47,6 +52,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
       - name: Seed Hall of Fame
+        id: seed
         run: python -m src.scrapers.seed_hall_of_fame
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -54,3 +60,15 @@ jobs:
         run: python -m src.scrapers.measure_photo_cutout
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - name: Revalidate web
+        # Si el seed escribió, la web debe verlo aunque la medida haya salido en
+        # rojo (por eso el if). Y que un fallo de la web no tape el resultado del
+        # seed: continue-on-error, como en refresh-news.yml.
+        if: ${{ !cancelled() && steps.seed.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          curl -fsS -X POST "https://mmastatus.app/api/revalidate" \
+            -H "Authorization: Bearer $REVALIDATE_SECRET" \
+            -o /dev/null -w "revalidate: HTTP %{http_code}\n"
+        env:
+          REVALIDATE_SECRET: ${{ secrets.REVALIDATE_SECRET }}
