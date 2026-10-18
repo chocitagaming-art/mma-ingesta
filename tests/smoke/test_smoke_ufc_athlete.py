@@ -4,6 +4,7 @@ ONE download of an anchor athlete page validated with BOTH parse families,
 protecting the four enrich-* crons that read athlete pages:
   - enrich_athlete_stats.parse_finish_stats (hero stats block) + the hero-name
     regex every anti-homonym guard relies on (enrich_facts/fullbody/stats);
+  - ufc_social.extract_social_links (JSON-LD Person.sameAs: Instagram / X);
   - enrich_photos_ufc's RECORD_RE (W-L-D) and _IMAGE_RES photo styles.
 
 Anchor: Jon Jones — retired, record frozen at 28-1-0, page stable and fully
@@ -23,6 +24,7 @@ from src.scrapers.enrich_photos_ufc import (
     _IMAGE_RES,
     _is_placeholder_image,
 )
+from src.scrapers.ufc_social import extract_social_links
 
 
 pytestmark = pytest.mark.smoke
@@ -57,6 +59,19 @@ def test_athlete_page_stats_record_and_photos(ufc_session, smoke_settings, retry
     assert hero_name and hero_name.group(1).strip(), (
         "PARSER BREAK: hero-profile__name not found in the page — every enrich-* "
         "anti-homonym guard would start skipping fighters silently"
+    )
+    # Social links (migration 032): JSON-LD Person.sameAs. Only the BLOCK is
+    # asserted, plus at least one network: Jon Jones listed both on 18-oct-2026
+    # (instagram.com/jonnybones, twitter.com/JonnyBones).
+    socials = extract_social_links(soup)
+    assert socials is not None, (
+        f"PARSER BREAK: no JSON-LD Person block for an /athlete/ URL on "
+        f"{ATHLETE_ANCHOR_SLUG!r}'s page — enrich_athlete_stats would stop "
+        f"refreshing (and stop clearing) every fighter's Instagram/X links"
+    )
+    assert socials.any, (
+        f"PARSER BREAK: the Person block parsed but yields neither Instagram nor X "
+        f"for {ATHLETE_ANCHOR_SLUG!r} — sameAs moved or its URLs changed shape"
     )
 
     # --- enrich_photos_ufc: W-L-D record + non-placeholder photo styles ---

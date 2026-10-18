@@ -31,7 +31,12 @@ SWEEPS = [
     # the first sweep that commits every iteration: each no-op UPDATE (48.8% of
     # the fighters in the 1-sep run, 47.8% in the 1-oct one) now also pays
     # BEGIN + COMMIT, two round trips to Neon of ~0.15 s each.
-    ("enrich-athlete-stats.yml", 2884, 0.668 + 2 * 0.15 * 0.49),
+    # Plus a second ESTIMATE since migration 032 (social links): every page
+    # that passes the identity guard (2,599 of 2,800 = ~0.90 on 1-oct) now also
+    # runs the social-links UPDATE. With a stats block (~0.47 of the scope) that
+    # is one more round trip inside the transaction already open; without one
+    # (~0.43) it is BEGIN + UPDATE + COMMIT, three. 0.15 s each.
+    ("enrich-athlete-stats.yml", 2884, 0.668 + 2 * 0.15 * 0.49 + 0.15 * (0.47 + 3 * 0.43)),
     # 1,903 fighters with a gap. 2.048 s/fighter: run 33484806063 (1-sep-2026),
     # the slowest monthly sweep measured (fetch + delay + one Claude call).
     ("enrich-facts.yml", 1903, 2.048),
@@ -104,3 +109,35 @@ def test_only_the_monthly_cron_runs_the_whole_table(name):
     others = [cron for cron in crons if cron != monthly]
     assert others, f"{name}: no small scheduled run left besides the sweep"
     assert all(cron.split()[2] == "*" for cron in others), others
+
+
+# --------------------------------------------- migration 032 in the workflow
+
+def _athlete_stats_steps() -> list[dict]:
+    return _enrich_job(_workflow("enrich-athlete-stats.yml"))["steps"]
+
+
+def _step_index(steps: list[dict], needle: str) -> int:
+    hits = [i for i, step in enumerate(steps) if needle in (step.get("run") or "")]
+    assert len(hits) == 1, f"expected one step running {needle!r}, found {len(hits)}"
+    return hits[0]
+
+
+def test_migration_032_step_runs_before_the_script_and_only_by_hand():
+    # The DDL (ALTER TABLE fighters, ACCESS EXCLUSIVE) must never come from the
+    # cron: in a schedule event `inputs` is empty, so `!inputs.dry_run` alone is
+    # TRUE, and GitHub starts the 08:15 cron hours late (12:08-17:49 UTC on
+    # 12-17 oct 2026), a Saturday maybe in the middle of an event. Nor from a
+    # dry-run: "first a dry-run" would then already run DDL against prod.
+    steps = _athlete_stats_steps()
+    ddl = _step_index(steps, "032_fighter_social_links.sql")
+    script = _step_index(steps, "python -m src.scrapers.enrich_athlete_stats")
+    assert ddl < script
+    condition = steps[ddl].get("if", "")
+    assert "github.event_name == 'workflow_dispatch'" in condition
+    assert "!inputs.dry_run" in condition
+    run = steps[ddl]["run"]
+    assert "ON_ERROR_STOP=1" in run
+    assert "--single-transaction" in run
+    # The script step itself must stay unconditional (stats refresh daily).
+    assert "if" not in steps[script]
