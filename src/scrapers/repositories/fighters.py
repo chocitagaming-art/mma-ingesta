@@ -543,27 +543,75 @@ def update_fighter_social_links(
 ) -> bool:
     """Store the Instagram / X profiles ufc.com lists for a fighter (migration 032).
 
-    AUTHORITATIVE, NULLS INCLUDED: the caller only gets here when the athlete
-    page carried its JSON-LD Person block, so ufc.com's list is the truth and a
-    None means "ufc.com no longer lists it" -> the stored link is DELETED
-    (owner's decision, 18-oct-2026). A page without that block never reaches
-    this function (nothing is touched). Values arrive already normalized by
-    ufc_social (the shape migration 032's CHECKs accept). An unchanged pair
-    skips the row churn (IS DISTINCT FROM). Returns True if a row was updated.
+    SETS, NEVER CLEARS: a None leaves that column as it is. Deleting a link
+    ufc.com no longer lists (owner's decision, 18-oct-2026) is a separate,
+    run-level step (clear_fighter_social_links) that enrich_athlete_stats only
+    takes when the run as a whole looks sane: a ufc.com template change must
+    not wipe every fighter's links in one sweep. Values arrive already
+    normalized by ufc_social (the shape migration 032's CHECKs accept). An
+    unchanged pair skips the row churn (IS DISTINCT FROM). Returns True if a
+    row was updated.
     """
     with connection.cursor() as cursor:
         cursor.execute(
             """
             UPDATE fighters
-            SET instagram_url = %s,
-                x_url = %s,
+            SET instagram_url = COALESCE(%s, instagram_url),
+                x_url = COALESCE(%s, x_url),
                 updated_at = NOW()
             WHERE id = %s
               AND (
-                instagram_url IS DISTINCT FROM %s
-                OR x_url IS DISTINCT FROM %s
+                instagram_url IS DISTINCT FROM COALESCE(%s, instagram_url)
+                OR x_url IS DISTINCT FROM COALESCE(%s, x_url)
               )
             """,
             (instagram_url, x_url, fighter_id, instagram_url, x_url),
         )
         return cursor.rowcount > 0
+
+
+def _social_column(column: str) -> str:
+    # The column name is interpolated into SQL: only the two of migration 032.
+    if column not in SOCIAL_LINK_COLUMNS:
+        raise ValueError(f"not a social-link column: {column!r}")
+    return column
+
+
+def clear_fighter_social_links(
+    connection: PgConnection, column: str, fighter_ids: list[int]
+) -> int:
+    """NULL ``column`` for these fighters (ufc.com no longer lists that network
+    on their verified page). Only rows that still hold a link are touched.
+    One statement for the whole run. Returns the number of links deleted."""
+    if not fighter_ids:
+        return 0
+    column = _social_column(column)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            UPDATE fighters
+            SET {column} = NULL,
+                updated_at = NOW()
+            WHERE id = ANY(%s)
+              AND {column} IS NOT NULL
+            """,
+            (list(fighter_ids),),
+        )
+        return cursor.rowcount
+
+
+def count_fighter_social_links_set(
+    connection: PgConnection, column: str, fighter_ids: list[int]
+) -> int:
+    """How many of these fighters hold a link in ``column`` (read-only): what
+    clear_fighter_social_links WOULD delete. Used by --dry-run."""
+    if not fighter_ids:
+        return 0
+    column = _social_column(column)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"SELECT count(*) FROM fighters WHERE id = ANY(%s) AND {column} IS NOT NULL",
+            (list(fighter_ids),),
+        )
+        row = cursor.fetchone()
+    return int(row[0]) if row else 0

@@ -37,8 +37,15 @@
 -- role_table_grants = SELECT), así que las columnas nuevas le llegan sin GRANT.
 --
 -- Idempotente: se puede aplicar dos veces. El workflow enrich-athlete-stats la
--- aplica él solo, y SOLO si aún faltan las columnas o los CHECK (así el cron
--- diario no toma un candado de tabla cada mañana por nada).
+-- aplica en un lanzamiento A MANO sin dry-run (nunca desde el cron, que arranca
+-- a horas imprevisibles), y SOLO si aún faltan las columnas o los CHECK (así no
+-- toma un candado de tabla por nada).
+--
+-- 🪤 EL FRENO. «Se borra lo que ufc.com deja de listar» significa que un cambio
+-- de plantilla en ufc.com borraría las redes de TODOS en un solo barrido. Por
+-- eso los borrados se juntan y se aplican al FINAL del run, y no se aplican (el
+-- job sale en rojo, socials_brake=1) si el run tiene pinta de cambio en ufc.com.
+-- Ver THE BRAKE en src/scrapers/enrich_athlete_stats.py.
 
 -- Si alguien tiene fighters cogida (una consulta larga), mejor fallar en rojo a
 -- los 10 s que dejar la web esperando detrás del ALTER.

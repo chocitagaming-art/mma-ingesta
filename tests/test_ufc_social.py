@@ -17,6 +17,8 @@ import pytest
 from bs4 import BeautifulSoup
 
 from src.scrapers.ufc_social import (
+    DB_CHECK_INSTAGRAM,
+    DB_CHECK_X,
     SocialLinks,
     extract_social_links,
     normalize_instagram,
@@ -123,7 +125,10 @@ def test_block_without_a_network_means_delete_it():
 @pytest.mark.parametrize("same_as", [None, [], "", 7])
 def test_block_without_same_as_is_known_and_empty(same_as):
     # The Person block is there but lists nothing: authoritative "no socials",
-    # NOT "unknown" (ufc.com very likely omits the key when there are none).
+    # NOT "unknown". MEASURED 18-oct-2026: ufc.com omits the sameAs key for
+    # fighters without accounts (Fred Ettish, Zane Frazier, Kevin Rosier, Jason
+    # DeLucia). A template change dropping it for everyone is caught by the
+    # run-level brake in enrich_athlete_stats, not here.
     links = extract_social_links(_page(_jsonld(_person(same_as))))
     assert links == SocialLinks(instagram_url=None, x_url=None)
     assert not links.any
@@ -144,6 +149,55 @@ def test_first_valid_url_per_network_wins():
     ]
     links = extract_social_links(_page(_jsonld(_person(same_as))))
     assert links == SocialLinks("https://www.instagram.com/rudeboy/", "https://x.com/TouchNgo_")
+
+
+@pytest.mark.parametrize(
+    "raw,field",
+    [
+        ("https://x.com/i/user/123456", "x_unparsed"),  # a URL shape we do not read
+        ("https://twitter.com/JonnyBones/status/1", "x_unparsed"),
+        ("https://twitter.com/", "x_unparsed"),
+        ("https://instagram.com/jonnybones/profilecard/?igsh=abc", "instagram_unparsed"),
+        ("https://instagram.com/p/ABC123/", "instagram_unparsed"),
+        ("https://instagram.com/" + "a" * 31, "instagram_unparsed"),
+    ],
+)
+def test_unreadable_url_on_the_network_is_kept_not_deleted(raw, field):
+    # Listed on instagram.com / twitter.com / x.com but not readable: that is
+    # not "ufc.com dropped it", so the writer must keep the stored link.
+    links = extract_social_links(_page(_jsonld(_person([raw]))))
+    assert links is not None and not links.any
+    assert getattr(links, field) is True
+    other = "instagram_unparsed" if field == "x_unparsed" else "x_unparsed"
+    assert getattr(links, other) is False
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "https://twitter.com/Unavailable ",
+        "https://instagram.com/Unavailable",
+        "https://instagram.com/ufc",  # the UFC's own account: "none of his own"
+        "https://twitter.com/@ufc",
+    ],
+)
+def test_explicit_filler_means_no_account_and_is_deleted(raw):
+    links = extract_social_links(_page(_jsonld(_person([raw]))))
+    assert links == SocialLinks(None, None)
+    assert not links.instagram_unparsed and not links.x_unparsed
+
+
+def test_unreadable_entry_does_not_hide_a_readable_one():
+    same_as = ["https://instagram.com/p/ABC123/", "https://instagram.com/rudeboy"]
+    links = extract_social_links(_page(_jsonld(_person(same_as))))
+    assert links == SocialLinks("https://www.instagram.com/rudeboy/", None)
+    assert links.instagram_unparsed is False
+
+
+def test_other_networks_never_count_as_unparsed():
+    same_as = ["https://facebook.com/alexvolkanovski/", "https://www.ufcstore.com/en/x"]
+    links = extract_social_links(_page(_jsonld(_person(same_as))))
+    assert links == SocialLinks(None, None)
 
 
 def test_only_a_person_on_an_athlete_url_counts():
@@ -189,6 +243,9 @@ def test_person_as_a_top_level_graph_node():
         ("instagram.com/Some.User?hl=es", "https://www.instagram.com/some.user/"),
         ("http://m.instagram.com/hitman_att/", "https://www.instagram.com/hitman_att/"),
         ("https://instagram.com/@navajostirling", "https://www.instagram.com/navajostirling/"),
+        ("https://instagr.am/jonnybones", "https://www.instagram.com/jonnybones/"),
+        ("https://instagram.com/_u/jonnybones", "https://www.instagram.com/jonnybones/"),
+        ("https://instagram.com/_u/", None),
         ("  https://instagram.com/georgesstpierre_  ", "https://www.instagram.com/georgesstpierre_/"),
         # A real fighter handle that merely CONTAINS "ufc" is fine.
         ("https://instagram.com/michelpereiraufc", "https://www.instagram.com/michelpereiraufc/"),
@@ -222,6 +279,8 @@ def test_normalize_instagram(raw, expected):
         ("https://mobile.twitter.com/TeamKhabib", "https://x.com/TeamKhabib"),
         ("https://www.twitter.com/TouchNgo_?ref=br_rs", "https://x.com/TouchNgo_"),
         ("https://x.com/RondaRousey/", "https://x.com/RondaRousey"),
+        ("https://twitter.com/#!/JonnyBones", "https://x.com/JonnyBones"),
+        ("https://twitter.com/#!/intent/tweet", None),
         ("https://twitter.com/UfcPereira", "https://x.com/UfcPereira"),
         ("https://twitter.com/ufc", None),
         ("https://twitter.com/UFCEspanol", None),
@@ -273,3 +332,22 @@ def test_normalized_x_satisfies_the_db_check(raw):
     value = normalize_x(raw)
     assert value is not None
     assert _check_regex("x_url").fullmatch(value)
+
+
+def test_python_check_patterns_are_the_migration_ones():
+    # ufc_social refuses to return a value its copy of the CHECK rejects; that
+    # copy must stay byte-identical to the .sql or the guard is worthless.
+    assert DB_CHECK_INSTAGRAM.pattern == _check_regex("instagram_url").pattern
+    assert DB_CHECK_X.pattern == _check_regex("x_url").pattern
+
+
+@pytest.mark.parametrize("handle", ["abc\n", "abc\r\n", "ab c", "abc\t"])
+def test_handles_with_whitespace_inside_never_pass(handle, monkeypatch):
+    # Python's ``$`` matches before a trailing newline and Postgres's does not:
+    # a handle like "abc\n" must never reach the CHECK (it would abort the
+    # sweep). urlsplit already strips \n/\r/\t; fullmatch is the second lock.
+    from src.scrapers import ufc_social
+
+    monkeypatch.setattr(ufc_social, "_profile_handle", lambda raw, hosts, reserved: handle)
+    assert normalize_instagram("https://instagram.com/x") is None
+    assert normalize_x("https://twitter.com/x") is None

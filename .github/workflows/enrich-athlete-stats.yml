@@ -17,9 +17,13 @@ name: Enrich athlete finish stats (ufc.com)
 # tests/test_enrich_sweep_workflows.py keeps these figures honest.
 # Since migration 032 the same page also yields the fighter's Instagram and X
 # (JSON-LD Person.sameAs, never the footer's @ufc): zero extra requests, one
-# more UPDATE per verified page (IS DISTINCT FROM, so a no-op when unchanged).
+# more UPDATE per verified page that lists a link (IS DISTINCT FROM: a no-op
+# when unchanged) and two at the end of the run for the deletions.
 # First fill of those links = manual dispatch with all=true (dry_run=true first
-# to see the counts: with_socials / with_instagram / with_x).
+# to see the counts: with_socials / with_instagram / with_x / socials_would_clear).
+# Deleting a link ufc.com stopped listing waits for the END of the run and is
+# held back (exit 1, socials_brake=1) if the run looks like a ufc.com template
+# change: see THE BRAKE in src/scrapers/enrich_athlete_stats.py.
 # Daily 08:15 UTC: after refresh-records (08:00) and event-night live-results
 # seals, clear of the ufc.com photo/facts crawlers (05:00-06:30).
 on:
@@ -63,13 +67,19 @@ jobs:
       - run: pip install -r requirements-scrapers.txt
       # La MISMA pagina trae el Instagram y el X del luchador (JSON-LD
       # Person.sameAs, migracion 032). La 032 es aditiva e idempotente, pero se
-      # aplica SOLO si aun faltan sus dos columnas o sus dos CHECK: asi el cron
-      # diario no toma un candado de tabla sobre fighters cada manana por nada.
-      # Si el psql falla (lock_timeout de 10 s), el job sale en rojo y avisa
-      # notify-on-failure. Si no se aplicara, el script seguiria igual: refresca
-      # las estadisticas y solo cuenta las redes (socials_columns_missing=1).
+      # aplica SOLO si aun faltan sus dos columnas o sus dos CHECK: asi no se
+      # toma un candado de tabla sobre fighters cada vez por nada.
+      # SOLO en un lanzamiento A MANO y sin dry-run, NUNCA desde el cron: en un
+      # evento schedule `inputs` va vacio y `!inputs.dry_run` daria verdadero,
+      # y el cron diario arranca a horas imprevisibles (las 08:15 programadas
+      # salieron entre las 12:08 y las 17:49 UTC del 12 al 17-oct), un sabado
+      # quiza en plena velada. Asi el ALTER lo lanza una persona, a una hora
+      # elegida y despues del dry-run. Mientras no se aplique, el script sigue
+      # igual: refresca las estadisticas y solo cuenta las redes
+      # (socials_columns_missing=1). Si el psql falla (lock_timeout de 10 s), el
+      # job sale en rojo. tests/test_enrich_sweep_workflows.py vigila este if.
       - name: Apply migration 032 if missing (additive, idempotent)
-        if: ${{ !inputs.dry_run }}
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run }}
         run: |
           HAVE=$(psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -tAc "
             SELECT (SELECT count(*) FROM information_schema.columns

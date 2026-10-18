@@ -37,6 +37,20 @@ Rule (owner, 18-oct-2026): Person block present -> store what it lists and
 NULL what it no longer lists; no block -> touch nothing. If migration 032 is
 not applied yet the run still refreshes stats and only counts socials.
 
+🪤 THE BRAKE. "NULL what it no longer lists" means one ufc.com template change
+(sameAs renamed, a new X URL shape) would wipe the links of EVERY fighter in a
+single sweep, in green. So links are SET inline, fighter by fighter, but the
+deletions are only collected, and applied in one statement per network at the
+END of the run, and only if the run looks like ufc.com still publishes them:
+with at least SOCIALS_BRAKE_MIN_PAGES Person blocks seen, a network listed on
+fewer than SOCIALS_BRAKE_MIN_SHARE of them (or Person blocks missing on more
+than half of the verified pages) holds those deletions back, prints
+``socials_brake=1`` and exits 1, which notify-on-failure turns into an alert.
+A link ufc.com lists in a shape we cannot read is never deleted
+(``socials_unparsed``). Measured 18-oct-2026 on 72 Person blocks drawn at
+random from the --all scope: Instagram 0.56, X 0.67, any 0.76, no block 0/72;
+upcoming cards (20 pages): Instagram 0.90, X 0.80.
+
 Usage:
     python -m src.scrapers.enrich_athlete_stats --probe "Cory Sandhagen"   # no DB
     python -m src.scrapers.enrich_athlete_stats --dry-run                  # upcoming cards, report only
@@ -51,6 +65,7 @@ import argparse
 import json
 import logging
 import re
+import sys
 import time
 import unicodedata
 from collections import Counter
@@ -67,6 +82,8 @@ from .enrich_fullbody import _accepted_by_nickname, _hero_name_matches, _unique_
 from .enrich_photos_ufc import ATHLETE_URL, REQUEST_DELAY_SECONDS, _HEADERS, _HERO_NAME_RE, slugify
 from .logging_config import configure_logging
 from .repositories.fighters import (
+    clear_fighter_social_links,
+    count_fighter_social_links_set,
     fighter_social_columns_present,
     update_fighter_finish_stats,
     update_fighter_social_links,
@@ -74,6 +91,15 @@ from .repositories.fighters import (
 from .ufc_social import SocialLinks, extract_social_links
 
 LOGGER = logging.getLogger(__name__)
+
+# Run-level brake on deleting social links (see THE BRAKE above). Below
+# MIN_PAGES Person blocks the run is too small to judge and deletes as usual
+# (a handful of fighters at most). 0.20 sits far below every share measured
+# (0.56 the lowest) and far above the ~0 a template change produces.
+SOCIALS_BRAKE_MIN_PAGES = 30
+SOCIALS_BRAKE_MIN_SHARE = 0.20
+# (column, summary key of the fighters whose page lists it)
+_SOCIAL_NETWORKS = (("instagram_url", "with_instagram"), ("x_url", "with_x"))
 
 PROGRESS_EVERY = 50
 
@@ -274,6 +300,9 @@ def backfill(
 ) -> Counter:
     session = requests.Session()
     counts: Counter = Counter()
+    # Fighters whose verified page no longer lists a network: deleted at the
+    # end of the run, behind the brake (_settle_social_clears).
+    pending_clears: dict[str, list[int]] = {column: [] for column, _ in _SOCIAL_NETWORKS}
     targets = _get_target_fighters(connection, limit=limit, offset=offset, all_scope=all_scope)
     # Asked once, inside the same read transaction as the target SELECT.
     socials_writable = fighter_social_columns_present(connection)
@@ -338,7 +367,7 @@ def backfill(
                     if updated:
                         counts["updated"] += 1
             _handle_socials(
-                connection, counts, fighter_id, name, page.socials,
+                connection, counts, pending_clears, fighter_id, name, page.socials,
                 dry_run=dry_run, writable=socials_writable,
             )
 
@@ -360,12 +389,16 @@ def backfill(
                 counts["no_stats"], counts["unresolved"], counts["name_mismatch"],
                 counts["with_socials"], counts["socials_updated"],
             )
+    _settle_social_clears(
+        connection, counts, pending_clears, dry_run=dry_run, writable=socials_writable
+    )
     return counts
 
 
 def _handle_socials(
     connection,
     counts: Counter,
+    pending_clears: dict[str, list[int]],
     fighter_id: int,
     name: str,
     socials: SocialLinks | None,
@@ -373,8 +406,9 @@ def _handle_socials(
     dry_run: bool,
     writable: bool,
 ) -> None:
-    """Count and (unless dry-run / migration missing) store one verified page's
-    social links. Called ONLY after the anti-homonym guard passed."""
+    """Count one verified page's social links, store the ones it lists (unless
+    dry-run / migration missing) and queue the deletion of the ones it no
+    longer lists. Called ONLY after the anti-homonym guard passed."""
     if socials is None:
         # No JSON-LD Person block: "we do not know", never "no socials".
         counts["no_socials_block"] += 1
@@ -386,18 +420,86 @@ def _handle_socials(
         counts["with_x"] += 1
     if socials.any:
         counts["with_socials"] += 1
+    for column, url, unparsed in (
+        ("instagram_url", socials.instagram_url, socials.instagram_unparsed),
+        ("x_url", socials.x_url, socials.x_unparsed),
+    ):
+        if url is not None:
+            continue
+        if unparsed:
+            # Listed, but in a shape we cannot read: keep what is stored.
+            counts["socials_unparsed"] += 1
+            LOGGER.warning(
+                "Unreadable %s in ufc.com sameAs for id=%d %r: kept as stored",
+                column, fighter_id, name,
+            )
+        else:
+            pending_clears[column].append(fighter_id)
     if dry_run:
         LOGGER.info(
             "[dry-run] id=%d %r: instagram=%s x=%s",
             fighter_id, name, socials.instagram_url, socials.x_url,
         )
         return
-    if not writable:
+    if not writable or not socials.any:
         return
     if update_fighter_social_links(
         connection, fighter_id, instagram_url=socials.instagram_url, x_url=socials.x_url
     ):
         counts["socials_updated"] += 1
+
+
+def _socials_brake_reason(counts: Counter, with_key: str | None) -> str | None:
+    """Why this run must not delete links (None = it may). ``with_key`` None
+    asks only the run-wide question (Person blocks missing)."""
+    block, no_block = counts["socials_block"], counts["no_socials_block"]
+    if block + no_block >= SOCIALS_BRAKE_MIN_PAGES and no_block * 2 > block + no_block:
+        return f"no JSON-LD Person block on {no_block} of {block + no_block} verified pages"
+    if with_key is None or block < SOCIALS_BRAKE_MIN_PAGES:
+        return None
+    if counts[with_key] < SOCIALS_BRAKE_MIN_SHARE * block:
+        return f"{with_key}={counts[with_key]} of socials_block={block}"
+    return None
+
+
+def _settle_social_clears(
+    connection,
+    counts: Counter,
+    pending_clears: dict[str, list[int]],
+    *,
+    dry_run: bool,
+    writable: bool,
+) -> None:
+    """End of run: delete the links ufc.com no longer lists, one statement per
+    network, unless the brake says the run looks like a ufc.com change."""
+    run_wide = _socials_brake_reason(counts, None)
+    if run_wide:
+        # No deletion is at stake here, but the fill has silently stopped.
+        counts["socials_brake"] = 1
+        LOGGER.error("Social-links brake: %s", run_wide)
+    for column, with_key in _SOCIAL_NETWORKS:
+        ids = pending_clears[column]
+        if not ids:
+            continue
+        reason = _socials_brake_reason(counts, with_key)
+        if reason:
+            counts["socials_brake"] = 1
+            counts["socials_clears_held"] += len(ids)
+            LOGGER.error(
+                "Social-links brake: %s; NOT deleting %s for %d fighters "
+                "(did ufc.com change its JSON-LD?)",
+                reason, column, len(ids),
+            )
+            continue
+        if not writable:
+            continue
+        if dry_run:
+            counts["socials_would_clear"] += count_fighter_social_links_set(
+                connection, column, ids
+            )
+            continue
+        counts["socials_cleared"] += clear_fighter_social_links(connection, column, ids)
+        connection.commit()
 
 
 def probe(names: list[str]) -> None:
@@ -454,11 +556,17 @@ def main() -> None:
         # Social links (migration 032). with_socials falling to ~0 on a run that
         # still resolves pages = ufc.com changed or dropped its JSON-LD block.
         "socials_block", "no_socials_block", "with_socials", "with_instagram", "with_x",
-        "socials_updated", "socials_columns_missing",
+        "socials_updated", "socials_cleared", "socials_would_clear", "socials_unparsed",
+        "socials_clears_held", "socials_brake", "socials_columns_missing",
     ]
     print(json.dumps({key: counts.get(key, 0) for key in keys}, indent=2))
     if args.dry_run:
         print("Dry-run: nothing was written. Re-run without --dry-run to persist.")
+    if counts.get("socials_brake"):
+        # Stats were refreshed and links SET as usual; only the deletions were
+        # held. Exit 1 so notify-on-failure raises the alarm.
+        print("socials_brake=1: social-link deletions held back (see the log). Exit 1.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

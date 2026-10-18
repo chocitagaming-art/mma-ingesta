@@ -19,6 +19,17 @@ THE TWO ANSWERS (they drive the write rule in enrich_athlete_stats):
   - ``SocialLinks(...)``: the block is there -> ufc.com is authoritative, and a
     network it no longer lists comes back as None, which the writer stores as
     NULL (owner's decision, 18-oct: a dropped account is deleted).
+    A Person WITHOUT a ``sameAs`` key counts as "lists nothing": measured on
+    18-oct, ufc.com omits the key for fighters with no accounts (Fred Ettish,
+    Zane Frazier, Kevin Rosier, Jason DeLucia), it never sends an empty list.
+    The guard against a template change that drops the key for EVERYONE is the
+    run-level brake in enrich_athlete_stats, not this parser.
+
+UNPARSED != ABSENT. A sameAs entry ON instagram.com / twitter.com / x.com that
+does not normalize to a profile (a post, an unknown URL shape ufc.com might
+start using) is not proof the account is gone: ``instagram_unparsed`` /
+``x_unparsed`` tell the writer to KEEP what is stored. Only an explicit filler
+("Unavailable") or the UFC's own account on that host means "no account".
 
 NORMALIZATION. ufc.com serves dirty values: "twitter.com/@navajostirling",
 "facebook.com/Unavailable  ", "?ref=br_rs", mixed case. Output is exactly the
@@ -41,13 +52,21 @@ from bs4 import BeautifulSoup
 # Handle grammar. Instagram: letters, digits, dot, underscore, max 30 (stored
 # lower-case: Instagram handles are case-insensitive). X: letters, digits,
 # underscore, max 15 (case kept as published).
-_IG_HANDLE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
-_X_HANDLE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
+# Always used with fullmatch: Python's ``$`` also matches before a trailing
+# newline, Postgres's does not.
+_IG_HANDLE = re.compile(r"[A-Za-z0-9._]{1,30}")
+_X_HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}")
+
+# Last line of defence: the EXACT patterns of migration 032's CHECKs
+# (tests/test_ufc_social.py reads them from the .sql and compares). A value the
+# CHECK would reject aborts the whole sweep, so it is never returned.
+DB_CHECK_INSTAGRAM = re.compile(r"^https://www\.instagram\.com/[a-z0-9._]{1,30}/$")
+DB_CHECK_X = re.compile(r"^https://x\.com/[A-Za-z0-9_]{1,15}$")
 
 # First path segments that are site sections, not profiles.
 _IG_RESERVED = frozenset({
     "p", "reel", "reels", "tv", "explore", "stories", "accounts", "direct",
-    "about", "developer", "legal", "web", "share",
+    "about", "developer", "legal", "web", "share", "_u",
 })
 _X_RESERVED = frozenset({
     "intent", "share", "home", "i", "search", "hashtag", "explore", "settings",
@@ -62,16 +81,22 @@ _PLACEHOLDERS = frozenset({
     "ufc", "ufcespanol", "ufc_espanol", "ufcbrasil", "ufceurope", "ufc_europe",
 })
 
-_IG_HOSTS = frozenset({"instagram.com"})
+_IG_HOSTS = frozenset({"instagram.com", "instagr.am"})
 _X_HOSTS = frozenset({"x.com", "twitter.com"})
 
 
 @dataclass(frozen=True)
 class SocialLinks:
-    """Normalized profile URLs; None = ufc.com does not list that network."""
+    """Normalized profile URLs; None = ufc.com does not list that network.
+
+    ``*_unparsed``: None, but because ufc.com lists that network in a shape we
+    cannot read (not because it dropped it): the writer keeps the stored link.
+    """
 
     instagram_url: str | None
     x_url: str | None
+    instagram_unparsed: bool = False
+    x_unparsed: bool = False
 
     @property
     def any(self) -> bool:
@@ -98,7 +123,11 @@ def _host_and_segments(raw: str | None) -> tuple[str | None, list[str]]:
         if host.startswith(prefix):
             host = host[len(prefix):]
             break
-    segments = [segment for segment in parts.path.split("/") if segment]
+    path = parts.path
+    # Old Twitter hash-bang links: twitter.com/#!/JonnyBones.
+    if path.strip("/") == "" and parts.fragment.startswith("!/"):
+        path = parts.fragment[1:]
+    segments = [segment for segment in path.split("/") if segment]
     return host or None, segments
 
 
@@ -106,6 +135,9 @@ def _profile_handle(raw: str | None, hosts: frozenset[str], reserved: frozenset[
     """The handle of a PROFILE URL on one of ``hosts``, else None. Exactly one
     path segment: /<handle>/status/123 (a post) or /p/ABC is not a profile."""
     host, segments = _host_and_segments(raw)
+    # instagram.com/_u/<handle>: the app deep-link form of a profile.
+    if host in _IG_HOSTS and len(segments) == 2 and segments[0] == "_u":
+        segments = segments[1:]
     if host not in hosts or len(segments) != 1:
         return None
     handle = segments[0].strip().lstrip("@")
@@ -118,20 +150,35 @@ def _profile_handle(raw: str | None, hosts: frozenset[str], reserved: frozenset[
 def normalize_instagram(raw: str | None) -> str | None:
     """'https://instagram.com/TheNotoriousMMA?hl=es' -> 'https://www.instagram.com/thenotoriousmma/'."""
     handle = _profile_handle(raw, _IG_HOSTS, _IG_RESERVED)
-    if handle is None or not _IG_HANDLE.match(handle):
+    if handle is None or not _IG_HANDLE.fullmatch(handle):
         return None
     # Instagram never starts/ends a handle with a dot nor allows "..".
     if handle.startswith(".") or handle.endswith(".") or ".." in handle:
         return None
-    return f"https://www.instagram.com/{handle.lower()}/"
+    url = f"https://www.instagram.com/{handle.lower()}/"
+    return url if DB_CHECK_INSTAGRAM.fullmatch(url) else None
 
 
 def normalize_x(raw: str | None) -> str | None:
     """'https://twitter.com/@navajostirling' -> 'https://x.com/navajostirling'."""
     handle = _profile_handle(raw, _X_HOSTS, _X_RESERVED)
-    if handle is None or not _X_HANDLE.match(handle):
+    if handle is None or not _X_HANDLE.fullmatch(handle):
         return None
-    return f"https://x.com/{handle}"
+    url = f"https://x.com/{handle}"
+    return url if DB_CHECK_X.fullmatch(url) else None
+
+
+def _says_no_account(segments: list[str]) -> bool:
+    """A sameAs entry on the network's host that explicitly means "none":
+    a filler ("Unavailable") or the UFC's own account as the only segment."""
+    return len(segments) == 1 and segments[0].strip().lstrip("@").lower() in _PLACEHOLDERS
+
+
+def _unreadable_on(raw: str, hosts: frozenset[str]) -> bool:
+    """True when ``raw`` is ON one of ``hosts`` but is neither a readable
+    profile nor an explicit "no account" (callers check the first part)."""
+    host, segments = _host_and_segments(raw)
+    return host in hosts and not _says_no_account(segments)
 
 
 def _is_person(node: dict) -> bool:
@@ -202,11 +249,21 @@ def extract_social_links(soup: BeautifulSoup) -> SocialLinks | None:
     if not isinstance(same_as, list):
         same_as = []
     instagram = x = None
+    instagram_unparsed = x_unparsed = False
     for raw in same_as:
         if not isinstance(raw, str):
             continue
         if instagram is None:
             instagram = normalize_instagram(raw)
+            if instagram is None and _unreadable_on(raw, _IG_HOSTS):
+                instagram_unparsed = True
         if x is None:
             x = normalize_x(raw)
-    return SocialLinks(instagram_url=instagram, x_url=x)
+            if x is None and _unreadable_on(raw, _X_HOSTS):
+                x_unparsed = True
+    return SocialLinks(
+        instagram_url=instagram,
+        x_url=x,
+        instagram_unparsed=instagram is None and instagram_unparsed,
+        x_unparsed=x is None and x_unparsed,
+    )
