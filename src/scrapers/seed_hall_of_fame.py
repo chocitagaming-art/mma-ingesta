@@ -190,30 +190,30 @@ PHOTO: dict[tuple[str, str], tuple[str, str | None]] = {
     # Pionera: no tienen cara en ESPN ni en su ficha de ufc.com. Severn sí tiene,
     # pero es una foto de galería CON fondo (medida: PNG RGBA con solo el 27 % del
     # borde transparente): el retrato del Salón es igual de oficial y encuadra mejor.
-    ("pioneer", "Dan Severn"): (_UFC_HOF + "2023-11/HOF_DSevern_16x9.jpg?h=854a7be2&itok=YmKVaqQS", "51% 24%"),
-    ("pioneer", "Don Frye"): (_UFC_HOF + "2023-11/HOF_DFrye_16x9.jpg?h=854a7be2&itok=62V__v7c", "57% 22%"),
-    ("pioneer", "Maurice Smith"): (_UFC_HOF + "2023-11/HOF_MSmith_16x9.jpg?h=854a7be2&itok=jqEs_-tB", "48% 18%"),
+    ("pioneer", "Dan Severn"): (_UFC_HOF + "2023-11/HOF_DSevern_16x9.jpg?h=854a7be2&itok=YmKVaqQS", "51% 12%"),
+    ("pioneer", "Don Frye"): (_UFC_HOF + "2023-11/HOF_DFrye_16x9.jpg?h=854a7be2&itok=62V__v7c", "64% 14%"),
+    ("pioneer", "Maurice Smith"): (_UFC_HOF + "2023-11/HOF_MSmith_16x9.jpg?h=854a7be2&itok=jqEs_-tB", "50% 10%"),
     # Moderna: la foto que la web ya pintaba por su override local. Al ponerla
     # aquí la base sabe qué foto se ve de verdad, y measure_photo_cutout puede
     # medirla (es un recorte: WEBP RGBA con el 100 % del borde transparente).
     ("modern", "Forrest Griffin"): ("/fighters/forrest-griffin.webp", None),
     # Contribuidora: las 9 con el retrato del Salón de ufc.com, también Mask y
     # Davie, que hasta ahora tenían foto de Wikimedia alojada en public/hof.
-    ("contributor", 'Charles "Mask" Lewis Jr.'): (_UFC_HOF + "2023-11/HOF_CMask_16x9.jpg?h=854a7be2&itok=5And1mhv", "44% 32%"),
+    ("contributor", 'Charles "Mask" Lewis Jr.'): (_UFC_HOF + "2023-11/HOF_CMask_16x9.jpg?h=854a7be2&itok=5And1mhv", "44% 18%"),
     ("contributor", "Jeff Blatnick"): (_UFC_HOF + "2023-11/HOF_JBlatnick_16x9.jpg?h=854a7be2&itok=qTdDWXOY", "50% 17%"),
-    ("contributor", "Bob Meyrowitz"): (_UFC_HOF + "2023-11/HOF_BMeyrowitz_16x9.jpg?h=854a7be2&itok=eWqGeIHL", "50% 22%"),
+    ("contributor", "Bob Meyrowitz"): (_UFC_HOF + "2023-11/HOF_BMeyrowitz_16x9.jpg?h=854a7be2&itok=eWqGeIHL", "58% 10%"),
     ("contributor", "Joe Silva"): (_UFC_HOF + "2023-11/HOF_JSilva_16x9_Eng.jpg?h=854a7be2&itok=f6hzyJiw", "46% 38%"),
-    ("contributor", "Art Davie"): (_UFC_HOF + "2023-11/HOF_ADavie_16x9.jpg?h=854a7be2&itok=sy6ZWVIe", "50% 31%"),
-    ("contributor", "Bruce Connal"): (_UFC_HOF + "2023-11/HOF_BConnal_16x9.jpg?h=854a7be2&itok=kKd39Kfo", "48% 33%"),
-    ("contributor", "Marc Ratner"): (_UFC_HOF + "2023-11/HOF_MRatner_16x9.jpg?h=854a7be2&itok=Q0k6v5Co", "49% 35%"),
+    ("contributor", "Art Davie"): (_UFC_HOF + "2023-11/HOF_ADavie_16x9.jpg?h=854a7be2&itok=sy6ZWVIe", "53% 20%"),
+    ("contributor", "Bruce Connal"): (_UFC_HOF + "2023-11/HOF_BConnal_16x9.jpg?h=854a7be2&itok=kKd39Kfo", "49% 12%"),
+    ("contributor", "Marc Ratner"): (_UFC_HOF + "2023-11/HOF_MRatner_16x9.jpg?h=854a7be2&itok=Q0k6v5Co", "50% 20%"),
     ("contributor", "Craig Piligian"): (
-        _UFC_HOF + "2025-06/Craig-Piligian-HOF-image-clean-1920x1080.jpg?h=29c0266b&itok=YyB-hCd4", "50% 33%"),
+        _UFC_HOF + "2025-06/Craig-Piligian-HOF-image-clean-1920x1080.jpg?h=29c0266b&itok=YyB-hCd4", "50% 17%"),
     # 🪤 El fichero se llama «DO-NOT-USE-…» pero es un retrato real (el 5-jul se
     # tomó por un marcador provisional). ufc.com puede cambiarlo: si da error, la
     # web cae a la silueta y la medida guarda el http_status.
     ("contributor", "Thomas Gerbasi"): (
         _UFC_HOF + "2026-05/DO-NOT-USE-050926-thomas-gerbasi-hall-of-fame-announcement-HERO.jpg"
-        "?h=d1cb525d&itok=OdcEKvzb", "50% 42%"),
+        "?h=d1cb525d&itok=OdcEKvzb", "50% 28%"),
 }
 
 # ------------------------------------------------------------ vídeo de cada pelea
