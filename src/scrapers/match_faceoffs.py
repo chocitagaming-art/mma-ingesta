@@ -1183,14 +1183,14 @@ def main() -> None:
     # hide the JSON of the careo. The run still exits non-zero at the end, so
     # the job goes red and notify-on-failure opens the Issue as before.
     counts: Counter = Counter()
-    fallidos: list[str] = []
+    failed: list[str] = []
 
-    def _pass(nombre: str, connection, fn) -> None:
+    def _pass(name: str, connection, fn) -> None:
         try:
             counts.update(fn())
         except Exception:  # noqa: BLE001 - reported below through the exit code
-            LOGGER.exception("El pase de %s ha fallado; sigo con el resto.", nombre)
-            fallidos.append(nombre)
+            LOGGER.exception("El pase de %s ha fallado; sigo con el resto.", name)
+            failed.append(name)
             try:
                 connection.rollback()
             except Exception:  # noqa: BLE001 - a dead connection fails the next pass too
@@ -1217,9 +1217,9 @@ def main() -> None:
     print(json.dumps({k: counts.get(k, 0) for k in keys}, indent=2))
     if not args.apply:
         print("Dry-run: nothing written. Re-run with --apply to persist.")
-    if fallidos:
+    if failed:
         raise SystemExit(
-            f"Ha fallado el pase de: {', '.join(fallidos)} (traza en el log)."
+            f"Ha fallado el pase de: {', '.join(failed)} (traza en el log)."
         )
 
 

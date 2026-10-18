@@ -170,12 +170,30 @@ def test_rechaza_el_boxeo_de_la_misma_ventana():
     # window (12-sep).
     real = _v("35QMmEPfbx8", "Garcia vs Benn: Ceremonial Weigh-In", date(2026, 9, 12))
     assert _match(1088, [real], {}) is None
-    # SIMULATED, built so ONLY the "ufc in the card" check can stop it: the
-    # strict shape, and "vegas" is a real hint of the APEX card 1098.
+    # SIMULATED: the strict shape, and "vegas" is a real hint of the APEX card
+    # 1098. Since the review of 18-oct three rules stop it (the "zuffa" and
+    # "boxing" exclusion, the 1098 surnames that are not in the bout, and "ufc"
+    # missing from the card). The "ufc in the card" rule on its own is pinned
+    # by test_cartelera_sin_ufc_no_casa_aunque_tenga_pista.
     boxeo = _v("box", "Garcia vs Benn Weigh-Ins | Zuffa Boxing Las Vegas", date(2026, 10, 9))
     assert _match(1098, [boxeo], {}) is None
     # Next to the real one it is not even a second candidate (no "ambiguous").
     assert _match(1098, UPLOADS + [boxeo]) == "G-XGRj5qe4c"
+
+
+def test_cartelera_sin_ufc_no_casa_aunque_tenga_pista():
+    # SIMULATED, against cards WITHOUT a matchup in the name (Freedom 250 and
+    # the real row 317, Road to UFC): the surname rule cannot protect them and
+    # no excluded word is in the title, so the "ufc" in the card is the ONLY
+    # thing between another promotion's weigh-in and «Pesaje oficial».
+    dia = date.fromordinal(EVENTS[1084].event_date.toordinal() - 1)
+    pfl = _v("pfl", "Smith vs Jones Weigh-Ins | PFL Washington", dia)
+    assert _match(1084, [pfl], {}) is None
+    one = _v("one", "Smith vs Jones Weigh-Ins | ONE Fight Night Shanghai", date(2025, 8, 21))
+    assert _match(TargetEvent(*_ROW_317), [one], {}) is None
+    # The control: the same shape with "UFC" in the card matches both.
+    assert _match(1084, [_v("ufc", "Smith vs Jones Weigh-Ins | UFC Washington", dia)], {}) == "ufc"
+    assert _match(TargetEvent(*_ROW_317), [_WI_317], {}) == "RTU000000WI"
 
 
 def test_rechaza_el_pesaje_de_otra_velada():
@@ -529,6 +547,22 @@ def test_run_weighins_no_reutiliza_el_video_de_otra_velada(fakedb):
     )
     mf.run_weighins(conn, apply=True, videos=[_WI_316], durations={})
     assert _written(conn) == []
+
+
+def test_run_weighins_no_reutiliza_el_video_de_una_vecina_sin_apellidos(fakedb):
+    # SIMULATED target next to the real row 317, which already holds the Road
+    # to UFC weigh-in. Neither name has a matchup, so no surname owns the
+    # video: only the "already held by another card" guard keeps 318 from
+    # taking it (in production the UPDATE's NOT EXISTS would refuse it too,
+    # but the dry run would still count it as matched).
+    otra = (318, "UFC Fight Night", "Shanghai, Hebei, China", date(2025, 8, 23))
+    conn = fakedb.Connection(
+        _responder([otra], [(*_ROW_317, "RTU000000WI"), (*otra, None)], [(1,)])
+    )
+    counts = mf.run_weighins(conn, apply=True, videos=[_WI_317], durations={})
+    assert _written(conn) == []
+    assert counts["weighin_matched"] == 0
+    assert counts["weighin_no_match"] == 1
 
 
 def test_run_weighins_un_video_para_dos_veladas_sin_apellidos_no_escribe(fakedb, caplog):
