@@ -31,7 +31,12 @@ SWEEPS = [
     # the first sweep that commits every iteration: each no-op UPDATE (48.8% of
     # the fighters in the 1-sep run, 47.8% in the 1-oct one) now also pays
     # BEGIN + COMMIT, two round trips to Neon of ~0.15 s each.
-    ("enrich-athlete-stats.yml", 2884, 0.668 + 2 * 0.15 * 0.49),
+    # Plus a second ESTIMATE since migration 032 (social links): every page
+    # that passes the identity guard (2,599 of 2,800 = ~0.90 on 1-oct) now also
+    # runs the social-links UPDATE. With a stats block (~0.47 of the scope) that
+    # is one more round trip inside the transaction already open; without one
+    # (~0.43) it is BEGIN + UPDATE + COMMIT, three. 0.15 s each.
+    ("enrich-athlete-stats.yml", 2884, 0.668 + 2 * 0.15 * 0.49 + 0.15 * (0.47 + 3 * 0.43)),
     # 1,903 fighters with a gap. 2.048 s/fighter: run 33484806063 (1-sep-2026),
     # the slowest monthly sweep measured (fetch + delay + one Claude call).
     ("enrich-facts.yml", 1903, 2.048),

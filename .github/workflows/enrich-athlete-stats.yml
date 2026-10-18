@@ -15,6 +15,11 @@ name: Enrich athlete finish stats (ufc.com)
 # of the fighters) now that each fighter commits. Hence timeout-minutes 90: 30
 # cancelled the 1-sep (run 33488770710) and 1-oct (run 36848270600) sweeps.
 # tests/test_enrich_sweep_workflows.py keeps these figures honest.
+# Since migration 032 the same page also yields the fighter's Instagram and X
+# (JSON-LD Person.sameAs, never the footer's @ufc): zero extra requests, one
+# more UPDATE per verified page (IS DISTINCT FROM, so a no-op when unchanged).
+# First fill of those links = manual dispatch with all=true (dry_run=true first
+# to see the counts: with_socials / with_instagram / with_x).
 # Daily 08:15 UTC: after refresh-records (08:00) and event-night live-results
 # seals, clear of the ufc.com photo/facts crawlers (05:00-06:30).
 on:
@@ -56,6 +61,32 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-scrapers.txt
       - run: pip install -r requirements-scrapers.txt
+      # La MISMA pagina trae el Instagram y el X del luchador (JSON-LD
+      # Person.sameAs, migracion 032). La 032 es aditiva e idempotente, pero se
+      # aplica SOLO si aun faltan sus dos columnas o sus dos CHECK: asi el cron
+      # diario no toma un candado de tabla sobre fighters cada manana por nada.
+      # Si el psql falla (lock_timeout de 10 s), el job sale en rojo y avisa
+      # notify-on-failure. Si no se aplicara, el script seguiria igual: refresca
+      # las estadisticas y solo cuenta las redes (socials_columns_missing=1).
+      - name: Apply migration 032 if missing (additive, idempotent)
+        if: ${{ !inputs.dry_run }}
+        run: |
+          HAVE=$(psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -tAc "
+            SELECT (SELECT count(*) FROM information_schema.columns
+                     WHERE table_schema = current_schema() AND table_name = 'fighters'
+                       AND column_name IN ('instagram_url', 'x_url'))
+                 + (SELECT count(*) FROM pg_constraint
+                     WHERE conrelid = 'fighters'::regclass
+                       AND conname IN ('fighters_instagram_url_format', 'fighters_x_url_format'))")
+          if [ "$HAVE" = "4" ]; then
+            echo "Migration 032 already applied (columns + CHECKs present)."
+          else
+            echo "Applying migration 032 (found $HAVE of 4 objects)."
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction \
+              -f db/migrations/032_fighter_social_links.sql
+          fi
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
       - name: Run athlete finish-stats enrichment
         run: |
           ARGS=""

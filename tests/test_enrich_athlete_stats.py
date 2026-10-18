@@ -7,6 +7,8 @@ and .hero-profile__stat-text (label). No network, no DB: the resolver is
 injected and writes go through the shared fakedb recorder.
 """
 
+from types import SimpleNamespace
+
 import pytest
 from bs4 import BeautifulSoup
 
@@ -18,7 +20,12 @@ from src.scrapers.enrich_athlete_stats import (
     parse_finish_stats,
 )
 from src.scrapers.enrich_fullbody import _unique_nickname_sql
-from src.scrapers.repositories.fighters import update_fighter_finish_stats
+from src.scrapers.repositories.fighters import (
+    fighter_social_columns_present,
+    update_fighter_finish_stats,
+    update_fighter_social_links,
+)
+from src.scrapers.ufc_social import SocialLinks
 
 # ------------------------------------------------------------------- fixtures
 
@@ -402,3 +409,232 @@ def test_update_finish_stats_zero_triple_is_written(fakedb):
         conn, 7, wins_by_ko=0, wins_by_submission=0, first_round_finishes=0
     )
     assert len(fakedb.mutating_statements(conn)) == 1
+
+
+# ------------------------------------------------- social links (migration 032)
+
+_VOLK = (7029, "Alexander Volkanovski", None, False)
+_VOLK_LINKS = SocialLinks(
+    instagram_url="https://www.instagram.com/alexvolkanovski/",
+    x_url="https://x.com/alexvolkanovski",
+)
+
+
+def _social_responder(*, columns=True, update_result=None, target=_VOLK):
+    """Like _responder, plus the information_schema check of migration 032."""
+
+    def responder(sql, params=None):
+        upper = sql.upper()
+        if "INFORMATION_SCHEMA" in upper:
+            return [(2,)] if columns else [(0,)]
+        if upper.strip().startswith("SELECT"):
+            return [target]
+        if "UPDATE" in upper:
+            return update_result or []
+        return []
+
+    return responder
+
+
+def _social_params(conn):
+    """Params of every social-links UPDATE the run issued."""
+    return [
+        params
+        for cur in conn.cursors
+        for sql, params in cur.executed
+        if "instagram_url = %s" in sql
+    ]
+
+
+def _run(conn, page, **kwargs):
+    return enrich_athlete_stats.backfill(
+        conn, resolver=lambda session, name: page, sleeper=lambda seconds: None, **kwargs
+    )
+
+
+def test_backfill_writes_social_links_with_the_stats(fakedb):
+    conn = fakedb.Connection(_social_responder(update_result=[(1,)]))
+    page = StatsPage(
+        stats=FinishStats(13, 3, 6), page_name="Alexander Volkanovski", socials=_VOLK_LINKS
+    )
+    counts = _run(conn, page)
+    assert counts["updated"] == 1
+    assert counts["with_socials"] == 1
+    assert counts["with_instagram"] == 1 and counts["with_x"] == 1
+    assert counts["socials_updated"] == 1
+    assert counts["socials_columns_missing"] == 0
+    assert _social_params(conn) == [(
+        "https://www.instagram.com/alexvolkanovski/", "https://x.com/alexvolkanovski", 7029,
+        "https://www.instagram.com/alexvolkanovski/", "https://x.com/alexvolkanovski",
+    )]
+    assert conn.commits == 1  # both UPDATEs closed by the per-fighter commit
+
+
+def test_backfill_block_without_a_network_writes_null(fakedb):
+    # Owner's rule: ufc.com stopped listing the Instagram (block present) ->
+    # the stored link is DELETED, not kept.
+    conn = fakedb.Connection(_social_responder(update_result=[(1,)]))
+    page = StatsPage(
+        stats=None,
+        page_name="Alexander Volkanovski",
+        socials=SocialLinks(instagram_url=None, x_url="https://x.com/alexvolkanovski"),
+    )
+    counts = _run(conn, page)
+    assert counts["socials_block"] == 1
+    assert counts["with_socials"] == 1 and counts["with_instagram"] == 0
+    (params,) = _social_params(conn)
+    assert params[0] is None and params[1] == "https://x.com/alexvolkanovski"
+
+
+def test_backfill_empty_block_clears_both(fakedb):
+    conn = fakedb.Connection(_social_responder(update_result=[(1,)]))
+    page = StatsPage(
+        stats=None, page_name="Alexander Volkanovski", socials=SocialLinks(None, None)
+    )
+    counts = _run(conn, page)
+    assert counts["with_socials"] == 0
+    assert counts["socials_updated"] == 1
+    assert _social_params(conn) == [(None, None, 7029, None, None)]
+
+
+def test_backfill_without_jsonld_block_touches_nothing(fakedb):
+    # No Person block = "we do not know": never NULL the stored links.
+    conn = fakedb.Connection(_social_responder(update_result=[(1,)]))
+    page = StatsPage(
+        stats=FinishStats(13, 3, 6), page_name="Alexander Volkanovski", socials=None
+    )
+    counts = _run(conn, page)
+    assert counts["no_socials_block"] == 1
+    assert counts["socials_block"] == 0
+    assert _social_params(conn) == []
+    assert counts["updated"] == 1  # the stats still go through
+
+
+def test_backfill_writes_socials_for_pages_without_stats_block(fakedb):
+    # Retired fighters (Gerald Harris, Julie Kedzie) have no stats block but do
+    # list an X account.
+    conn = fakedb.Connection(_social_responder(update_result=[(1,)]))
+    page = StatsPage(stats=None, page_name="Alexander Volkanovski", socials=_VOLK_LINKS)
+    counts = _run(conn, page)
+    assert counts["no_stats"] == 1
+    assert counts["socials_updated"] == 1
+    assert len(fakedb.mutating_statements(conn)) == 1
+
+
+def test_backfill_name_mismatch_never_writes_socials(fakedb):
+    conn = fakedb.Connection(_social_responder(update_result=[(1,)]))
+    page = StatsPage(
+        stats=FinishStats(1, 1, 1), page_name="Somebody Else Entirely", socials=_VOLK_LINKS
+    )
+    counts = _run(conn, page)
+    assert counts["name_mismatch"] == 1
+    assert counts["with_socials"] == 0
+    assert fakedb.mutating_statements(conn) == []
+
+
+def test_backfill_dry_run_counts_socials_writes_nothing(fakedb):
+    conn = fakedb.Connection(_social_responder(update_result=[(1,)]))
+    page = StatsPage(
+        stats=FinishStats(13, 3, 6), page_name="Alexander Volkanovski", socials=_VOLK_LINKS
+    )
+    counts = _run(conn, page, dry_run=True)
+    assert counts["with_socials"] == 1
+    assert counts["socials_updated"] == 0
+    assert fakedb.mutating_statements(conn) == []
+    assert conn.commits == 0
+
+
+def test_backfill_before_migration_032_keeps_refreshing_stats(fakedb, caplog):
+    # Code deployed before the migration: stats are written as always, socials
+    # are only counted, and the run says so (summary + one WARNING).
+    conn = fakedb.Connection(_social_responder(columns=False, update_result=[(1,)]))
+    page = StatsPage(
+        stats=FinishStats(13, 3, 6), page_name="Alexander Volkanovski", socials=_VOLK_LINKS
+    )
+    with caplog.at_level("WARNING", logger="src.scrapers.enrich_athlete_stats"):
+        counts = _run(conn, page)
+    assert counts["socials_columns_missing"] == 1
+    assert counts["updated"] == 1
+    assert counts["with_socials"] == 1 and counts["socials_updated"] == 0
+    assert _social_params(conn) == []
+    assert any("migration 032" in r.getMessage() for r in caplog.records)
+
+
+def test_backfill_column_check_rides_the_released_read_transaction(fakedb):
+    # The information_schema check must happen inside the target SELECT's
+    # transaction, which is released BEFORE ufc.com is fetched (Neon kills a
+    # session idle in transaction for 5 min).
+    targets = _neon_targets(2)
+    conn = fakedb.NeonLikeConnection(
+        _social_responder(target=targets[0]), fakedb.NeonClock()
+    )
+    open_while_fetching = []
+
+    def resolver(session, name):
+        if conn.in_txn:
+            open_while_fetching.append(name)
+        return StatsPage(stats=None, page_name=name, socials=_VOLK_LINKS)
+
+    enrich_athlete_stats.backfill(
+        conn, all_scope=True, resolver=resolver, sleeper=lambda seconds: None
+    )
+    assert open_while_fetching == []
+    assert not conn.in_txn
+
+
+class _FakeResponse:
+    def __init__(self, text, url, ok=True):
+        self.text, self.url, self.ok = text, url, ok
+
+
+def _session_returning(response):
+    return SimpleNamespace(get=lambda url, headers=None, timeout=None: response)
+
+
+def test_resolve_stats_parses_socials_from_the_same_page():
+    html = (
+        '<html><head><script type="application/ld+json">{"@graph": [{"@type": "WebPage",'
+        '"mainEntity": {"@type": "Person", "url": "https://www.ufc.com/athlete/gerald-harris",'
+        '"sameAs": ["https://twitter.com/ghurricane"]}}]}</script></head><body>'
+        '<h1 class="hero-profile__name">Gerald Harris</h1>'
+        '<a href="https://www.instagram.com/ufc/" class="c-menu-footer__link--level-2">'
+        "Instagram</a></body></html>"
+    )
+    response = _FakeResponse(html, "https://www.ufc.com/athlete/gerald-harris")
+    page = enrich_athlete_stats.resolve_stats(_session_returning(response), "Gerald Harris")
+    assert page == StatsPage(
+        stats=None,
+        page_name="Gerald Harris",
+        socials=SocialLinks(instagram_url=None, x_url="https://x.com/ghurricane"),
+    )
+
+
+def test_resolve_stats_treats_search_redirect_as_unresolved():
+    # An unknown slug answers 200 after redirecting to /search.
+    response = _FakeResponse(
+        "<html><body><h1>Search</h1></body></html>",
+        "https://www.ufc.com/search?query=hector-santiago",
+    )
+    page = enrich_athlete_stats.resolve_stats(_session_returning(response), "Hector Santiago")
+    assert page is None
+
+
+def test_update_social_links_sql_is_authoritative_with_churn_guard(fakedb):
+    conn = fakedb.Connection(lambda sql, params=None: [])
+    update_fighter_social_links(conn, 7, instagram_url=None, x_url="https://x.com/a")
+    (sql,) = fakedb.mutating_statements(conn)
+    assert "SET instagram_url = %s, x_url = %s, updated_at = NOW()" in sql
+    assert "instagram_url IS DISTINCT FROM %s OR x_url IS DISTINCT FROM %s" in sql
+    # Authoritative: NO COALESCE that would keep a link ufc.com dropped.
+    assert "COALESCE" not in sql
+    params = conn.cursors[0].executed[0][1]
+    assert params == (None, "https://x.com/a", 7, None, "https://x.com/a")
+
+
+@pytest.mark.parametrize("found,expected", [(2, True), (1, False), (0, False)])
+def test_social_columns_present_reads_information_schema(fakedb, found, expected):
+    conn = fakedb.Connection(lambda sql, params=None: [(found,)])
+    assert fighter_social_columns_present(conn) is expected
+    sql, params = conn.cursors[0].executed[0]
+    assert "information_schema.columns" in sql
+    assert params == (("instagram_url", "x_url"),)

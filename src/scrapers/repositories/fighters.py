@@ -512,3 +512,58 @@ def update_fighter_finish_stats(
             ),
         )
         return cursor.rowcount > 0
+
+# Columns added by migration 032. Checked once per run so the daily cron keeps
+# working (stats only) if the code ships before the migration is applied.
+SOCIAL_LINK_COLUMNS = ("instagram_url", "x_url")
+
+
+def fighter_social_columns_present(connection: PgConnection) -> bool:
+    """True when fighters has BOTH instagram_url and x_url (migration 032)."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT count(*) FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'fighters'
+              AND column_name IN %s
+            """,
+            (SOCIAL_LINK_COLUMNS,),
+        )
+        row = cursor.fetchone()
+    return bool(row) and row[0] == len(SOCIAL_LINK_COLUMNS)
+
+
+def update_fighter_social_links(
+    connection: PgConnection,
+    fighter_id: int,
+    *,
+    instagram_url: str | None,
+    x_url: str | None,
+) -> bool:
+    """Store the Instagram / X profiles ufc.com lists for a fighter (migration 032).
+
+    AUTHORITATIVE, NULLS INCLUDED: the caller only gets here when the athlete
+    page carried its JSON-LD Person block, so ufc.com's list is the truth and a
+    None means "ufc.com no longer lists it" -> the stored link is DELETED
+    (owner's decision, 18-oct-2026). A page without that block never reaches
+    this function (nothing is touched). Values arrive already normalized by
+    ufc_social (the shape migration 032's CHECKs accept). An unchanged pair
+    skips the row churn (IS DISTINCT FROM). Returns True if a row was updated.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE fighters
+            SET instagram_url = %s,
+                x_url = %s,
+                updated_at = NOW()
+            WHERE id = %s
+              AND (
+                instagram_url IS DISTINCT FROM %s
+                OR x_url IS DISTINCT FROM %s
+              )
+            """,
+            (instagram_url, x_url, fighter_id, instagram_url, x_url),
+        )
+        return cursor.rowcount > 0

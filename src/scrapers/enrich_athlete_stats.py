@@ -28,6 +28,15 @@ WRITE POLICY — new-value-wins via update_fighter_finish_stats: ufc.com is
 authoritative and career totals only grow, so the freshest scrape replaces
 whatever is stored (a NULL triple never wipes; an identical triple is a no-op).
 
+SOCIAL LINKS (migration 032, R6) — the SAME page also carries the fighter's
+Instagram and X in its JSON-LD Person.sameAs (src/scrapers/ufc_social.py: never
+the page anchors, whose footer links @ufc). Parsed from the soup already in
+hand, so zero extra requests. Written behind the same anti-homonym guard and
+also for pages WITHOUT the stats block (retired fighters have socials too).
+Rule (owner, 18-oct-2026): Person block present -> store what it lists and
+NULL what it no longer lists; no block -> touch nothing. If migration 032 is
+not applied yet the run still refreshes stats and only counts socials.
+
 Usage:
     python -m src.scrapers.enrich_athlete_stats --probe "Cory Sandhagen"   # no DB
     python -m src.scrapers.enrich_athlete_stats --dry-run                  # upcoming cards, report only
@@ -47,6 +56,7 @@ import unicodedata
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -56,7 +66,12 @@ from .db import connect
 from .enrich_fullbody import _accepted_by_nickname, _hero_name_matches, _unique_nickname_sql
 from .enrich_photos_ufc import ATHLETE_URL, REQUEST_DELAY_SECONDS, _HEADERS, _HERO_NAME_RE, slugify
 from .logging_config import configure_logging
-from .repositories.fighters import update_fighter_finish_stats
+from .repositories.fighters import (
+    fighter_social_columns_present,
+    update_fighter_finish_stats,
+    update_fighter_social_links,
+)
+from .ufc_social import SocialLinks, extract_social_links
 
 LOGGER = logging.getLogger(__name__)
 
@@ -81,11 +96,13 @@ class FinishStats:
 
 @dataclass(frozen=True)
 class StatsPage:
-    """Parsed athlete page: career finish stats (None if the block is absent)
-    plus the hero name for the anti-homonym guard."""
+    """Parsed athlete page: career finish stats (None if the block is absent),
+    the hero name for the anti-homonym guard, and the social links (None if the
+    JSON-LD Person block is absent: then they must not be touched)."""
 
     stats: FinishStats | None
     page_name: str | None
+    socials: SocialLinks | None = None
 
 
 # resolver(session, name) -> StatsPage | None. Injected in tests (no network).
@@ -151,11 +168,20 @@ def resolve_stats(session: requests.Session, name: str) -> StatsPage | None:
         return None
     if not response.ok:
         return None
+    # An unknown slug does not 404: ufc.com redirects to /search with a 200 (see
+    # enrich_photos_ufc.resolve_athlete). That page has no hero name, so the
+    # guard would trust it for an ufc_confirmed fighter: count it as unresolved.
+    if "/search" in urlsplit(getattr(response, "url", "") or "").path:
+        return None
     html = response.text
     soup = BeautifulSoup(html, "lxml")
     match = _HERO_NAME_RE.search(html)
     page_name = _clean_text(match.group(1)) if match else None
-    return StatsPage(stats=parse_finish_stats(soup), page_name=page_name)
+    return StatsPage(
+        stats=parse_finish_stats(soup),
+        page_name=page_name,
+        socials=extract_social_links(soup),
+    )
 
 
 def _identity_verified(
@@ -249,6 +275,14 @@ def backfill(
     session = requests.Session()
     counts: Counter = Counter()
     targets = _get_target_fighters(connection, limit=limit, offset=offset, all_scope=all_scope)
+    # Asked once, inside the same read transaction as the target SELECT.
+    socials_writable = fighter_social_columns_present(connection)
+    if not socials_writable:
+        counts["socials_columns_missing"] = 1
+        LOGGER.warning(
+            "fighters has no instagram_url/x_url yet (migration 032 not applied): "
+            "social links are parsed and counted but NOT written"
+        )
     # Release the read transaction of that SELECT right away. Neon kills a
     # session left idle INSIDE a transaction for 5 min
     # (idle_in_transaction_session_timeout=5min) and the sweep then spends half
@@ -303,6 +337,10 @@ def backfill(
                     )
                     if updated:
                         counts["updated"] += 1
+            _handle_socials(
+                connection, counts, fighter_id, name, page.socials,
+                dry_run=dry_run, writable=socials_writable,
+            )
 
         if not dry_run:
             # Close the transaction on EVERY iteration, also when the UPDATE hit
@@ -317,11 +355,49 @@ def backfill(
         if idx % PROGRESS_EVERY == 0:
             LOGGER.info(
                 "Progress %d/%d — with_stats=%d updated=%d no_stats=%d "
-                "unresolved=%d name_mismatch=%d",
+                "unresolved=%d name_mismatch=%d with_socials=%d socials_updated=%d",
                 idx, total, counts["with_stats"], counts["updated"],
                 counts["no_stats"], counts["unresolved"], counts["name_mismatch"],
+                counts["with_socials"], counts["socials_updated"],
             )
     return counts
+
+
+def _handle_socials(
+    connection,
+    counts: Counter,
+    fighter_id: int,
+    name: str,
+    socials: SocialLinks | None,
+    *,
+    dry_run: bool,
+    writable: bool,
+) -> None:
+    """Count and (unless dry-run / migration missing) store one verified page's
+    social links. Called ONLY after the anti-homonym guard passed."""
+    if socials is None:
+        # No JSON-LD Person block: "we do not know", never "no socials".
+        counts["no_socials_block"] += 1
+        return
+    counts["socials_block"] += 1
+    if socials.instagram_url:
+        counts["with_instagram"] += 1
+    if socials.x_url:
+        counts["with_x"] += 1
+    if socials.any:
+        counts["with_socials"] += 1
+    if dry_run:
+        LOGGER.info(
+            "[dry-run] id=%d %r: instagram=%s x=%s",
+            fighter_id, name, socials.instagram_url, socials.x_url,
+        )
+        return
+    if not writable:
+        return
+    if update_fighter_social_links(
+        connection, fighter_id, instagram_url=socials.instagram_url, x_url=socials.x_url
+    ):
+        counts["socials_updated"] += 1
 
 
 def probe(names: list[str]) -> None:
@@ -338,13 +414,17 @@ def probe(names: list[str]) -> None:
             "resolved": True,
             "page_name": page.page_name,
             "stats": page.stats.__dict__ if page.stats else None,
+            "socials": page.socials.__dict__ if page.socials else None,
         }
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Scrape ufc.com career finish stats (KO/Sub/1st-round) and store them."
+        description=(
+            "Scrape ufc.com career finish stats (KO/Sub/1st-round) and the "
+            "fighter's Instagram/X links, and store them."
+        )
     )
     parser.add_argument("--dry-run", action="store_true", help="Resolve + report, no writes.")
     parser.add_argument("--all", action="store_true", dest="all_scope", help="Whole-table scope (default: upcoming cards only).")
@@ -371,6 +451,10 @@ def main() -> None:
     keys = [
         "targets", "with_stats", "updated", "would_update", "no_stats", "unresolved",
         "name_mismatch", "nickname_match",
+        # Social links (migration 032). with_socials falling to ~0 on a run that
+        # still resolves pages = ufc.com changed or dropped its JSON-LD block.
+        "socials_block", "no_socials_block", "with_socials", "with_instagram", "with_x",
+        "socials_updated", "socials_columns_missing",
     ]
     print(json.dumps({key: counts.get(key, 0) for key in keys}, indent=2))
     if args.dry_run:
