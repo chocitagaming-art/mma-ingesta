@@ -218,7 +218,7 @@ def ejecutar(monkeypatch, fakedb):
             base.revalidaciones.append(secret)
             return http_revalidate
 
-        monkeypatch.setattr(fijar, "_dsn", lambda: "postgresql://falsa/no-existe")
+        monkeypatch.setattr(fijar, "_dsn", lambda escribir=False: "postgresql://falsa/no-existe")
         monkeypatch.setattr(fijar, "_connect", conectar)
         monkeypatch.setattr(fijar, "fetch_text", youtube)
         monkeypatch.setattr(fijar, "revalidate_secret", lambda: secreto)
@@ -231,6 +231,41 @@ def ejecutar(monkeypatch, fakedb):
         return codigo, base, youtube, escrituras
 
     return correr
+
+
+# --- 0. Qué URL de la base usa ---------------------------------------------
+# Desde el 18-oct el DATABASE_URL del portátil es de solo lectura (mma_local_ro)
+# y el del dueño vive en DATABASE_URL_OWNER: con --aplicar hay que usar ese, o el
+# interruptor del directo fallaría en plena velada.
+def test_dsn_para_escribir_usa_el_del_dueno_y_para_leer_el_de_solo_lectura(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text(
+        "DATABASE_URL=postgresql://ro@h/db\nDATABASE_URL_OWNER=postgresql://owner@h/db\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(fijar, "RAIZ", str(tmp_path))
+    assert fijar._dsn() == "postgresql://ro@h/db"
+    assert fijar._dsn(escribir=True) == "postgresql://owner@h/db"
+
+
+def test_dsn_sin_la_clave_del_dueno_escribe_con_database_url_como_antes(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text("DATABASE_URL=postgresql://unica@h/db\n", encoding="utf-8")
+    monkeypatch.setattr(fijar, "RAIZ", str(tmp_path))
+    assert fijar._dsn(escribir=True) == "postgresql://unica@h/db"
+
+
+def test_aplicar_pide_la_url_para_escribir_y_la_simulacion_la_de_leer(monkeypatch):
+    pedidas: list = []
+    monkeypatch.setattr(fijar, "_dsn", lambda escribir=False: pedidas.append(escribir) or "x")
+
+    def no_conectes(_dsn):
+        raise SystemExit("parada aquí: solo se mira qué URL se pidió")
+
+    monkeypatch.setattr(fijar, "_connect", no_conectes)
+    monkeypatch.setattr(fijar, "fetch_text", lambda *_a, **_k: None)
+    for argv in (["--evento", "1090", "--ocultar-directo"], ["--evento", "1090", "--ocultar-directo", "--aplicar"]):
+        with pytest.raises(SystemExit):
+            fijar.main(argv)
+    assert pedidas == [False, True]
 
 
 # --- 1. Forma del id ------------------------------------------------------

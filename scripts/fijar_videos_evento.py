@@ -618,11 +618,23 @@ def read_event(cursor, event_id: int) -> dict | None:
     return dict(zip(EVENT_COLUMNS, row))
 
 
-def _dsn() -> str:
+def _dsn(escribir: bool = False) -> str:
+    """The database URL from .env. To write, DATABASE_URL_OWNER if there is one.
+
+    Since 18-oct-2026 the laptop's DATABASE_URL is a read-only role
+    (mma_local_ro): any script or pytest that reuses .env can no longer write
+    to production. The owner's URL lives in DATABASE_URL_OWNER, only for writes
+    done on purpose, like this script with --aplicar. Without that key (an old
+    .env) it falls back to DATABASE_URL, as before.
+    """
     ruta = os.path.join(RAIZ, ".env")
-    for linea in open(ruta, encoding="utf-8"):
-        if linea.startswith("DATABASE_URL="):
-            return linea.split("=", 1)[1].strip().strip('"')
+    with open(ruta, encoding="utf-8") as fh:
+        lineas = fh.read().splitlines()
+    claves = ("DATABASE_URL_OWNER=", "DATABASE_URL=") if escribir else ("DATABASE_URL=",)
+    for clave in claves:
+        for linea in lineas:
+            if linea.startswith(clave):
+                return linea.split("=", 1)[1].strip().strip('"')
     raise SystemExit("No hay DATABASE_URL en .env")
 
 
@@ -732,7 +744,7 @@ def main(argv=None) -> int:
         requested["directo"] = interruptor
         print("  %-7s %s" % ("directo", interruptor.summary))
 
-    conn = _connect(_dsn())
+    conn = _connect(_dsn(escribir=args.aplicar))
     cur = conn.cursor()
 
     # Todas las columnas que lee read_event, y no solo las del acto pedido:
