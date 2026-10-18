@@ -18,6 +18,19 @@ name: Match face-off videos
 # caduca, esa guarda se ABRE a proposito (fail-open, ver _duration_ok) y el job
 # sigue en VERDE: solo deja un WARNING en el log. O sea que un secreto caducado
 # aqui no se ve en el semaforo de Actions — hay que leer el log.
+#
+# DESDE EL 18-oct-2026 (t9-0-8) TAMBIEN ESCRIBE EL PESAJE: events.weighin_video_id
+# (+ weighin_video_title) de las veladas upcoming de ayer a pasado manana, con el
+# video oficial "<A> vs <B> Weigh-Ins | <cartelera>" del canal de la UFC. Usa los
+# mismos videos y el mismo lote de duraciones que el careo (0 unidades de cuota
+# mas) y solo rellena la columna si esta a NULL: lo puesto a mano con
+# fijar_videos_evento --pesaje nunca se pisa. El ceremonial, el Morning Show y los
+# shorts quedan fuera (la web lo rotula "Pesaje oficial").
+# Y si el RSS de YouTube da 404/500 (~1 de cada 3 pasadas) sigue con la API; solo
+# aborta si fallan los dos.
+#
+# ⚠️ NO cambiar `name: Match face-off videos`: notify-on-failure.yml lo busca por
+# ese nombre exacto.
 # See match_faceoffs.py. Needs DATABASE_URL (+ optional YOUTUBE_API_KEY).
 on:
   schedule:
@@ -45,6 +58,14 @@ on:
     # first-writer-wins: una pasada de mas no puede pisar un careo ya escrito.
     - cron: "0 2 * * *"
     - cron: "0 11 * * *"
+    # QUINTA PASADA, SOLO LOS VIERNES (18-oct-2026), para el PESAJE. El video
+    # oficial sale el viernes (medido: 19 de 19 el dia anterior a la velada; los
+    # de EEUU entre las 15:49 y las 20:24 UTC) y se cae del RSS en 7-33 h. GitHub
+    # retrasa los crons hasta 6 h: el 9-oct el video salio a las 18:09Z y la
+    # primera pasada programada posterior arranco a las 23:55Z. Esta da una
+    # oportunidad mas justo despues. El lanzamiento manual del viernes de
+    # OPERACIONES sigue siendo la red.
+    - cron: "30 18 * * 5"
   workflow_dispatch:
 
 concurrency:

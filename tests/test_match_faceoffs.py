@@ -10,6 +10,8 @@ from collections import Counter
 from datetime import date
 from types import SimpleNamespace
 
+import pytest
+
 from src.scrapers import match_faceoffs
 from src.scrapers.match_faceoffs import (
     FeedVideo,
@@ -1353,3 +1355,106 @@ def test_el_margen_de_dos_dias_sigue_abierto():
     evento = _evento_1090()
     feed = [FeedVideo("v", "UFC 331: Fighter Face-offs", date(2026, 9, 17))]
     assert match_event(evento, feed, {"v": 300}) == "v"
+
+
+# ------------------------------------------- main(): el RSS caido (15-oct-26)
+# refresh-faceoffs fallo 16 de sus ultimas 40 pasadas (9-18 oct, Issues #133,
+# #136, #137) y 18 de 60 antes: el RSS de YouTube devolvia 404/500 y main()
+# abortaba con «Empty channel feed» ANTES de mirar la API, aunque la clave
+# estaba puesta. Ahora solo aborta si fallan los dos.
+
+_WEIGHIN_STUB = FeedVideo(
+    "EWTYRIk_pcw", "Buckley vs Malott Weigh-Ins | UFC Edmonton", date(2026, 10, 16)
+)
+
+
+def _main_sin_red(monkeypatch, fakedb, *, rss, api, key, visto):
+    if key:
+        monkeypatch.setenv("YOUTUBE_API_KEY", "quota-key")
+    else:
+        monkeypatch.delenv("YOUTUBE_API_KEY", raising=False)
+    monkeypatch.setattr(match_faceoffs, "fetch_channel_feed", lambda *a, **k: list(rss))
+
+    def fake_uploads(*a, **k):
+        if isinstance(api, Exception):
+            raise api
+        return list(api)
+
+    monkeypatch.setattr(match_faceoffs, "fetch_channel_uploads", fake_uploads)
+
+    def fake_durations(api_key, ids, **kw):
+        visto.setdefault("durations_calls", []).append(list(ids))
+        return {}
+
+    monkeypatch.setattr(match_faceoffs, "fetch_video_durations", fake_durations)
+    monkeypatch.setattr(
+        match_faceoffs, "get_settings", lambda: SimpleNamespace(database_url="x")
+    )
+    monkeypatch.setattr(match_faceoffs, "connect", lambda url: _empty_conn(fakedb))
+
+    def fake_run(conn, **kwargs):
+        visto["run"] = kwargs
+        visto.setdefault("orden", []).append("careo")
+        return Counter()
+
+    monkeypatch.setattr(match_faceoffs, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["prog"])
+
+
+def test_main_rss_caido_con_clave_no_aborta_y_usa_la_api(monkeypatch, fakedb, caplog):
+    visto = {}
+    api = [FeedVideo("resc", "UFC Edmonton: Fighter Face-offs", date(2026, 10, 16))]
+    _main_sin_red(monkeypatch, fakedb, rss=[], api=api, key=True, visto=visto)
+    with caplog.at_level("WARNING"):
+        match_faceoffs.main()  # must NOT raise SystemExit
+    assert visto["run"]["feed"] == api, "el pase 1 usa el feed de la API"
+    assert any("RSS caído" in r.getMessage() for r in caplog.records)
+
+
+def test_main_rss_caido_sin_clave_sigue_abortando(monkeypatch, fakedb):
+    visto = {}
+    _main_sin_red(monkeypatch, fakedb, rss=[], api=[], key=False, visto=visto)
+    with pytest.raises(SystemExit):
+        match_faceoffs.main()
+    assert "run" not in visto
+
+
+def test_main_rss_y_api_caidos_a_la_vez_aborta(monkeypatch, fakedb):
+    for api in ([], RuntimeError("quotaExceeded")):
+        visto = {}
+        _main_sin_red(monkeypatch, fakedb, rss=[], api=api, key=True, visto=visto)
+        with pytest.raises(SystemExit):
+            match_faceoffs.main()
+        assert "run" not in visto
+
+
+def test_main_pide_las_duraciones_del_pesaje_en_el_mismo_lote(monkeypatch, fakedb, capsys):
+    visto = {}
+    _main_sin_red(
+        monkeypatch, fakedb, rss=_RSS_STUB + [_WEIGHIN_STUB], api=[], key=True, visto=visto
+    )
+    match_faceoffs.main()
+    llamadas = visto["durations_calls"]
+    assert len(llamadas) == 1, "una sola llamada a videos.list: cuota 0 extra"
+    assert set(llamadas[0]) == {"x", "EWTYRIk_pcw"}
+    salida = capsys.readouterr().out
+    for clave in ("weighin_targets", "weighin_matched", "weighin_no_match", "weighin_written"):
+        assert f'"{clave}"' in salida
+
+
+def test_main_corre_el_pesaje_despues_del_careo_con_los_dos_feeds(monkeypatch, fakedb):
+    visto = {}
+    api = [_WEIGHIN_STUB, FeedVideo("solo_api", "UFC 333: Fighter Face-offs", date(2026, 10, 23))]
+    _main_sin_red(monkeypatch, fakedb, rss=[_WEIGHIN_STUB], api=api, key=True, visto=visto)
+
+    def fake_weighins(conn, **kwargs):
+        visto["weighins"] = kwargs
+        visto.setdefault("orden", []).append("pesaje")
+        return Counter(weighin_targets=1)
+
+    monkeypatch.setattr(match_faceoffs, "run_weighins", fake_weighins, raising=False)
+    match_faceoffs.main()
+    assert visto["orden"] == ["careo", "pesaje"]
+    assert [v.video_id for v in visto["weighins"]["videos"]] == ["EWTYRIk_pcw", "solo_api"]
+    assert visto["weighins"]["apply"] is False
+    assert visto["weighins"]["durations"] == {}

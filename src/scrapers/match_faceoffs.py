@@ -30,6 +30,19 @@ video is accepted only when ALL hold on the accent-stripped, casefolded title:
 Better to miss than to mis-attribute: an unmatched event stays NULL and retries
 on the next daily run. Writes are first-writer-wins (set_event_faceoff_video).
 
+WEIGH-IN PASS (t9-0-8, 18-oct-2026): after the careo, the same videos (RSS +
+API, merged) and the same duration batch feed a second pass that fills
+events.weighin_video_id for upcoming cards. The UFC channel uploads exactly one
+"<A> vs <B> Weigh-Ins | <card>" per card, the day before it; the rule is strict
+(see match_weighin) because the page labels it "Pesaje oficial", so the
+ceremonial, the morning show and the shorts must never get in. It only fills a
+NULL column of an upcoming card (set_event_weighin_video): a value set by hand
+always wins. Zero extra quota.
+
+RSS DOWN (18-oct-2026): the RSS answers 404/500 in roughly a third of the runs.
+With a YOUTUBE_API_KEY the run now continues on the API feed and only aborts
+when BOTH sources come back empty.
+
 Usage:
     python -m src.scrapers.match_faceoffs --dump-feed   # print the channel feed, no DB
     python -m src.scrapers.match_faceoffs               # dry-run: report matches, no writes
@@ -55,7 +68,7 @@ from .config import get_settings
 from .db import connect
 from .logging_config import configure_logging
 from .matching import strip_accents
-from .repositories.events import set_event_faceoff_video
+from .repositories.events import set_event_faceoff_video, set_event_weighin_video
 
 LOGGER = logging.getLogger(__name__)
 
@@ -755,6 +768,210 @@ def run(
     return counts
 
 
+# --- Weigh-in (pesaje) pass (t9-0-8) ----------------------------------------
+#
+# MEDIDO el 15-oct-2026 sobre 2.000 subidas reales del canal oficial (17-may a
+# 15-oct) y los 23 eventos de la base en ese tramo, y repetido el 18-oct con el
+# pesaje real del 1089 (tests/fixtures/weighin_uploads_real.json):
+#   - la UFC sube UNO por velada con la forma "<A> vs <B> Weigh-Ins | <cartelera>"
+#     ("Allen vs Duncan Weigh-Ins | UFC Vegas 122"), entre 304 s y 915 s, nunca
+#     en directo, y los 19 se publicaron el DIA ANTERIOR a la velada (UTC);
+#   - el resto de titulos con "weigh" son tres cosas que NO pueden entrar,
+#     porque la web lo rotula "Pesaje oficial": "<cartelera>: Ceremonial
+#     Weigh-In" (directo), "<cartelera>: Morning Weigh-In Show" (directo de
+#     1-2,5 h) y shorts con almohadilla ("Figgy and Talbott have made weight!
+#     #ufc332", 10 s);
+#   - con la regla de abajo: 19 de 19 aciertos y 0 falsos positivos. 1063
+#     (Belgrado) y 1094 (Road to UFC) no tuvieron ese video y se quedan a NULL.
+# Mejor perder un pesaje (NULL; el paso manual del viernes lo pone) que escribir
+# el que no es.
+_WEIGHIN_TITLE_RE = re.compile(
+    r"^(?P<bout>.+?\bvs\b.+?)\s+weigh-?\s?ins\s*\|\s*(?P<card>.+)$"
+)
+_WEIGHIN_EXCLUDE_RE = re.compile(r"ceremonial|\bshow\b|face-?\s?offs?|#")
+# "ufc" in the card half keeps out Zuffa Boxing, which the same channel uploads
+# with the same shape and sometimes inside the same window.
+_WEIGHIN_CARD_UFC_RE = re.compile(r"\bufc\b")
+# Desfase medido: -1 dia en los 19. Dos de margen antes; nunca despues de la
+# velada, que es cuando el pesaje ya no sirve y entran los videos de otra.
+_WEIGHIN_DAYS_BEFORE = 2
+_WEIGHIN_DAYS_AFTER = 0
+# El mas corto real dura 304 s (1089). 180 corta los shorts (10-20 s) y los
+# directos programados ("P0D" = 0 s) con margen de sobra.
+MIN_WEIGHIN_SECONDS = 180
+_DIGIT_RE = re.compile(r"\d")
+
+
+def _bout_tokens(name: str | None) -> set[str]:
+    """Main-event surnames of the event NAME: "Buckley vs. Malott" ->
+    {buckley, malott}.
+
+    Taken from the half after ':' (or the whole name when there is no ':') and
+    only when it holds a "vs"; at least 3 letters, no digits, no stopwords. A
+    name without a matchup ("UFC Freedom 250") gives the empty set. Used ONLY by
+    the weigh-in rule: the weigh-in title starts with these very surnames, and
+    1065 (location "Pudong", title "UFC Shanghai") only matches through them."""
+    parts = _BRAND_SPLIT_RE.split(_norm(name), 1)
+    bout = parts[1] if len(parts) > 1 else parts[0]
+    if not _BRAND_VS_RE.search(bout):
+        return set()
+    return {
+        t
+        for t in _BRAND_WORD_RE.split(bout)
+        if len(t) >= 3 and not _DIGIT_RE.search(t) and t not in _NAME_STOPWORDS
+    }
+
+
+def _weighin_shape(title_n: str) -> re.Match | None:
+    """The strict shape on a normalized title, or None (excluded words too)."""
+    if _WEIGHIN_EXCLUDE_RE.search(title_n):
+        return None
+    return _WEIGHIN_TITLE_RE.match(title_n)
+
+
+def weighin_candidate_ids(*feeds: list[FeedVideo] | None) -> list[str]:
+    """Ids whose title has the official weigh-in shape (and none of the
+    excluded words). They ride in the SAME videos.list batch as the face-off
+    candidates, so the weigh-in pass costs zero extra quota."""
+    ids: list[str] = []
+    for feed in feeds:
+        for video in feed or []:
+            if _weighin_shape(_norm(video.title)):
+                ids.append(video.video_id)
+    return list(dict.fromkeys(ids))
+
+
+def _merge_feeds(*feeds: list[FeedVideo] | None) -> list[FeedVideo]:
+    """RSS + API as one list: first occurrence of each id wins, order kept."""
+    seen: set[str] = set()
+    merged: list[FeedVideo] = []
+    for feed in feeds:
+        for video in feed or []:
+            if video.video_id in seen:
+                continue
+            seen.add(video.video_id)
+            merged.append(video)
+    return merged
+
+
+def match_weighin(
+    event: TargetEvent,
+    videos: list[FeedVideo],
+    durations: dict[str, int] | None = None,
+) -> FeedVideo | None:
+    """The event's official UFC weigh-in video, or None.
+
+    A video is a candidate only when ALL hold on the normalized title:
+      1. published within [event_date - 2d, event_date];
+      2. the strict "<A> vs <B> Weigh-Ins | <card>" shape, with none of
+         ceremonial / show / face-off / '#';
+      3. "ufc" in the card half (keeps the Zuffa Boxing weigh-ins out);
+      4. a hint of THIS event: a place token, its "ufc <N>", a brand token or a
+         main-event surname;
+      5. at least MIN_WEIGHIN_SECONDS when the duration is known (unknown ->
+         open, same reasoning as _duration_ok).
+    Two or more DISTINCT candidates -> None with a WARNING: better to lose it
+    than to write the wrong one."""
+    if event.event_date is None:
+        return None
+    lo = event.event_date - timedelta(days=_WEIGHIN_DAYS_BEFORE)
+    hi = event.event_date + timedelta(days=_WEIGHIN_DAYS_AFTER)
+    place_tokens = _place_tokens(event.location)
+    name_tokens = _name_tokens(event.name)
+    bout_tokens = _bout_tokens(event.name)
+    num_match = _UFC_NUM_RE.search(event.name or "")
+    ufc_num = num_match.group(1) if num_match else None
+
+    candidates: dict[str, FeedVideo] = {}
+    for video in videos:
+        if video.video_id in candidates:
+            continue
+        if not (lo <= video.published <= hi):
+            continue
+        title_n = _norm(video.title)
+        shape = _weighin_shape(title_n)
+        if not shape or not _WEIGHIN_CARD_UFC_RE.search(shape.group("card")):
+            continue
+        hint = (
+            _title_has_place_token(title_n, place_tokens)
+            or bool(
+                ufc_num
+                and re.search(_TITLE_NUM_TEMPLATE.format(num=ufc_num), title_n)
+            )
+            or _title_has_place_token(title_n, name_tokens)
+            or _title_has_place_token(title_n, bout_tokens)
+        )
+        if not hint:
+            continue
+        seconds = (durations or {}).get(video.video_id)
+        if seconds is not None and seconds < MIN_WEIGHIN_SECONDS:
+            LOGGER.info(
+                "Pesaje descartado %s %r: %ds < %ds.",
+                video.video_id, video.title, seconds, MIN_WEIGHIN_SECONDS,
+            )
+            continue
+        candidates[video.video_id] = video
+
+    if len(candidates) > 1:
+        LOGGER.warning(
+            "Pesaje ambiguo para el evento %d %r: %d candidatos (%s). "
+            "No se escribe ninguno; el paso manual del viernes lo fija.",
+            event.id, event.name, len(candidates), ", ".join(candidates),
+        )
+        return None
+    return next(iter(candidates.values()), None)
+
+
+def get_weighin_target_events(connection) -> list[TargetEvent]:
+    """Upcoming cards from yesterday to two days ahead whose weigh-in is
+    still NULL (never one set by hand, never a completed card)."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id, name, location, event_date
+            FROM events
+            WHERE status = 'upcoming'
+              AND event_date IS NOT NULL
+              AND event_date BETWEEN CURRENT_DATE - 1 AND CURRENT_DATE + 2
+              AND weighin_video_id IS NULL
+            ORDER BY event_date ASC
+            """
+        )
+        return [
+            TargetEvent(int(r[0]), str(r[1]), r[2], r[3]) for r in cursor.fetchall()
+        ]
+
+
+def run_weighins(
+    connection,
+    *,
+    apply: bool,
+    videos: list[FeedVideo],
+    durations: dict[str, int] | None = None,
+) -> Counter:
+    """The weigh-in pass: match and (with ``apply``) write, one commit per
+    write. Separate from run() on purpose, so the careo pass is untouched."""
+    counts: Counter = Counter()
+    events = get_weighin_target_events(connection)
+    counts["weighin_targets"] = len(events)
+    for event in events:
+        video = match_weighin(event, videos, durations)
+        if video is None:
+            counts["weighin_no_match"] += 1
+            continue
+        counts["weighin_matched"] += 1
+        LOGGER.info(
+            "Event %d %r -> weigh-in %s %s",
+            event.id, event.name, video.video_id, video.title,
+        )
+        if apply and set_event_weighin_video(
+            connection, event.id, video.video_id, video.title
+        ):
+            connection.commit()
+            counts["weighin_written"] += 1
+    return counts
+
+
 def main() -> None:
     configure_logging()
     parser = argparse.ArgumentParser(
@@ -783,13 +1000,19 @@ def main() -> None:
         for video in feed:
             print(f"{video.video_id} | {video.published} | {video.title}")
         return
-    if not feed:
-        raise SystemExit("Empty channel feed — aborting (no writes).")
 
     # Optional API rescue: only when a quota key is present. Without it the cron
     # behaves exactly as before (RSS only) — graceful, zero-cost degradation.
     api_feed: list[FeedVideo] | None = None
     api_key = os.getenv("YOUTUBE_API_KEY", "").strip()
+    # 🪤 EL RSS CAIDO TUMBABA LA PASADA ENTERA. Hasta el 18-oct-2026 aqui habia
+    # un `if not feed: raise SystemExit(...)` ANTES de mirar la API: el RSS de
+    # YouTube contesta 404/500 en ~1 de cada 3 pasadas (18 de 60 del 1 al 15-oct,
+    # 16 de 40 del 9 al 18-oct, Issues #133/#136/#137) y la pasada abortaba con
+    # la clave puesta y la API sana, mandando un correo de fallo casi a diario.
+    # Ahora solo se aborta si fallan LOS DOS (ver mas abajo).
+    if not feed and not api_key:
+        raise SystemExit("Empty channel feed — aborting (no writes).")
     if api_key:
         # El cutoff se DERIVA de _DAYS_BEFORE, asi que estrecharlo de 5 a 2 no
         # rompe el rescate: el evento mas viejo que get_rescue_target_events
@@ -818,18 +1041,34 @@ def main() -> None:
     else:
         LOGGER.info("No YOUTUBE_API_KEY: RSS-only (no API rescue).")
 
+    if not feed:
+        if not api_feed:
+            raise SystemExit(
+                "Empty channel feed and no API feed — aborting (no writes)."
+            )
+        LOGGER.warning(
+            "RSS caído (feed vacío); sigo con la API: %d subidas.", len(api_feed)
+        )
+        feed = api_feed
+
     # Duration guard. Only the titles that ALREADY passed the face-off whitelist
-    # are worth a lookup, so this is one batch (1 quota unit) per run. Without a
-    # key `durations` stays None and the guard degrades to open on purpose —
-    # _duration_ok explains why that beats rejecting everything in silence.
+    # or the weigh-in shape are worth a lookup, so this is still ONE batch (1
+    # quota unit) per run. Without a key `durations` stays None and the guard
+    # degrades to open on purpose — _duration_ok explains why that beats
+    # rejecting everything in silence.
     durations: dict[str, int] | None = None
     if api_key:
-        candidatos = faceoff_candidate_ids(feed, api_feed)
+        candidatos = list(
+            dict.fromkeys(
+                faceoff_candidate_ids(feed, api_feed)
+                + weighin_candidate_ids(feed, api_feed)
+            )
+        )
         durations = fetch_video_durations(api_key, candidatos)
         LOGGER.info(
-            "Duracion: %d candidatos con 'face-off' en el titulo, %d resueltos "
-            "(umbral %ds).",
-            len(candidatos), len(durations), MIN_DURATION_SECONDS,
+            "Duracion: %d candidatos (careo + pesaje) en el titulo, %d resueltos "
+            "(umbral careo %ds, pesaje %ds).",
+            len(candidatos), len(durations), MIN_DURATION_SECONDS, MIN_WEIGHIN_SECONDS,
         )
     else:
         LOGGER.warning(
@@ -846,8 +1085,19 @@ def main() -> None:
             api_feed=api_feed, rescue_days=args.rescue_days,
             durations=durations,
         )
+        # Weigh-in pass AFTER the careo, on the same videos (RSS + API, with
+        # the repeated ids dropped) and the same duration batch.
+        counts.update(
+            run_weighins(
+                connection, apply=args.apply,
+                videos=_merge_feeds(feed, api_feed), durations=durations,
+            )
+        )
 
-    keys = ["targets", "matched", "rescue_targets", "rescued", "no_match", "written"]
+    keys = [
+        "targets", "matched", "rescue_targets", "rescued", "no_match", "written",
+        "weighin_targets", "weighin_matched", "weighin_no_match", "weighin_written",
+    ]
     print(json.dumps({k: counts.get(k, 0) for k in keys}, indent=2))
     if not args.apply:
         print("Dry-run: nothing written. Re-run with --apply to persist.")
