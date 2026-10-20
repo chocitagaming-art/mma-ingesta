@@ -1,6 +1,7 @@
 import pytest
 
-from src.scrapers.odds import FightRow, best_match, consensus_prices
+from src.scrapers.matching import fold
+from src.scrapers.odds import NAME_ALIASES, FightRow, best_match, consensus_prices
 
 
 def _event(prices_by_book):
@@ -91,6 +92,34 @@ def test_best_match_puts_aliased_names_on_the_right_corner(case, swap_corners):
     # Each price lands on its own fighter's corner, whatever the API's order.
     assert odds_red == pytest.approx(red[1])
     assert odds_blue == pytest.approx(blue[1])
+
+
+def test_an_alias_never_hides_the_literal_name():
+    # If the fighters table ever stores the API's own spelling, the literal name
+    # must still match: the alias is tried IN ADDITION to it, never instead
+    # ("Timmy Cuamba" against "Timothy Cuamba" is 0.846, below the threshold).
+    fights = [FightRow(id=15560, red_name="Louis Jourdain", blue_name="Timothy Cuamba")]
+    match = best_match({"Louis Jourdain": 1.553, "Timothy Cuamba": 2.487}, fights)
+    assert match is not None
+    assert match[0] == 15560
+    assert match[1:3] == pytest.approx((1.553, 2.487))
+
+
+def test_alias_keys_are_folded():
+    # The lookup is NAME_ALIASES.get(fold(api_name)): a key with capitals or
+    # accents would never be hit, silently.
+    assert all(key == fold(key) for key in NAME_ALIASES)
+
+
+def test_alias_lookup_folds_the_api_name():
+    # The API name goes through fold() too, accents and case included.
+    fights = [
+        FightRow(id=19431, red_name="Katlyn Cerminara", blue_name="Mackenzie Stiller")
+    ]
+    match = best_match({"KATLYN Chookagián": 1.357, "Mackenzie Stiller": 3.238}, fights)
+    assert match is not None
+    assert match[0] == 19431
+    assert match[1:3] == pytest.approx((1.357, 3.238))
 
 
 def test_an_alias_never_matches_a_bout_on_one_name_alone():
