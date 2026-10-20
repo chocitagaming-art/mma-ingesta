@@ -5,7 +5,8 @@ the market favorite + implied probability (#41).
 The Odds API gives upcoming MMA events across all promotions with decimal odds per
 bookmaker. We average each fighter's price across bookmakers (consensus), match the
 two priced fighters to one of our upcoming UFC fights by name (diacritic-insensitive,
-either corner orientation), and write the consensus odds onto the right corner.
+either corner orientation, plus a small alias table for spellings beyond fuzzy
+reach), and write the consensus odds onto the right corner.
 Only UFC fights in our DB will match; everything else is skipped.
 
 Usage::
@@ -25,7 +26,7 @@ import requests
 from .config import get_settings
 from .db import connect, cursor
 from .logging_config import configure_logging
-from .matching import fold_ratio
+from .matching import fold, fold_ratio
 
 LOGGER = logging.getLogger(__name__)
 
@@ -35,6 +36,19 @@ ODDS_API_URL = (
 # Both fighters of a bout must match, so a comparatively loose per-name cutoff is
 # still safe (two unrelated names rarely both coincide).
 MATCH_THRESHOLD = 0.85
+
+# The Odds API name (folded) -> canonical name in the fighters table, for fighters
+# whose bookmaker name sits beyond fuzzy reach of the stored one. Same precedent as
+# rankings.NAME_ALIASES and wiki_bonuses.NAME_ALIASES. The alias is tried IN
+# ADDITION to the literal API name, and it only lifts that one corner: the other
+# fighter of the bout must still reach MATCH_THRESHOLD on its own.
+NAME_ALIASES: dict[str, str] = {
+    # fold_ratio 0.846; given_name_diminutive_match misses it too, because
+    # "timothy" does not start with "timmy".
+    "timothy cuamba": "Timmy Cuamba",
+    # Her maiden name (fold_ratio 0.606 against the married one we store).
+    "katlyn chookagian": "Katlyn Cerminara",
+}
 
 
 @dataclass
@@ -75,13 +89,24 @@ def consensus_prices(event: dict) -> dict[str, float]:
     return {name: sum(values) / len(values) for name, values in totals.items() if values}
 
 
+def _name_score(api_name: str, stored_name: str) -> float:
+    """fold_ratio of an API fighter name against a stored one, via its alias too."""
+    score = fold_ratio(api_name, stored_name)
+    alias = NAME_ALIASES.get(fold(api_name))
+    if alias is not None:
+        score = max(score, fold_ratio(alias, stored_name))
+    return score
+
+
 def best_match(
     prices: dict[str, float], fights: list[FightRow]
 ) -> tuple[int, float, float, float] | None:
     """Map the two priced fighters onto an upcoming fight (either corner order).
 
-    Returns ``(fight_id, odds_red, odds_blue, score)`` for the best-matching fight
-    at or above :data:`MATCH_THRESHOLD`, or ``None`` if nothing matches.
+    Each name is scored with :func:`_name_score` (literal name or its
+    :data:`NAME_ALIASES` entry). Returns ``(fight_id, odds_red, odds_blue, score)``
+    for the best-matching fight at or above :data:`MATCH_THRESHOLD`, or ``None``
+    if nothing matches.
     """
     names = list(prices.keys())
     if len(names) != 2:
@@ -92,10 +117,10 @@ def best_match(
     for fight in fights:
         # Orientation A: first->red, second->blue. Orientation B: swapped.
         score_a = min(
-            fold_ratio(first, fight.red_name), fold_ratio(second, fight.blue_name)
+            _name_score(first, fight.red_name), _name_score(second, fight.blue_name)
         )
         score_b = min(
-            fold_ratio(first, fight.blue_name), fold_ratio(second, fight.red_name)
+            _name_score(first, fight.blue_name), _name_score(second, fight.red_name)
         )
         if score_a >= score_b:
             score, odds_red, odds_blue = score_a, prices[first], prices[second]
