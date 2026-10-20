@@ -8,7 +8,8 @@ No network, no DB: resolve_athlete gets a fake session and writes go through the
 shared fakedb recorder.
 """
 
-from datetime import date
+from datetime import date, datetime, timezone
+from pathlib import Path
 
 from src.scrapers import enrich_fullbody
 from src.scrapers.enrich_photos_ufc import (
@@ -91,22 +92,40 @@ class _FakeResponse:
     # unknown slug: ufc.com answers those with 200 on /search instead of a 404.
     # It defaults to the requested URL so every existing test keeps meaning
     # "the page we asked for is the page we got".
-    def __init__(self, text: str, status_code: int = 200, url: str = "https://www.ufc.com/athlete/x"):
+    # `headers` only exists when a test passes it: without one the double has
+    # no attribute at all, like the doubles of the other suites, and
+    # resolve_athlete must cope (it then dates the page by today, UTC).
+    def __init__(
+        self,
+        text: str,
+        status_code: int = 200,
+        url: str = "https://www.ufc.com/athlete/x",
+        headers: dict[str, str] | None = None,
+    ):
         self.text = text
         self.status_code = status_code
         self.ok = status_code < 400
         self.url = url
+        if headers is not None:
+            self.headers = headers
 
 
 class _FakeSession:
-    def __init__(self, html: str, final_url: str | None = None):
+    def __init__(
+        self,
+        html: str,
+        final_url: str | None = None,
+        headers: dict[str, str] | None = None,
+    ):
         self._html = html
         self._final_url = final_url
+        self._headers = headers
         self.requested: list[str] = []
 
     def get(self, url, headers=None, timeout=None):
         self.requested.append(url)
-        return _FakeResponse(self._html, url=self._final_url or url)
+        final_url = self._final_url or url
+        return _FakeResponse(self._html, url=final_url, headers=self._headers)
 
 
 # ------------------------------------------------------------ full-body photo
@@ -264,6 +283,116 @@ def test_parse_ufc_date_tolerates_format_variants():
     assert _parse_ufc_date("") is None
     assert _parse_ufc_date("TBD") is None
     assert _parse_ufc_date("25/04/2015") is None
+
+
+# ------------------------------------------- the page's own date is no debut
+#
+# 🪤 When a fighter has no debut, ufc.com paints the day the page was GENERATED
+# in "Octagon Debut", and we stored it: 51 fighters ended up with one (45 with
+# 2026-07-10, 6 loose ones). The two fixtures are real bio blocks served in the
+# same minute on 20-oct-2026: Roque Conceição, no UFC bout, reading
+# "Oct. 20, 2026"; Marlon Vera, debut at UFC 180 on 2014-11-15.
+
+_FIXTURES = Path(__file__).parent / "fixtures"
+EMPTY_DEBUT_HTML = (
+    _FIXTURES / "ufc_athlete_empty_debut_roque_conceicao.html"
+).read_text(encoding="utf-8")
+REAL_DEBUT_HTML = (
+    _FIXTURES / "ufc_athlete_real_debut_marlon_vera.html"
+).read_text(encoding="utf-8")
+# The Date header of each one, as ufc.com sent it.
+SERVED_ROQUE = {"Date": "Tue, 20 Oct 2026 22:39:12 GMT"}
+SERVED_VERA = {"Date": "Tue, 20 Oct 2026 22:39:34 GMT"}
+
+
+def _page_dated(painted: str) -> str:
+    """The real Roque Conceição block, painting `painted` instead."""
+    return EMPTY_DEBUT_HTML.replace("Oct. 20, 2026", painted)
+
+
+def _debut(html: str, headers: dict[str, str] | None, name: str = "Roque Conceicao"):
+    data = resolve_athlete(_FakeSession(html, headers=headers), name)
+    assert data is not None
+    return data.octagon_debut
+
+
+def test_real_empty_debut_page_does_not_hand_its_own_date_over_as_a_debut():
+    # The bio really reads the serving day: the bug is in the page, not in us.
+    assert _extract_bio_fields(EMPTY_DEBUT_HTML)["octagon debut"] == "Oct. 20, 2026"
+    assert _debut(EMPTY_DEBUT_HTML, SERVED_ROQUE) is None
+
+
+def test_real_old_debut_served_the_same_minute_is_kept():
+    assert _debut(REAL_DEBUT_HTML, SERVED_VERA, "Marlon Vera") == date(2014, 11, 15)
+
+
+def test_page_date_out_of_a_week_old_cache_is_dropped_and_the_window_is_8_days():
+    # How 6806 Roque Conceição got 2026-10-12: a page generated that day, still
+    # in ufc.com's week-long cache when the 18-oct pass read it.
+    served_18 = {"Date": "Sun, 18 Oct 2026 12:59:00 GMT"}
+    assert _debut(_page_dated("Oct. 12, 2026"), served_18) is None
+    # The edge, pinned: served on 20-oct, 8 days back (12-oct) is still inside
+    # the window; 9 days back (11-oct) is outside and stays a debut.
+    assert _debut(_page_dated("Oct. 12, 2026"), SERVED_ROQUE) is None
+    assert _debut(_page_dated("Oct. 11, 2026"), SERVED_ROQUE) == date(2026, 10, 11)
+
+
+def test_the_window_counts_from_the_date_header_not_from_the_day_of_the_run():
+    # The 45 rows with 2026-07-10 were written on 11-jul-2026 (updated_at from
+    # 14:39 GMT). Read today, that page date is months old and would pass for a
+    # debut: only the Date the page was served with tells it apart.
+    served_11_jul = {"Date": "Sat, 11 Jul 2026 14:39:47 GMT"}
+    assert _debut(_page_dated("Jul. 10, 2026"), served_11_jul) is None
+
+
+def test_debut_after_the_serving_day_is_dropped():
+    # A booked debutant's page can show the bout he has not fought yet (on
+    # 9-oct-2026 6782 Cody Chovancek read "Oct. 17, 2026"), and a booking can
+    # move: 9108 Jessie Rosas still holds 2026-08-08, but debuted on 12-sep.
+    served_9 = {"Date": "Fri, 09 Oct 2026 05:00:00 GMT"}
+    assert _debut(_page_dated("Oct. 17, 2026"), served_9, "Cody Chovancek") is None
+
+
+def test_without_a_readable_date_header_the_window_counts_from_today_utc():
+    # No Date (or an unreadable one): the page is dated by today, UTC. It is
+    # painted with today's date, as the bug does, so this holds on any day.
+    today = datetime.now(timezone.utc).date()
+    html = _page_dated(f"{today:%b}. {today.day}, {today.year}")
+    for headers in (None, {}, {"Date": "not a date"}):
+        assert _debut(html, headers) is None, headers
+
+
+def _fake_network(monkeypatch, html: str, headers: dict[str, str]) -> None:
+    session = _FakeSession(html, headers=headers)
+    monkeypatch.setattr(enrich_fullbody.requests, "Session", lambda: session)
+
+
+def test_backfill_never_writes_the_page_date_through_the_default_resolver(
+    fakedb, monkeypatch
+):
+    # enrich_fullbody reuses resolve_athlete, so it is covered with no code of
+    # its own. Run with the DEFAULT resolver, only the network faked.
+    # 1) A page with a real photo AND the page date: the photo is written, the
+    #    date never reaches the UPDATE.
+    page = ATHLETE_HTML.replace("Nov. 15, 2014", "Oct. 20, 2026")
+    _fake_network(monkeypatch, page, SERVED_ROQUE)
+    rows = [(6414, "Marlon Vera", None, True)]
+    conn = fakedb.Connection(_responder(update_result=[(1,)], target_rows=rows))
+    counts = enrich_fullbody.backfill(conn, dry_run=False, sleeper=lambda _s: None)
+    assert counts["updated"] == 1
+    executed = [step for cur in conn.cursors for step in cur.executed]
+    params = [p for sql, p in executed if "UPDATE" in sql.upper()]
+    assert len(params) == 1
+    assert date(2026, 10, 20) not in params[0]
+    # 2) The real Roque Conceição block, whose only "news" is the page date:
+    #    nothing is left to write, so no UPDATE at all.
+    _fake_network(monkeypatch, EMPTY_DEBUT_HTML, SERVED_ROQUE)
+    rows = [(6806, "Roque Conceição", None, True)]
+    conn = fakedb.Connection(_responder(update_result=[(1,)], target_rows=rows))
+    counts = enrich_fullbody.backfill(conn, dry_run=False, sleeper=lambda _s: None)
+    assert counts["resolved"] == 1
+    assert counts["updated"] == 0
+    assert fakedb.mutating_statements(conn) == []
 
 
 def test_update_fighter_enrichment_guards_bio_extras_with_coalesce(fakedb):

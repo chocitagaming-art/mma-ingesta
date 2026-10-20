@@ -26,7 +26,8 @@ import time
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
 
 import requests
@@ -310,6 +311,59 @@ def _parse_ufc_date(text: str | None) -> date | None:
     return None
 
 
+# 🪤 AN EMPTY "OCTAGON DEBUT" IS NOT EMPTY ON THE PAGE: ufc.com PAINTS THE DAY THE
+# PAGE WAS GENERATED. Measured on 20-oct-2026: /athlete/roque-conceicao and
+# /athlete/trent-miller, two fighters without a UFC bout, both read
+# "Oct. 20, 2026" at 22:39 GMT that same day. We stored it as a debut and
+# update_fighter_enrichment's COALESCE froze it: 51 fighters ended up with one
+# (45 with 2026-07-10, 6 loose ones such as 6806 Roque Conceição, 2026-10-12).
+#
+# So a debut inside the page's own "today" is dropped before it reaches the DB:
+# anything on or after the serving day minus 8 days, the future included.
+#   - 7 days because ufc.com caches athlete pages for a week (Cache-Control:
+#     max-age=604800 on those same responses): a page served today may have been
+#     generated, and dated, up to 7 days earlier. Roque Conceição's 2026-10-12
+#     sits in a row last written on 2026-10-18, six days later.
+#   - 1 more of margin, because the day ufc.com paints need not be the GMT day
+#     of the Date header (its real debuts run 1-2 days off ours on 222 fighters).
+# The serving day is the response's Date header — the one date every HTTP
+# response carries — or today (UTC) when it is missing or unreadable.
+#
+# Why a window and not a database check ("no UFC event that day or the day
+# before", the signature the 21-oct measurement used to find the 51):
+# resolve_athlete is a page parser with no connection, shared by
+# enrich_photos_ufc, enrich_fullbody and --probe; and that check is blind where
+# it matters, since a page generated on a fight Saturday or on the Sunday after
+# paints a date the check has to accept. The window costs nothing visible: the
+# fighter page only trusts octagon_debut before 1995-04-07 (UFC 1-4, missing
+# from `events`; owner's rule R2 of 21-oct-2026) and takes every later debut
+# from `fights`. A genuine debut of the last 8 days that is dropped here can
+# still be stored by a later pass.
+TODAYS_DATE_WINDOW_DAYS = 8
+
+
+def _served_on(response) -> date:
+    """UTC day the response was served: its Date header, else today (UTC)."""
+    # getattr, as with response.url below: the test doubles carry no headers.
+    raw = (getattr(response, "headers", None) or {}).get("Date")
+    if raw:
+        try:
+            served = parsedate_to_datetime(raw)
+        except (TypeError, ValueError):
+            served = None
+        if served is not None:
+            if served.tzinfo is None:
+                served = served.replace(tzinfo=timezone.utc)
+            return served.astimezone(timezone.utc).date()
+    return datetime.now(timezone.utc).date()
+
+
+def _is_page_date(debut: date | None, served_on: date) -> bool:
+    """True when `debut` falls inside the page's own "today" (see above)."""
+    window_start = served_on - timedelta(days=TODAYS_DATE_WINDOW_DAYS)
+    return debut is not None and debut >= window_start
+
+
 def resolve_athlete(
     session: requests.Session, name: str, slug: str | None = None
 ) -> AthleteData | None:
@@ -347,6 +401,14 @@ def resolve_athlete(
     reach = _to_float(fields.get("reach"))
     weight = _to_float(fields.get("weight"))
     leg_reach = _to_float(fields.get("leg reach"))
+    debut = _parse_ufc_date(fields.get("octagon debut"))
+    served_on = _served_on(response)
+    if _is_page_date(debut, served_on):
+        LOGGER.info(
+            "Octagon debut %s for %r is the page's own date (served %s): dropped",
+            debut, name, served_on,
+        )
+        debut = None
     return AthleteData(
         headshot_url=_extract_headshot(html, name),
         wins=record[0] if record else None,
@@ -360,7 +422,7 @@ def resolve_athlete(
         leg_reach_cm=round(leg_reach * IN_TO_CM, 1) if leg_reach else None,
         trains_at=fields.get("trains at") or None,
         birth_place=fields.get("place of birth") or None,
-        octagon_debut=_parse_ufc_date(fields.get("octagon debut")),
+        octagon_debut=debut,
         page_name=_extract_page_name(html),
     )
 
