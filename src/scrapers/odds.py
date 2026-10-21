@@ -48,6 +48,10 @@ NAME_ALIASES: dict[str, str] = {
     "timothy cuamba": "Timmy Cuamba",
     # Her maiden name (fold_ratio 0.606 against the married one we store).
     "katlyn chookagian": "Katlyn Cerminara",
+    # UFC 333 (24-oct-2026), read from the free /events list on 21-oct: the
+    # full given names (fold_ratio 0.848 and 0.824 against what we store).
+    "ramazonbek temirov": "Ramazan Temirov",
+    "abusupyian magomedov": "Abus Magomedov",
 }
 
 
