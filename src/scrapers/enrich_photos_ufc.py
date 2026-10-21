@@ -334,11 +334,24 @@ def _parse_ufc_date(text: str | None) -> date | None:
 # resolve_athlete is a page parser with no connection, shared by
 # enrich_photos_ufc, enrich_fullbody and --probe; and that check is blind where
 # it matters, since a page generated on a fight Saturday or on the Sunday after
-# paints a date the check has to accept. The window costs nothing visible: the
-# fighter page only trusts octagon_debut before 1995-04-07 (UFC 1-4, missing
-# from `events`; owner's rule R2 of 21-oct-2026) and takes every later debut
-# from `fights`. A genuine debut of the last 8 days that is dropped here can
-# still be stored by a later pass.
+# paints a date the check has to accept.
+#
+# 🪤 THE WINDOW IS ONLY FREE BEHIND THE R2 FIGHTER PAGE. It drops real dates
+# too: a debut of the last 8 days, and the booked bout that a debutant's page
+# shows before he fights. That costs nothing visible only because the fighter
+# page (mma-app, owner's rule R2 of 21-oct-2026) takes every debut from
+# `fights`, or from the booked bout, and trusts octagon_debut only before
+# 1995-04-07 (UFC 1-4, missing from `events`), which no page date can be.
+# Behind a page that paints octagon_debut as is (R0, what mma-app served until
+# R2), the window hides the "Debut en UFC" row: on 21-oct-2026, 12 fighters held
+# a date inside it, 7 who debuted on 17-oct and 5 booked from 24-oct to 12-dec.
+# Nor is a dropped date surely stored by a later pass: it is read again only
+# while the fighter is still a target, of enrich_fullbody while full_body_url,
+# leg_reach_cm or trains_at is missing, of enrich_photos_ufc while the photo is
+# missing or the record reads 0-0-0. The pass that drops the date usually fills
+# those: of the 78 debutants since 1-apr-2026 whose stored date is their first
+# UFC bout (Road to UFC aside), 38 are no longer a target of either (5 of the 7
+# of 17-oct).
 TODAYS_DATE_WINDOW_DAYS = 8
 
 
