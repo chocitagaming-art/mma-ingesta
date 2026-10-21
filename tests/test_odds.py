@@ -75,6 +75,21 @@ _ALIAS_BOUTS = {
         ("Mackenzie Stiller", 3.238),
         {"Mackenzie Stiller": 3.238, "Katlyn Chookagian": 1.357},
     ),
+    # Event 1093 (UFC 333, 24-oct-2026), names read from The Odds API's free
+    # /events list on 21-oct: "Ramazonbek" (0.848) and "Abusupyian" (0.824).
+    # Made-up prices: only the corner they land on matters here.
+    "temirov": (
+        15988,
+        ("Lone'er Kavanagh", 1.45),
+        ("Ramazan Temirov", 2.80),
+        {"Lone'er Kavanagh": 1.45, "Ramazonbek Temirov": 2.80},
+    ),
+    "magomedov": (
+        15991,
+        ("Abus Magomedov", 1.65),
+        ("Cam Rowston", 2.30),
+        {"Abusupyian Magomedov": 1.65, "Cam Rowston": 2.30},
+    ),
 }
 
 
