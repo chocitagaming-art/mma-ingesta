@@ -14,32 +14,47 @@ landed at 16:19-16:24Z and only the manual dispatch at 19:53Z (run
 39844015851) gave Asaf Chopurov his face.
 
 The trap these tests close: the scheduled branch of each step picks the
-arguments, enrich-photos by comparing ``github.event.schedule`` with the EXACT
-cron string, so a new cron silently takes whatever that branch does by
-default. Here it must be the daily pass's scope (upcoming cards for
-enrich-photos, ``--limit 40`` for backfill-standing), never the monthly
-``--all`` whole-table sweep.
+arguments by comparing ``github.event.schedule`` with the EXACT cron string, so
+a new cron silently takes whatever that branch does by default. The second
+pass must be the UPCOMING-CARDS scope and nothing wider:
 
-These tests read the YAML; they never run it. No network, no database.
+- enrich-photos: its default (no args) already is that scope, the same as the
+  05:30 daily pass. Never the monthly ``--all`` whole-table sweep.
+- backfill-standing: its default is NOT. The scheduled branch hands every cron
+  ``--limit 40``, i.e. the whole ufc.com catalogue (9 upcoming + 31 completed
+  events on 22-oct-2026, exactly 40). Run 39777373231 (06:40 cron, 22-oct):
+  40 event pages, 1 x 403 on ufc-176, 175 legacy UPDATEs and 0 directional
+  ones, all of them older cards overwriting the newer photo (BACKLOG: "deja la
+  foto de pie MAS VIEJA"). So the evening pass needs ``--upcoming`` (status =
+  'upcoming', no deduced-slug round), selected by its exact cron string, while
+  the daily and the weekly crons keep their ``--limit 40``.
+
+These tests read the YAML and the CLI parser; they never run a pass. No
+network, no database.
 """
 
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 
 import pytest
 import yaml
 
+from src.scrapers import backfill_standing_photos
+
 RAIZ = Path(__file__).resolve().parents[1]
 WORKFLOWS = RAIZ / ".github" / "workflows"
 
-# (workflow, job, its daily cron). The second pass must get exactly the scope
-# of that daily cron.
+# (workflow, job, its daily cron, the ARGS its Thursday/Friday evening pass
+# must run with). Both are the upcoming-cards scope of that scraper.
 FIGHT_WEEK = [
-    ("enrich-photos.yml", "enrich", "30 5 * * *"),
-    ("backfill-standing.yml", "backfill", "40 6 * * *"),
+    ("enrich-photos.yml", "enrich", "30 5 * * *", ""),
+    ("backfill-standing.yml", "backfill", "40 6 * * *", "--upcoming"),
 ]
+# backfill-standing's catalogue sweeps, which the evening check must not touch.
+STANDING_CATALOGUE_CRONS = ("40 6 * * *", "0 7 * * 1")
 THURSDAY, FRIDAY = 4, 5
 # Latest time the Thursday batch was complete on 12 of 13 cards (22-oct-2026).
 # A pass scheduled before it would mostly find the old photos.
@@ -138,8 +153,8 @@ def _scheduled_args(script: str, cron: str) -> str:
     return args.strip()
 
 
-@pytest.mark.parametrize("name,job,daily", FIGHT_WEEK)
-def test_fight_week_pass_runs_thursday_and_friday_evening(name, job, daily):
+@pytest.mark.parametrize("name,job,daily,expected", FIGHT_WEEK)
+def test_fight_week_pass_runs_thursday_and_friday_evening(name, job, daily, expected):
     passes = _fight_week_crons(_crons(_workflow(name)))
     covered = set().union(*(_days_of_week(cron.split()[4]) for cron in passes))
     missing = {THURSDAY, FRIDAY} - covered
@@ -151,8 +166,8 @@ def test_fight_week_pass_runs_thursday_and_friday_evening(name, job, daily):
     )
 
 
-@pytest.mark.parametrize("name,job,daily", FIGHT_WEEK)
-def test_fight_week_pass_keeps_the_daily_scope(name, job, daily):
+@pytest.mark.parametrize("name,job,daily,expected", FIGHT_WEEK)
+def test_fight_week_pass_is_the_upcoming_cards_scope(name, job, daily, expected):
     datos = _workflow(name)
     crons = _crons(datos)
     assert daily in crons, f"{name}: daily cron {daily!r} is gone; schedule: {crons}"
@@ -160,13 +175,40 @@ def test_fight_week_pass_keeps_the_daily_scope(name, job, daily):
     assert passes, f"{name}: no Thursday/Friday evening pass in {crons}"
 
     script = _script(datos, job)
-    daily_args = _scheduled_args(script, daily)
     for cron in passes:
         args = _scheduled_args(script, cron)
-        assert args == daily_args, (
-            f"{name}: the second pass {cron!r} runs with {args!r}, the daily "
-            f"{daily!r} with {daily_args!r}. It must be the same small pass."
+        assert args == expected, (
+            f"{name}: the evening pass {cron!r} runs with {args!r}, it must run "
+            f"with {expected!r} (upcoming cards only)."
         )
-        assert "--all" not in args.split(), (
-            f"{name}: {cron!r} would sweep the whole table"
-        )
+        assert "--all" not in args.split(), f"{name}: {cron!r} would sweep the whole table"
+        # A fixed cap is not a scope: newest-first, the future cards eat it and
+        # it silently stops reaching what it was meant for (backfill-standing's
+        # --limit 8 of 2026-08-01, its --limit 12 of 2026-08-28).
+        assert "--limit" not in args.split(), f"{name}: {cron!r} scopes by a fixed --limit"
+
+
+def test_backfill_standing_catalogue_crons_keep_their_sweep():
+    """The evening check is an exact-string match: it must not leak into the
+    daily and weekly catalogue sweeps, which still need every ufc.com event."""
+    datos = _workflow("backfill-standing.yml")
+    crons = _crons(datos)
+    script = _script(datos, "backfill")
+    for cron in STANDING_CATALOGUE_CRONS:
+        assert cron in crons, f"catalogue cron {cron!r} is gone; schedule: {crons}"
+        assert _scheduled_args(script, cron) == "--limit 40", cron
+
+
+def test_backfill_standing_cli_accepts_every_scheduled_args():
+    """What the YAML passes must parse: an unknown flag would only show up as
+    an argparse exit 2 on a Thursday night, in the GitHub run list."""
+    datos = _workflow("backfill-standing.yml")
+    script = _script(datos, "backfill")
+    parser = backfill_standing_photos.build_parser()
+    for cron in _crons(datos):
+        args = _scheduled_args(script, cron)
+        parsed = parser.parse_args(shlex.split(args))
+        assert parsed.dry_run is False, cron
+    evening = parser.parse_args(shlex.split(_scheduled_args(script, "40 20 * * 4,5")))
+    assert evening.upcoming is True
+    assert evening.limit is None

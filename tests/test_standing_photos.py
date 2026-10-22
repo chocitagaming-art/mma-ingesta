@@ -298,6 +298,49 @@ def test_backfill_targets_ufc_events_newest_first_with_limit(fakedb):
     assert events == [(10, "ufc-328")]
 
 
+def test_backfill_upcoming_targets_only_upcoming_ufc_events(fakedb):
+    # The fight-week evening pass (22-oct-2026): the 9 upcoming cards, not the
+    # 40-event catalogue the daily/weekly sweeps walk.
+    conn = fakedb.Connection(_responder(fight_rows=[]))
+    events = backfill_standing_photos._get_target_events(conn, upcoming_only=True)
+    sql, params = conn.cursors[0].executed[0]
+    flat = " ".join(sql.split())
+    assert "WHERE source = %s AND status = 'upcoming'" in flat
+    assert "ORDER BY event_date DESC NULLS LAST" in flat
+    assert "LIMIT" not in flat
+    assert params == ("ufc.com",)
+    assert events == [(10, "ufc-328")]
+
+
+def test_backfill_upcoming_skips_the_deduced_slug_round(fakedb):
+    # Round B only probes COMPLETED ufcstats events: nothing to do with the
+    # fight-week photos, so the upcoming pass never queries nor fetches them.
+    conn = fakedb.Connection(
+        _responder(fight_rows=[("12722", 1, 2)], deduced_rows=_DEDUCED_ROWS)
+    )
+    fetched = []
+
+    def fetch(url: str) -> BeautifulSoup:
+        fetched.append(url)
+        return _soup()
+
+    counts = backfill_standing_photos.backfill(conn, fetch, upcoming_only=True)
+    assert fetched == ["https://www.ufc.com/event/ufc-328"]
+    assert counts["events"] == 1
+    assert counts["updated"] == 2
+    assert counts["deduced_resolved"] == 0
+    assert counts["deduced_unresolved"] == 0
+    executed = [" ".join(sql.split()) for cur in conn.cursors for sql, _ in cur.executed]
+    assert not [sql for sql in executed if "status = 'completed'" in sql]
+    assert _event_claims(conn) == []
+
+
+def test_backfill_cli_upcoming_flag():
+    parser = backfill_standing_photos.build_parser()
+    assert parser.parse_args(["--upcoming"]).upcoming is True
+    assert parser.parse_args([]).upcoming is False
+
+
 # --------------------------------------------------------------- slug deduction
 
 
