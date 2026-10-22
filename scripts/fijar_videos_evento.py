@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Fija A MANO los videos de la vispera de un evento: el careo y el pesaje.
+"""Fija A MANO los videos de la semana de un evento: careo, pesaje, rueda de
+prensa y directo.
 
 POR QUE EXISTE ESTO. `set_event_faceoff_video` (repositories/events.py) es
 FIRST-WRITER-WINS a proposito: solo escribe mientras la columna esta a NULL, asi
@@ -34,6 +35,15 @@ DECISION QUE NO ES OBVIA: el id y su titulo VIAJAN JUNTOS. Al escribir un id
 nuevo se escribe tambien su columna `_title`, y si el titulo no se pudo resolver
 se escribe NULL. Nunca se deja el titulo viejo al lado de un id nuevo: eso es
 precisamente el rotulo que miente, solo que ahora con nuestra firma.
+
+LA RUEDA DE PRENSA (press_video_id + press_video_title, migracion 033). Aqui no
+hay nada que corregir de un cron: este script es su UNICO escritor, por
+decision del dueno (22-oct-2026), y ningun automatismo la escribe ni la borra.
+`--rueda <id>` tiene el mismo trato que careo y pesaje: el id pelado de 11
+caracteres, titulo por oembed, aviso de short y --forzar. No revalida la
+portada: la rueda vive en la ficha del evento, que se cachea 60 s. Ojo, el
+video puede ser de un canal tercero no oficial (el del UFC 333 lo es: ver la
+cabecera de la 033) y caerse sin avisar; si pasa, se fija otro id.
 
 EL DIRECTO (live_video_id + live_video_title, migracion 027). Es la via MANUAL,
 la red de seguridad del automatico de la web. Tres palancas, y solo una a la vez:
@@ -71,6 +81,10 @@ Uso:
     .venv/Scripts/python.exe -m scripts.fijar_videos_evento --evento 1090 \
         --careo MQLCbgV5rhc --aplicar --forzar
 
+    # La rueda de prensa (la elegida para el UFC 333)
+    .venv/Scripts/python.exe -m scripts.fijar_videos_evento --evento 1093 \
+        --rueda g3h-jwpkxJU --aplicar
+
     # El directo: fijarlo, quitarlo o apagarlo
     .venv/Scripts/python.exe -m scripts.fijar_videos_evento --evento 1088 \
         --directo "https://www.youtube.com/live/qM-h-OudTqM?si=abc" --aplicar
@@ -80,10 +94,12 @@ Uso:
         --ocultar-directo --aplicar
 
 Es idempotente: correrlo dos veces con los mismos ids no escribe la segunda vez.
-Necesita las migraciones 027 (live_video_id, live_video_title) y 029
-(faceoff_video_title, weighin_video_id, weighin_video_title) aplicadas; si
-falta alguna, aborta diciendo cual en vez de reventar con un "column does not
-exist".
+Cada acto necesita sus dos columnas: careo 022+029, pesaje 029, directo 027 y
+rueda 033. Si falta alguna de las de los actos PEDIDOS, aborta diciendo que
+migracion aplicar en vez de reventar con un "column does not exist". Las de
+los actos no pedidos ni se miran ni se leen: asi la 033 pendiente bloquea
+--rueda y nada mas, y el interruptor del directo no espera a una migracion
+que no usa.
 """
 
 from __future__ import annotations
@@ -126,24 +142,25 @@ WATCH_URL = "https://www.youtube.com/watch?v={video_id}"
 _HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; mma-ingesta/1.0)"}
 
 # Columns of `events` this script reads and may write, by act. The names come
-# from migrations 022 (faceoff_video_id), 027 (the live pair) and 029 (the
-# other three).
+# from migrations 022 (faceoff_video_id), 027 (the live pair), 029 (the faceoff
+# title and the weigh-in pair) and 033 (the press conference pair).
 ID_COLUMN = {
     "careo": "faceoff_video_id",
     "pesaje": "weighin_video_id",
+    "rueda": "press_video_id",
     "directo": "live_video_id",
 }
 TITLE_COLUMN = {
     "careo": "faceoff_video_title",
     "pesaje": "weighin_video_title",
+    "rueda": "press_video_title",
     "directo": "live_video_title",
 }
-ACTS = ("careo", "pesaje", "directo")
+ACTS = ("careo", "pesaje", "rueda", "directo")
 
 # Solo el directo acepta una URL ademas del id pelado: es el que se fija con
 # prisa en plena velada, copiando de la barra del navegador o del boton
-# Compartir. Careo y pesaje siguen pidiendo el id de 11 caracteres, como hasta
-# ahora.
+# Compartir. Careo, pesaje y rueda de prensa piden el id de 11 caracteres.
 ACTS_ACCEPTING_URL = ("directo",)
 
 # 🪤 Sin aviso de short para el directo. Mientras emite, o mientras esta
@@ -158,8 +175,8 @@ ACTS_WITHOUT_SHORT_WARNING = ("directo",)
 # directo sin titulo (EventLiveEmbed no sabe decir que es), y como la columna
 # manda, un id a mano sin titulo ademas apaga lo automatico: ni se detecta el
 # directo ni sale UFC TV en la portada. Forzarlo era un --ocultar-directo
-# disfrazado, que ademas decia "ok". El careo y el pesaje si se pintan sin
-# titulo, y por eso alli --forzar sigue valiendo.
+# disfrazado, que ademas decia "ok". El careo, el pesaje y la rueda de prensa
+# si se pintan sin titulo, y por eso alli --forzar sigue valiendo.
 ACTS_NEEDING_TITLE = ("directo",)
 
 # /api/revalidate de la web: invalida los tags 'home' y 'events' y el path '/'
@@ -183,23 +200,16 @@ LIVE_VIDEO_OFF = "off"
 _YOUTUBE_HOSTS = ("youtube.com", "www.youtube.com", "m.youtube.com")
 _SHORT_LINK_HOSTS = ("youtu.be", "www.youtu.be")
 
-# Everything the report prints, read in one go and by position: the fake cursor
-# of the test suite has no `description`, and neither should this need one.
-EVENT_COLUMNS = (
-    "id",
-    "name",
-    "event_date",
-    "status",
-    "faceoff_video_id",
-    "faceoff_video_title",
-    "weighin_video_id",
-    "weighin_video_title",
-    "live_video_id",
-    "live_video_title",
-)
+# The report header, as old as the table: always read, never checked. After it,
+# read_event reads the id and title of the acts asked for, and ONLY those (see
+# act_columns). Read by position: the fake cursor of the test suite has no
+# `description`, and neither should this need one.
+EVENT_HEADER_COLUMNS = ("id", "name", "event_date", "status")
 
-# Columns migrations 027 and 029 add. Checked before reading so a pending
-# migration reports itself instead of blowing up as a Postgres UndefinedColumn.
+# The video columns, by the migration that adds them. Checked before reading so
+# a pending migration reports itself instead of blowing up as a Postgres
+# UndefinedColumn.
+COLUMNS_FROM_MIGRATION_022 = ("faceoff_video_id",)
 COLUMNS_FROM_MIGRATION_027 = (
     "live_video_id",
     "live_video_title",
@@ -209,11 +219,17 @@ COLUMNS_FROM_MIGRATION_029 = (
     "weighin_video_id",
     "weighin_video_title",
 )
+COLUMNS_FROM_MIGRATION_033 = (
+    "press_video_id",
+    "press_video_title",
+)
 
 # Each group with the file that adds it, so the abort names the migration to run.
 REQUIRED_MIGRATIONS = (
+    ("db/migrations/022_events_faceoff.sql", COLUMNS_FROM_MIGRATION_022),
     ("db/migrations/027_events_live_video.sql", COLUMNS_FROM_MIGRATION_027),
     ("db/migrations/029_events_weighin_video.sql", COLUMNS_FROM_MIGRATION_029),
+    ("db/migrations/033_events_press_video.sql", COLUMNS_FROM_MIGRATION_033),
 )
 REQUIRED_COLUMNS = tuple(
     column for _migration, columns in REQUIRED_MIGRATIONS for column in columns
@@ -290,8 +306,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="fijar_videos_evento",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
-            "Fija a mano el video del careo, del pesaje y/o del directo de un\n"
-            "evento. Sin --aplicar solo ensena el antes y el despues."
+            "Fija a mano el video del careo, del pesaje, de la rueda de prensa\n"
+            "y/o del directo de un evento. Sin --aplicar solo ensena el antes y\n"
+            "el despues."
         ),
         epilog=(
             "El directo tiene tres palancas, y solo se puede usar una a la vez:\n"
@@ -308,6 +325,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--evento", type=int, required=True, help="events.id")
     parser.add_argument("--careo", metavar="VIDEO_ID", help="id del careo")
     parser.add_argument("--pesaje", metavar="VIDEO_ID", help="id del pesaje")
+    parser.add_argument(
+        "--rueda",
+        metavar="VIDEO_ID",
+        help=(
+            "id de la rueda de prensa: escribe press_video_id y "
+            "press_video_title (el titulo REAL, pedido al oembed). Solo se "
+            "rellena a mano, con esto: ningun cron la toca. Necesita la "
+            "migracion 033"
+        ),
+    )
     directo = parser.add_mutually_exclusive_group()
     directo.add_argument(
         "--directo",
@@ -349,9 +376,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "escribe el id aunque el oembed no conteste; el titulo quedara a "
-            "NULL (nunca se deja el titulo viejo con un id nuevo). Solo careo "
-            "y pesaje: un directo sin titulo la web no lo pinta, asi que no "
-            "se escribe"
+            "NULL (nunca se deja el titulo viejo con un id nuevo). Solo careo, "
+            "pesaje y rueda: un directo sin titulo la web no lo pinta, asi que "
+            "no se escribe"
         ),
     )
     return parser
@@ -607,15 +634,33 @@ def missing_columns(cursor, columns: tuple[str, ...]) -> list[str]:
     return [column for column in columns if column not in present]
 
 
-def read_event(cursor, event_id: int) -> dict | None:
-    """The event row as a dict, read by position (no cursor.description)."""
+def act_columns(acts) -> tuple[str, ...]:
+    """The id and title columns of these acts, in ACTS order.
+
+    It is what read_event reads after the header and what has to exist first.
+    Only the acts asked for, on purpose: a migration that is still pending (033,
+    the press conference) then blocks ITS act and nothing else. When every
+    column was required, --ocultar-directo on a fight night would have aborted
+    asking for a migration it does not use.
+    """
+    return tuple(
+        column
+        for act in ACTS
+        if act in acts
+        for column in (ID_COLUMN[act], TITLE_COLUMN[act])
+    )
+
+
+def read_event(cursor, event_id: int, columns: tuple[str, ...]) -> dict | None:
+    """The header plus `columns` of the event, as a dict read by position."""
+    selected = EVENT_HEADER_COLUMNS + tuple(columns)
     cursor.execute(
-        f"SELECT {', '.join(EVENT_COLUMNS)} FROM events WHERE id = %s", (event_id,)
+        f"SELECT {', '.join(selected)} FROM events WHERE id = %s", (event_id,)
     )
     row = cursor.fetchone()
     if row is None:
         return None
-    return dict(zip(EVENT_COLUMNS, row))
+    return dict(zip(selected, row))
 
 
 def _dsn(escribir: bool = False) -> str:
@@ -662,8 +707,8 @@ def main(argv=None) -> int:
     )
     if not peticion_cruda and interruptor is None:
         print(
-            "ABORTA: hay que dar al menos --careo, --pesaje, --directo, "
-            "--quitar-directo u --ocultar-directo."
+            "ABORTA: hay que dar al menos --careo, --pesaje, --rueda, "
+            "--directo, --quitar-directo u --ocultar-directo."
         )
         return 2
 
@@ -747,9 +792,10 @@ def main(argv=None) -> int:
     conn = _connect(_dsn(escribir=args.aplicar))
     cur = conn.cursor()
 
-    # Todas las columnas que lee read_event, y no solo las del acto pedido:
-    # la lectura es una sola SELECT con todas.
-    faltan = missing_columns(cur, REQUIRED_COLUMNS)
+    # Solo las columnas de los actos pedidos, que son las que lee read_event:
+    # una migracion pendiente bloquea a su acto y a nada mas (ver act_columns).
+    columnas = act_columns(requested)
+    faltan = missing_columns(cur, columnas)
     if faltan:
         print()
         print(
@@ -762,7 +808,7 @@ def main(argv=None) -> int:
         conn.close()
         return 1
 
-    current = read_event(cur, args.evento)
+    current = read_event(cur, args.evento, columnas)
     if current is None:
         print()
         print("ABORTA: no existe events.id=%s" % args.evento)
@@ -858,7 +904,7 @@ def main(argv=None) -> int:
 
     print()
     print("COMPROBACION EN CALIENTE")
-    despues = read_event(cur, args.evento)
+    despues = read_event(cur, args.evento, columnas)
     for change in changes:
         print(
             "  %-22s %s" % (change.column, _muestra((despues or {}).get(change.column)))
@@ -866,9 +912,9 @@ def main(argv=None) -> int:
     conn.close()
 
     # Solo el directo sale en la portada (careo y pesaje viven en la ficha y en
-    # /en-vivo, con 60 s de cache), y revalidar tiene su coste: tambien vacia
-    # las caches de UFC TV que se leen desde la portada. Por eso no se hace
-    # para los otros.
+    # /en-vivo, la rueda de prensa en la ficha; todos con 60 s de cache), y
+    # revalidar tiene su coste: tambien vacia las caches de UFC TV que se leen
+    # desde la portada. Por eso no se hace para los otros.
     if any(change.column in COLUMNS_FROM_MIGRATION_027 for change in changes):
         refresh_home_page()
     return 0
