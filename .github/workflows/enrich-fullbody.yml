@@ -23,6 +23,20 @@ on:
     # a diario y una foto que ufc.com publica el jueves no puede esperar cinco
     # dias. Repetirlo no puede romper nada: cada UPDATE es aditivo (COALESCE,
     # solo rellena NULLs) y las fichas sin pagina en ufc.com se saltan igual.
+    #
+    # NO FIGHT-WEEK SECOND PASS HERE, unlike enrich-photos and backfill-standing
+    # (decided 22-oct-2026, measured). The Thursday-night manual dispatches
+    # (--limit 50) wrote 2 fighters on 15-oct (run 38808335237) and 0 on 22-oct
+    # (run 39844021718, 46 pages resolved): the athlete-page hero this pass
+    # reads lags the fight-week batch. Asaf Chopurov's still showed
+    # SHADOW_Fighter_fullLength_RED.png at 20:10Z, 3h45 after his photos hit
+    # ufc.com. A debutant's body on the card comes from the event page's
+    # standing photo (backfill-standing's second pass; the web falls back
+    # full_body -> standing). And there is no upcoming-cards scope to give it:
+    # every scheduled run is the whole gap sweep (1,756 fighters on 22-oct, p50
+    # 27 min over its last 88 runs), and --limit 50 only reaches the upcoming
+    # tier because 19 ranked targets come first (19 + 25 = 44): the fixed-limit
+    # trap backfill-standing.yml documents. Needs an --upcoming scope first.
     - cron: "0 5 * * *"
   workflow_dispatch:
     inputs:

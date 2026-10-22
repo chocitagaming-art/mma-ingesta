@@ -34,6 +34,16 @@ which never writes NULL/empty over a stored value. Since targets are walked
 newest-first, a fighter on several events keeps the photo of the most recent
 one. Re-dispatching is always safe. --dry-run previews without writing.
 
+--upcoming (fight-week evening pass, 22-oct-2026) narrows round A to the
+events with status='upcoming' and skips round B (it only probes completed
+events). ufc.com uploads the fight-week standing photos (*_L_MM-DD.png) on the
+Thursday evening, and only the upcoming card's page serves them. The full
+sweep also refetches the 31 completed pages, and those older cards then
+overwrite the legacy column (the sentence above does not hold for it: the
+newest-first walk plus new-value-wins leaves the OLDEST photo). Replayed
+read-only on 22-oct at 20:35Z: --upcoming left 26 of the 28 UFC 333 corners
+on their _10-24 photo in 14 s, the 40-event sweep only 18, in 89 s.
+
 Fetching reuses the upcoming-events session (browser UA, warm-up request) and
 per-request delay.
 
@@ -42,6 +52,7 @@ Usage:
     python -m src.scrapers.backfill_standing_photos --limit 20           # partial pass
     python -m src.scrapers.backfill_standing_photos                      # all ufc.com events
     python -m src.scrapers.backfill_standing_photos --lookback-days 365  # wider slug deduction
+    python -m src.scrapers.backfill_standing_photos --upcoming           # upcoming cards only
 """
 
 from __future__ import annotations
@@ -118,16 +129,20 @@ def guess_ufc_slug(name: str, event_date: date | None) -> list[str]:
     return candidates
 
 
-def _get_target_events(connection, limit: int | None = None) -> list[tuple[int, str]]:
+def _get_target_events(
+    connection, limit: int | None = None, *, upcoming_only: bool = False
+) -> list[tuple[int, str]]:
     """(event_id, slug) of every ufc.com-sourced event, newest first.
 
     Completed events are included on purpose: ufc.com keeps their pages live and
-    still serves the bout view with the standing photos.
+    still serves the bout view with the standing photos. upcoming_only keeps
+    just the status='upcoming' ones (9 of the 40 on 22-oct-2026).
     """
-    sql = """
+    status_filter = " AND status = 'upcoming'" if upcoming_only else ""
+    sql = f"""
         SELECT id, source_id
         FROM events
-        WHERE source = %s
+        WHERE source = %s{status_filter}
         ORDER BY event_date DESC NULLS LAST, id DESC
     """
     params: list = [SOURCE]
@@ -259,9 +274,10 @@ def backfill(
     dry_run: bool = False,
     limit: int | None = None,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+    upcoming_only: bool = False,
 ) -> Counter:
     counts: Counter = Counter()
-    targets = _get_target_events(connection, limit=limit)
+    targets = _get_target_events(connection, limit=limit, upcoming_only=upcoming_only)
     total = len(targets)
     counts["events"] = total
     match = _make_matcher(get_all_fighters(connection))
@@ -284,12 +300,17 @@ def backfill(
         )
 
     # Round B: recently completed events with no ufc.com slug (ufcstats imports)
-    # — deduce candidate slugs from name/date and probe each one.
-    deduced = _get_recent_events_without_source(connection, lookback_days)
-    LOGGER.info(
-        "completed events without source='ufc.com' in the last %d days: %d",
-        lookback_days, len(deduced),
-    )
+    # — deduce candidate slugs from name/date and probe each one. Completed only,
+    # so the upcoming pass has nothing to do here.
+    if upcoming_only:
+        LOGGER.info("--upcoming: skipping the deduced-slug round (completed events)")
+        deduced = []
+    else:
+        deduced = _get_recent_events_without_source(connection, lookback_days)
+        LOGGER.info(
+            "completed events without source='ufc.com' in the last %d days: %d",
+            lookback_days, len(deduced),
+        )
     for event_id, name, event_date in deduced:
         resolved: tuple[str, list[ParsedBout]] | None = None
         for slug in guess_ufc_slug(name, event_date):
@@ -330,7 +351,7 @@ def backfill(
     return counts
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Backfill fighters.standing_body_url from ufc.com event bout views."
     )
@@ -344,7 +365,16 @@ def main() -> None:
         help="Also deduce ufc.com slugs for completed events without "
              "source='ufc.com' in this window (default %(default)s).",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--upcoming", action="store_true",
+        help="Only ufc.com events with status='upcoming'; skips the deduced-slug "
+             "round (fight-week evening pass).",
+    )
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
     configure_logging()
 
     settings = get_settings()
@@ -359,6 +389,7 @@ def main() -> None:
         counts = backfill(
             connection, fetch,
             dry_run=args.dry_run, limit=args.limit, lookback_days=args.lookback_days,
+            upcoming_only=args.upcoming,
         )
 
     keys = [

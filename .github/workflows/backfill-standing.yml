@@ -7,7 +7,9 @@ name: Backfill standing photos
 # after every fight) but NULL/empty never overwrites a stored value, so
 # re-dispatching is always safe.
 # Weekly cron (Mondays 07:00 UTC, after the 06:00 daily refresh) plus a daily
-# pass at 06:40 UTC. HISTORY, so nobody re-introduces the bug: the weekly cron
+# pass at 06:40 UTC, both over the whole catalogue, and a Thursday/Friday
+# 20:40 UTC pass over the upcoming cards only (--upcoming, since 22-oct-2026).
+# HISTORY, so nobody re-introduces the bug: the weekly cron
 # used to run with --limit 8 "to sweep only the most recent events", but the DB
 # holds exactly 8 upcoming ufc.com events, and _get_target_events orders by
 # event_date DESC — so the eight future cards ate the whole quota and the sweep
@@ -22,6 +24,42 @@ on:
     # anunciando los combates; esperar al lunes siguiente significa llegar
     # despues de la velada.
     - cron: "40 6 * * *"
+    # FIGHT-WEEK SECOND PASS, Thursday and Friday evening (22-oct-2026). The
+    # bout view of the event page serves the fight-week standing photo
+    # (*_L_MM-DD.png / *_R_MM-DD.png) from THURSDAY evening on: S3 Last-Modified
+    # of the originals, 13 cards from 1-aug to 24-oct-2026, first file always
+    # on the Thursday, 16:19Z-22:20Z, batch complete by 19:51Z on 12 of 13,
+    # plus a lone Friday upload (17:04-20:31Z) on 4 of the 12 past weeks, two
+    # of them debutants. The 06:40 cron really fires at 11:08-16:38Z (p50
+    # 13:00Z, 17 runs since 8-oct), before the batch. On 22-oct it ran at
+    # 12:19-12:24Z and the UFC 333 batch landed at 16:19-16:24Z; at 20:04Z the
+    # event page already served all 26 *_10-24.png and the DB had none of them.
+    # Asaf Chopurov (9147, debutant, blue corner) was the only one of the 28
+    # corners with no body photo at all, and his athlete page still showed the
+    # SHADOW silhouette as hero at 20:10Z, so enrich-fullbody had nothing to
+    # give him: this pass is the one that does. Replayed offline on that page
+    # against the DB, it fills standing_body_url_r for him and for Yakhyaev.
+    # 20:40Z: after the batch even if GitHub ran it on time, and GitHub starts
+    # evening crons late too (the 20:00Z slot of refresh-weighins fired 107-343
+    # min late on 49 evenings since 3-sep, p50 156), so this lands ~22:30Z-
+    # 02:25Z: after the Thursday batch, and on Friday hours before a Saturday
+    # card starts (14:00Z Abu Dhabi, 22:00Z US).
+    # 10 min after enrich-photos' 20:30 second pass, so ufc.com is not crawled
+    # by both at once.
+    # SCOPE: --upcoming, picked in the step below by this EXACT string. Not the
+    # --limit 40 every other cron gets: that is the whole ufc.com catalogue (9
+    # upcoming + 31 completed = 40 events on 22-oct), and run 39777373231 (the
+    # 06:40 cron, 22-oct) fetched 40 pages, took a 403 on ufc-176 and wrote 175
+    # legacy UPDATEs, all on the 31 completed cards (0 on the 9 upcoming, 0
+    # directional): the newest-first walk flips each veteran to his newest
+    # card's photo and back to his oldest. Replayed read-only the same day at
+    # 20:35Z on the live pages: --upcoming fetches the 9 upcoming pages (the
+    # same 403 included) in 14 s, fills the same 2 directional gaps (Chopurov _R,
+    # Yakhyaev _R) and leaves 26 of the 28 UFC 333 corners on their _10-24
+    # photo; the catalogue sweep takes 89 s and 226 UPDATEs and leaves 18,
+    # because eight veterans end on an older card's photo.
+    # tests/test_fight_week_photo_pass.py pins day, hour and scope.
+    - cron: "40 20 * * 4,5"
   workflow_dispatch:
     inputs:
       limit:
@@ -30,6 +68,10 @@ on:
         default: ""
       dry_run:
         description: "Dry-run: parse + match, no writes"
+        type: boolean
+        default: false
+      upcoming:
+        description: "Only upcoming ufc.com cards, no deduced-slug round (the Thursday/Friday evening pass)"
         type: boolean
         default: false
 
@@ -73,9 +115,14 @@ jobs:
             # muy por debajo del timeout de 30 min. Y todo es aditivo: NULL
             # nunca pisa un valor guardado, asi que de mas no hace dano.
             ARGS="--limit 40"   # diario y semanal: todo el catalogo de ufc.com
+            # Fight-week evening pass (22-oct-2026): upcoming cards only, see
+            # the cron. Exact-string match, so the daily and the weekly keep
+            # their --limit 40.
+            if [ "${{ github.event.schedule }}" = "40 20 * * 4,5" ]; then ARGS="--upcoming"; fi
           else
             if [ -n "${{ inputs.limit || '' }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
             if [ "${{ inputs.dry_run || false }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+            if [ "${{ inputs.upcoming || false }}" = "true" ]; then ARGS="$ARGS --upcoming"; fi
           fi
           python -m src.scrapers.backfill_standing_photos $ARGS
         env:
