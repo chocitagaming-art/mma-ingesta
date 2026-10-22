@@ -50,10 +50,11 @@ on:
     # --limit 40 every other cron gets: that is the whole ufc.com catalogue (9
     # upcoming + 31 completed = 40 events on 22-oct), and run 39777373231 (the
     # 06:40 cron, 22-oct) fetched 40 pages, took a 403 on ufc-176 and wrote 175
-    # legacy UPDATEs and 0 directional ones, every one an older card
-    # overwriting a newer photo. Replayed read-only the same day at 20:35Z on
-    # the live pages: --upcoming fetches the 9 upcoming pages (the same 403
-    # included) in 14 s, fills the same 2 directional gaps (Chopurov _R,
+    # legacy UPDATEs, all on the 31 completed cards (0 on the 9 upcoming, 0
+    # directional): the newest-first walk flips each veteran to his newest
+    # card's photo and back to his oldest. Replayed read-only the same day at
+    # 20:35Z on the live pages: --upcoming fetches the 9 upcoming pages (the
+    # same 403 included) in 14 s, fills the same 2 directional gaps (Chopurov _R,
     # Yakhyaev _R) and leaves 26 of the 28 UFC 333 corners on their _10-24
     # photo; the catalogue sweep takes 89 s and 226 UPDATEs and leaves 18,
     # because eight veterans end on an older card's photo.

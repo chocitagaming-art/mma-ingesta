@@ -23,11 +23,14 @@ pass must be the UPCOMING-CARDS scope and nothing wider:
 - backfill-standing: its default is NOT. The scheduled branch hands every cron
   ``--limit 40``, i.e. the whole ufc.com catalogue (9 upcoming + 31 completed
   events on 22-oct-2026, exactly 40). Run 39777373231 (06:40 cron, 22-oct):
-  40 event pages, 1 x 403 on ufc-176, 175 legacy UPDATEs and 0 directional
-  ones, all of them older cards overwriting the newer photo (BACKLOG: "deja la
-  foto de pie MAS VIEJA"). So the evening pass needs ``--upcoming`` (status =
-  'upcoming', no deduced-slug round), selected by its exact cron string, while
-  the daily and the weekly crons keep their ``--limit 40``.
+  40 event pages, 1 x 403 on ufc-176, 175 legacy UPDATEs, all on completed
+  cards (0 on the upcoming ones, 0 directional), and each veteran ends on his
+  OLDEST card's photo (BACKLOG: "deja la foto de pie MAS VIEJA"). Replayed
+  read-only at 20:35Z: 18 of the 28 UFC 333 corners end on their _10-24 photo
+  after that sweep, 26 after an upcoming-only pass. So the evening pass needs
+  ``--upcoming`` (status = 'upcoming', no deduced-slug round), selected by its
+  exact cron string, while the daily and the weekly crons keep their
+  ``--limit 40``.
 
 These tests read the YAML and the CLI parser; they never run a pass. No
 network, no database.
