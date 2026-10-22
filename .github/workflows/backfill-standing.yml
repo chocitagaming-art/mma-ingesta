@@ -22,6 +22,31 @@ on:
     # anunciando los combates; esperar al lunes siguiente significa llegar
     # despues de la velada.
     - cron: "40 6 * * *"
+    # FIGHT-WEEK SECOND PASS, Thursday and Friday evening (22-oct-2026). The
+    # bout view of the event page serves the fight-week standing photo
+    # (*_L_MM-DD.png / *_R_MM-DD.png) from THURSDAY evening on: S3 Last-Modified
+    # of the originals, 13 cards from 1-aug to 24-oct-2026, first file always
+    # on the Thursday, 16:19Z-22:20Z, batch complete by 19:51Z on 12 of 13,
+    # plus a lone Friday upload (17:04-20:31Z) on 4 of the 12 past weeks, two
+    # of them debutants. The 06:40 cron really fires at 11:08-16:38Z (p50
+    # 13:00Z, 17 runs since 8-oct), before the batch. On 22-oct it ran at
+    # 12:19-12:24Z and the UFC 333 batch landed at 16:19-16:24Z; at 20:04Z the
+    # event page already served all 26 *_10-24.png and the DB had none of them.
+    # Asaf Chopurov (9147, debutant, blue corner) was the only one of the 28
+    # corners with no body photo at all, and his athlete page still showed the
+    # SHADOW silhouette as hero at 20:10Z, so enrich-fullbody had nothing to
+    # give him: this pass is the one that does. Replayed offline on that page
+    # against the DB, it fills standing_body_url_r for him and for Yakhyaev.
+    # 20:40Z: after the batch even if GitHub ran it on time, and GitHub starts
+    # evening crons late too (the 20:00Z slot of refresh-weighins fired 107-343
+    # min late on 49 evenings since 3-sep, p50 156), so this lands ~22:30Z-
+    # 02:25Z: after the Thursday batch, and on Friday hours before a Saturday
+    # card starts (14:00Z Abu Dhabi, 22:00Z US).
+    # 10 min after enrich-photos' 20:30 second pass, so ufc.com is not crawled
+    # by both at once. The scheduled branch below has no per-cron check, so it
+    # runs exactly the daily pass (--limit 40, 4 min p50 and 6.4 max over the
+    # last 100 runs). tests/test_fight_week_photo_pass.py pins day, hour, scope.
+    - cron: "40 20 * * 4,5"
   workflow_dispatch:
     inputs:
       limit:

@@ -31,6 +31,32 @@ on:
   schedule:
     - cron: "30 5 * * *"     # Diario 05:30 UTC: solo carteleras proximas
     - cron: "0 4 1 * *"      # F5: dia 1 de cada mes 04:00 UTC -> barrido --all
+    # FIGHT-WEEK SECOND PASS, Thursday and Friday evening (22-oct-2026).
+    # ufc.com uploads the fight-week batch (*_MM-DD.png, named after the event
+    # date) on THURSDAY evening, after the 05:30 pass. S3 Last-Modified of the
+    # originals, 13 cards from 1-aug to 24-oct-2026: first file always on the
+    # Thursday, 16:19Z-22:20Z; batch complete by 19:51Z on 12 of 13 (22-aug:
+    # 22:20-23:28Z); and a lone Friday upload at 17:04-20:31Z on 4 of the 12
+    # past weeks, two of them debutants (Batbayar 29-aug, Luis Hernandez
+    # 26-sep). The 05:30 cron really fires at 09:36-13:26Z (p50 10:30Z, 15
+    # runs since 8-oct), so a debutant created from ESPN with no ESPN photo
+    # kept the silhouette until Friday afternoon, and it was patched by hand
+    # every Thursday night. On 22-oct the 05:30 pass ran at 10:30Z, the UFC 333
+    # batch landed at 16:19-16:24Z, and the manual dispatch at 19:53Z (run
+    # 39844015851: 2 gap fighters, 1 written) gave the debutant Asaf Chopurov
+    # his CHOPUROV_ASAF_10-24.png. On 15-oct, same dispatch at 21:14Z: 4 gap
+    # fighters, 3 written.
+    # 20:30Z: after the batch even if GitHub ran it on time, and GitHub starts
+    # evening crons late too (the 20:00Z slot of refresh-weighins fired 107-343
+    # min late on 49 evenings since 3-sep, p50 156). So this lands ~22:15Z-
+    # 02:15Z: after the Thursday batch, and on Friday still hours before a
+    # Saturday card starts (14:00Z Abu Dhabi, 22:00Z US). 10 min before
+    # backfill-standing's second pass so ufc.com is not crawled by both at once
+    # (same idea as the 05:00/05:30 offset above).
+    # It is not the "0 4 1 * *" string, so the step gives it the daily pass's
+    # scope: upcoming cards, gap fighters only (p50 0.4 min), never --all.
+    # tests/test_fight_week_photo_pass.py pins the day, the hour and the scope.
+    - cron: "30 20 * * 4,5"
   workflow_dispatch:
     inputs:
       limit:
@@ -68,6 +94,8 @@ jobs:
           if [ "${{ github.event_name }}" = "schedule" ]; then
             # F5: el cron mensual (dia 1) barre TODA la tabla; el semanal sigue
             # acotado a carteleras proximas. Ambos son aditivos (COALESCE).
+            # Every other cron (the daily 05:30 and the Thursday/Friday 20:30
+            # second pass) falls through with ARGS="": upcoming cards only.
             if [ "${{ github.event.schedule }}" = "0 4 1 * *" ]; then ARGS="--all"; fi
           else
             if [ -n "${{ inputs.limit || '' }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
