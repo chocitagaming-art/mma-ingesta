@@ -16,7 +16,10 @@ script que escribe a pelo en produccion se prueba ENTERO o no se prueba:
   7. correrlo dos veces no escribe la segunda;
   8. el directo (migracion 027) tiene tres palancas: --directo lo fija con su
      titulo real, --quitar-directo lo deja a NULL y --ocultar-directo escribe
-     el interruptor 'off' que apaga la web sin desplegar.
+     el interruptor 'off' que apaga la web sin desplegar;
+  9. la rueda de prensa (migracion 033) se fija con --rueda y el mismo trato que
+     careo y pesaje, y su migracion pendiente bloquea SOLO a la rueda: el
+     interruptor del directo no puede esperar a una migracion que no usa.
 
 NI RED NI POSTGRES. El `fetch` se inyecta y la conexion se falsea con el
 `fakedb` de conftest, que anota el SQL que se habria ejecutado. La trampa que
@@ -60,6 +63,13 @@ DIRECTO = "qM-h-OudTqM"
 DIRECTO_TITULO = "UFC 330 | Previa del Evento ¡EN VIVO!"
 DIRECTO_SEGUNDOS_EN_EMISION = 0
 
+# La rueda de prensa que eligio el dueno para el UFC 333 (evento 1093) el
+# 22-oct-2026: canal "MMA Espanol", NO oficial (una resubida). Titulo y
+# duracion medidos ese dia con el oembed y con /watch.
+RUEDA = "g3h-jwpkxJU"
+RUEDA_TITULO = "UFC 333: CONFERENCIA DE PRENSA COMPLETA EN ESPAÑOL"
+RUEDA_SEGUNDOS = 1402
+
 EVENTO = 1090
 
 TITULOS = {
@@ -68,6 +78,7 @@ TITULOS = {
     SHORT: SHORT_TITULO,
     CAREO_VIEJO_LEGITIMO: "Noche UFC: Weigh-In Faceoffs",
     DIRECTO: DIRECTO_TITULO,
+    RUEDA: RUEDA_TITULO,
 }
 DURACIONES = {
     CAREO: CAREO_SEGUNDOS,
@@ -75,6 +86,7 @@ DURACIONES = {
     SHORT: SHORT_SEGUNDOS,
     CAREO_VIEJO_LEGITIMO: 127,  # 2:07, medido contra YouTube el 18-sep-2026
     DIRECTO: DIRECTO_SEGUNDOS_EN_EMISION,
+    RUEDA: RUEDA_SEGUNDOS,
 }
 
 
@@ -138,6 +150,8 @@ FILA_1090_TRAS_EL_ARREGLO_A_MANO = {
     "weighin_video_title": None,
     "live_video_id": None,
     "live_video_title": None,
+    "press_video_id": None,
+    "press_video_title": None,
 }
 
 
@@ -175,7 +189,11 @@ class BaseFalsa:
             self.lecturas += 1
             if self.fila is None:
                 return []
-            return [tuple(self.fila[c] for c in fijar.EVENT_COLUMNS)]
+            # Contesta justo las columnas que nombra la SELECT, en su orden, como
+            # Postgres. Una columna que la fila no tiene es un KeyError: asi falla
+            # aqui leer una columna que aun no existe (migracion pendiente).
+            pedidas = plano[len("select"):].split(" from events", 1)[0].split(",")
+            return [tuple(self.fila[c.strip()] for c in pedidas)]
         if plano.startswith("update events"):
             self.updates.append((sql, params))
             columnas = [
@@ -905,10 +923,14 @@ def test_directo_off_no_cuela_y_senala_el_interruptor(ejecutar, capsys):
     assert "--ocultar-directo" in capsys.readouterr().out
 
 
-def test_careo_y_pesaje_siguen_sin_aceptar_urls(ejecutar):
-    """La URL solo se acepta en el directo; el careo sigue como estaba."""
+@pytest.mark.parametrize(
+    "acto, video_id", [("--careo", CAREO), ("--rueda", RUEDA)], ids=["careo", "rueda"]
+)
+def test_careo_y_pesaje_siguen_sin_aceptar_urls(ejecutar, acto, video_id):
+    """La URL solo se acepta en el directo; el careo sigue como estaba, y la
+    rueda de prensa se fija como el careo: con el id pelado."""
     codigo, _base, youtube, escrituras = ejecutar(
-        "--evento", str(EVENTO), "--careo", fijar.watch_url(CAREO), "--aplicar"
+        "--evento", str(EVENTO), acto, fijar.watch_url(video_id), "--aplicar"
     )
 
     assert codigo == 1
@@ -1018,8 +1040,9 @@ def test_careo_sin_titulo_con_forzar_sigue_escribiendose(ejecutar):
         (("--quitar-directo",), FILA_CON_DIRECTO_FIJADO),
         (("--ocultar-directo",), FILA_CON_DIRECTO_FIJADO),
         (("--pesaje", PESAJE), FILA_1090_TRAS_EL_ARREGLO_A_MANO),
+        (("--rueda", RUEDA), FILA_1090_TRAS_EL_ARREGLO_A_MANO),
     ],
-    ids=["directo", "quitar", "ocultar", "pesaje"],
+    ids=["directo", "quitar", "ocultar", "pesaje", "rueda"],
 )
 def test_con_aplicar_hace_UN_commit_y_sin_aplicar_ninguno(
     ejecutar, palanca, fila_inicial
@@ -1163,3 +1186,248 @@ def test_el_help_avisa_de_la_espera_de_la_portada():
 
     assert "REVALIDATE_SECRET" in ayuda
     assert "%d min" % fijar.PORTADA_CACHE_MINUTOS in ayuda
+
+
+# --- 14. La rueda de prensa (migracion 033) -------------------------------
+# Decision del dueno del 22-oct-2026: la ficha tenia sitio para careo, pesaje y
+# directo, pero no para la rueda de prensa. Va en su propia pareja de columnas
+# (press_video_id + press_video_title) y se rellena SOLO a mano, con --rueda.
+RAIZ = Path(__file__).resolve().parents[1]
+MIGRACION_033 = RAIZ / "db" / "migrations" / "033_events_press_video.sql"
+COLUMNAS_RUEDA = {"press_video_id", "press_video_title"}
+
+FILA_1093 = dict(
+    FILA_1090_TRAS_EL_ARREGLO_A_MANO,
+    id=1093,
+    name="UFC 333: Volkanovski vs. Evloev",
+    event_date="2026-10-24",
+    faceoff_video_id="hVvIw8K754c",
+    faceoff_video_title="#UFC333 Volkanovski vs Evloev Careos de la Conferencia",
+)
+
+# Las columnas de antes de la 033, y una fila que todavia no las tiene: asi es
+# produccion hasta que se aplique la migracion.
+COLUMNAS_SIN_LA_033 = [c for c in fijar.REQUIRED_COLUMNS if c not in COLUMNAS_RUEDA]
+FILA_SIN_LA_033 = {
+    k: v for k, v in FILA_1090_TRAS_EL_ARREGLO_A_MANO.items() if k not in COLUMNAS_RUEDA
+}
+
+
+def test_rueda_escribe_id_y_titulo_en_un_update_y_no_toca_nada_mas(ejecutar):
+    antes = dict(FILA_1093)
+    codigo, base, _youtube, escrituras = ejecutar(
+        "--evento", "1093", "--rueda", RUEDA, "--aplicar", base=BaseFalsa(FILA_1093)
+    )
+
+    assert codigo == 0
+    assert len(escrituras) == 1, "id y titulo en UN solo UPDATE"
+    sql, params = base.updates[0]
+    assert columnas_del_update(sql) == COLUMNAS_RUEDA, (
+        "la rueda no puede tocar careo, pesaje ni directo"
+    )
+    assert params[-1] == 1093
+    assert base.fila["press_video_id"] == RUEDA
+    assert base.fila["press_video_title"] == RUEDA_TITULO, "el titulo sale del oembed"
+    sin_rueda = {k: v for k, v in base.fila.items() if k not in COLUMNAS_RUEDA}
+    assert sin_rueda == {k: v for k, v in antes.items() if k not in COLUMNAS_RUEDA}
+
+
+def test_rueda_sin_aplicar_ensena_el_antes_y_el_despues_y_no_escribe(ejecutar, capsys):
+    codigo, base, _youtube, escrituras = ejecutar(
+        "--evento", "1093", "--rueda", RUEDA, base=BaseFalsa(FILA_1093)
+    )
+
+    salida = capsys.readouterr().out
+    assert codigo == 0
+    assert escrituras == []
+    assert base.fila["press_video_id"] is None
+    assert "press_video_id" in salida and "press_video_title" in salida
+    assert RUEDA_TITULO in salida
+    assert "SIMULACION" in salida
+
+
+def test_un_id_nuevo_de_rueda_sin_titulo_borra_el_titulo_viejo(ejecutar):
+    """Con --forzar se escribe, como careo y pesaje, y el titulo va a NULL."""
+    con_rueda_vieja = dict(
+        FILA_1093,
+        press_video_id="DHLdj5yFWmw",
+        press_video_title="UFC 333: Pre-Fight Press Conference",
+    )
+    codigo, base, _youtube, escrituras = ejecutar(
+        "--evento",
+        "1093",
+        "--rueda",
+        RUEDA,
+        "--aplicar",
+        "--forzar",
+        base=BaseFalsa(con_rueda_vieja),
+        youtube=YouTubeFalso(sin_oembed={RUEDA}),
+    )
+
+    assert codigo == 0
+    assert len(escrituras) == 1
+    assert base.fila["press_video_id"] == RUEDA
+    assert base.fila["press_video_title"] is None, (
+        "nunca el rotulo viejo sobre el video nuevo"
+    )
+
+
+def test_rueda_que_no_resuelve_no_se_escribe_sin_forzar(ejecutar):
+    codigo, base, _youtube, escrituras = ejecutar(
+        "--evento",
+        "1093",
+        "--rueda",
+        RUEDA,
+        "--aplicar",
+        base=BaseFalsa(FILA_1093),
+        youtube=YouTubeFalso(sin_oembed={RUEDA}),
+    )
+
+    assert codigo == 1
+    assert escrituras == []
+    assert base.fila["press_video_id"] is None
+
+
+def test_la_rueda_avisa_de_short_y_la_real_no(ejecutar, capsys):
+    """El aviso gordo vale para la rueda: una rueda de prensa nunca dura 17 s."""
+    ejecutar("--evento", "1093", "--rueda", RUEDA, base=BaseFalsa(FILA_1093))
+    assert "SHORT" not in capsys.readouterr().out.upper()
+
+    ejecutar("--evento", "1093", "--rueda", SHORT, base=BaseFalsa(FILA_1093))
+    assert "AVISO GORDO" in capsys.readouterr().out
+
+
+def test_la_rueda_no_revalida_la_portada(ejecutar, capsys):
+    """Vive en la ficha (60 s de cache): revalidar vaciaria UFC TV por nada."""
+    codigo, base, _youtube, _escrituras = ejecutar(
+        "--evento",
+        "1093",
+        "--rueda",
+        RUEDA,
+        "--aplicar",
+        base=BaseFalsa(FILA_1093),
+        secreto="s3cr3t",
+    )
+
+    assert codigo == 0
+    assert base.revalidaciones == []
+    assert "PORTADA" not in capsys.readouterr().out
+
+
+def test_si_falta_la_migracion_033_la_rueda_aborta_diciendolo(ejecutar, capsys):
+    """Aborta ANTES de leer el evento, y nombra solo la 033."""
+    base = BaseFalsa(FILA_SIN_LA_033, columnas_presentes=COLUMNAS_SIN_LA_033)
+
+    codigo, base, _youtube, escrituras = ejecutar(
+        "--evento", str(EVENTO), "--rueda", RUEDA, "--aplicar", base=base
+    )
+
+    salida = capsys.readouterr().out
+    assert codigo == 1
+    assert escrituras == []
+    assert base.lecturas == 0, "no se lee una fila con columnas que no existen"
+    assert "033_events_press_video.sql" in salida
+    assert "press_video_id" in salida and "press_video_title" in salida
+    assert "027" not in salida and "029" not in salida, "esas estan aplicadas"
+
+
+@pytest.mark.parametrize(
+    "palanca, fila_inicial",
+    [
+        (("--careo", SHORT), FILA_SIN_LA_033),
+        (("--pesaje", PESAJE), FILA_SIN_LA_033),
+        (("--directo", DIRECTO), FILA_SIN_LA_033),
+        (("--quitar-directo",), dict(FILA_SIN_LA_033, live_video_id=DIRECTO)),
+        (("--ocultar-directo",), dict(FILA_SIN_LA_033, live_video_id=DIRECTO)),
+    ],
+    ids=["careo", "pesaje", "directo", "quitar", "ocultar"],
+)
+def test_la_033_pendiente_no_bloquea_los_otros_actos(
+    ejecutar, capsys, palanca, fila_inicial
+):
+    """Una migracion nueva y pendiente bloquea SOLO a su acto.
+
+    Si el script llega a main antes de que se aplique la 033, --ocultar-directo
+    tiene que seguir funcionando en plena velada. Con las columnas de la 033
+    exigidas para todo, el interruptor del directo abortaria pidiendo una
+    migracion que no usa.
+    """
+    base = BaseFalsa(fila_inicial, columnas_presentes=COLUMNAS_SIN_LA_033)
+
+    codigo, base, _youtube, escrituras = ejecutar(
+        "--evento", str(EVENTO), *palanca, "--aplicar", base=base
+    )
+
+    salida = capsys.readouterr().out
+    assert codigo == 0, salida
+    assert len(escrituras) == 1
+    assert "033" not in salida
+    assert "press_video" not in salida, "ni se lee ni se ensena lo que no se ha pedido"
+
+
+def test_la_rueda_solo_la_escribe_este_script_a_mano():
+    """Decision del dueno: ningun cron toca la rueda. Ni la escribe ni la borra.
+
+    Los automatismos viven en src/ y en .github/workflows/: ninguno puede
+    nombrar estas columnas. Si un dia hace falta un lector en src/, que sea
+    una decision a la vista, no algo que se cuele.
+    """
+    assert fijar.ID_COLUMN["rueda"] == "press_video_id"
+    assert fijar.TITLE_COLUMN["rueda"] == "press_video_title"
+    automatismos = [
+        p
+        for carpeta in (RAIZ / "src", RAIZ / ".github" / "workflows")
+        for p in carpeta.rglob("*")
+        if p.is_file() and p.suffix in {".py", ".yml", ".yaml", ".sql", ".sh"}
+    ]
+    assert automatismos, "la busqueda no ha mirado nada: la ruta esta mal"
+    nombran = [
+        str(p.relative_to(RAIZ))
+        for p in automatismos
+        if "press_video" in p.read_text(encoding="utf-8", errors="replace")
+    ]
+    assert nombran == []
+
+
+def test_la_migracion_033_anade_las_dos_columnas_sin_valor_por_defecto():
+    """Aditiva e idempotente. NULL = no se pinta nada: ni DEFAULT ni NOT NULL."""
+    texto = MIGRACION_033.read_text(encoding="utf-8")
+    # Solo se quitan las lineas de comentario enteras: el texto del COMMENT
+    # dice "--rueda", y cortar en cada "--" partiria la sentencia por la mitad.
+    sql = "\n".join(
+        linea for linea in texto.splitlines() if not linea.lstrip().startswith("--")
+    )
+    plano = " ".join(sql.split())
+
+    for columna in sorted(COLUMNAS_RUEDA):
+        assert f"ALTER TABLE events ADD COLUMN IF NOT EXISTS {columna} TEXT;" in plano
+        assert f"COMMENT ON COLUMN events.{columna} IS" in plano
+    # Fuera los COMMENT: su texto explica, y puede decir "update" sin ejecutarlo.
+    sentencias = " ".join(
+        s for s in plano.split(";") if not s.strip().startswith("COMMENT ON")
+    ).upper()
+    assert "DEFAULT" not in sentencias and "NOT NULL" not in sentencias
+    assert "DROP " not in sentencias and "UPDATE " not in sentencias, (
+        "la 033 no escribe datos: la rueda la pone el operador con --rueda"
+    )
+    assert "SET LOCK_TIMEOUT" in sentencias, "events la lee la web en cada visita"
+
+
+@pytest.mark.parametrize(
+    "migracion, columnas", fijar.REQUIRED_MIGRATIONS, ids=lambda v: str(v)[:40]
+)
+def test_cada_migracion_que_nombra_el_script_existe_y_crea_sus_columnas(
+    migracion, columnas
+):
+    """El ABORTA dice "Aplica <fichero>": que ese fichero exista y cree eso."""
+    plano = " ".join((RAIZ / migracion).read_text(encoding="utf-8").split())
+    for columna in columnas:
+        assert f"ADD COLUMN IF NOT EXISTS {columna} " in plano, (migracion, columna)
+
+
+def test_el_help_explica_la_rueda():
+    ayuda = " ".join(fijar.build_parser().format_help().split())
+
+    assert "--rueda" in ayuda
+    assert "rueda de prensa" in ayuda
+    assert "press_video_id" in ayuda
