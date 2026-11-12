@@ -24,10 +24,13 @@ bouts in <h4> lines inside .field--name-text blocks:
 
 Most lines are "<weight class> Bout: Red (lbs) vs Blue (lbs)", but TITLE FIGHTS
 say "<division> Championship:" instead and never carry the word "Bout" — see
-_BOUT_LINE_RE. A trailing "*" after a weight marks a missed weight. Promo
-links/paragraphs in between simply don't match the pattern and are skipped;
-a skipped line that still LOOKS like a bout is counted and logged rather than
-dropped in silence (_BOUT_SHAPE_RE).
+_BOUT_LINE_RE. Since 6-nov-2026 ufc.com also writes a template with no "Bout"
+at all ("Bantamweight: …", "Heavyweight Main Event - …") — see
+_NO_BOUT_LINE_RE. A trailing "*" (or a run of them) after a weight marks a
+missed weight. Promo links/paragraphs in between simply don't match the pattern
+and are skipped; a skipped line that still LOOKS like a bout is counted and
+logged rather than dropped in silence (_BOUT_SHAPE_RE), and it turns the job
+red (exit_status).
 
 LIMITATION: the article lands a few hours after the ceremony (Friday around
 noon ET) and its publication is editorial — a card without an article (rare,
@@ -60,6 +63,7 @@ import argparse
 import json
 import logging
 import re
+import sys
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -97,6 +101,23 @@ LOOKAHEAD_DAYS = 2
 # parenthesised numbers through, and while match_bout would refuse to weld it
 # onto the wrong athlete, it could still write a wrong number onto the right
 # pair.
+# "A (lbs) vs B (lbs)": the part every template shares, written ONCE and used by
+# both line patterns below, so the next asterisk fix cannot land in one copy and
+# miss the other (that is exactly how the tripwire went mute on 2026-08-15).
+_WEIGHTS_TAIL = r"""
+        (?P<red>.+?)\s*
+        # The over-limit asterisk sits EITHER side of the closing bracket:
+        # "(158)*" (5 of 24 articles) and "(157.5*)" (2 of 24) are both real.
+        # It is a footnote marker, and the footnotes are numbered with RUNS of
+        # asterisks: `*`, `**`, and on 29-ago (event 1065) `***` — "Xiong Jingnan
+        # (117)***", lost because this said {1,2}. Any run marks the same thing:
+        # that corner missed weight.
+        \(\s*(?P<red_lbs>\d{2,3}(?:\.\d+)?)\s*(?P<red_miss_in>\*+)?\s*\)\s*(?P<red_miss>\*+)?\s*
+        vs\.?\s*
+        (?P<blue>.+?)\s*
+        \(\s*(?P<blue_lbs>\d{2,3}(?:\.\d+)?)\s*(?P<blue_miss_in>\*+)?\s*\)\s*(?P<blue_miss>\*+)?\s*$
+"""
+
 _BOUT_LINE_RE = re.compile(
     r"""^(?:.*?-\s*)?                     # "Main Event -" etc. (optional)
         # "<class> Bout:" / "<div> Championship:" / "Catchweight Bout (130-lbs):"
@@ -105,15 +126,44 @@ _BOUT_LINE_RE = re.compile(
         # parenthesised number that belongs to NOBODY. Leaving it to <red> would
         # let "130" be read as an athlete's weight.
         [^:]*\b(?:Bout|Championship|Title)(?:\s*\([^)]*\))?\s*:\s*
-        (?P<red>.+?)\s*
-        # The over-limit asterisk sits EITHER side of the closing bracket:
-        # "(158)*" (5 of 24 articles) and "(157.5*)" (2 of 24) are both real.
-        # One run of one or two: `*` and `**` are two different footnotes.
-        \(\s*(?P<red_lbs>\d{2,3}(?:\.\d+)?)\s*(?P<red_miss_in>\*{1,2})?\s*\)\s*(?P<red_miss>\*{1,2})?\s*
-        vs\.?\s*
-        (?P<blue>.+?)\s*
-        \(\s*(?P<blue_lbs>\d{2,3}(?:\.\d+)?)\s*(?P<blue_miss_in>\*{1,2})?\s*\)\s*(?P<blue_miss>\*{1,2})?\s*$
-    """,
+    """
+    + _WEIGHTS_TAIL,
+    re.VERBOSE | re.IGNORECASE,
+)
+
+# THE TEMPLATE WITHOUT "Bout" (ufc.com, 6-nov-2026, event 1095; seen once
+# before on 29-ago, event 1065, and missed in silence):
+#
+#     Heavyweight Main Event - Waldo Cortes Acosta (262) vs Johnny Walker (239)
+#     Strawweight Co-Main Event - Tatiana Suarez (115.5) vs Virna Jandiroba (116)
+#     Bantamweight: Davey Grant (135.5) vs Elijah Smith (135.5)
+#     Co-Main Event - Women’s Strawweight: Yan Xiaonan (115.5) vs Denise Gomes (115)
+#
+# Without the keyword, the gate that keeps prose out (see the 🪤 above) has to
+# be something else, and it is the DIVISION: the line must START with an exact
+# weight-class name from a closed list — optionally behind "(Co-)Main Event -",
+# "UFC", "Interim" or "Women's" — and the division must be followed by ":" or by
+# "(Co-)Main Event -", never by free text. Title fights of this template have
+# not been seen yet (the 1095 had none); "<division> Championship/Title [Bout]"
+# is accepted in front of either ending so UFC 334's two title lines are read
+# whichever way they come — and if they come some other way, the tripwire turns
+# the job red (exit_status) instead of losing them in silence.
+_DIVISIONS = (
+    r"(?:Strawweight|Flyweight|Bantamweight|Featherweight|Lightweight|"
+    r"Welterweight|Middleweight|Light\s+Heavyweight|Heavyweight|Catchweight)"
+)
+_MAIN_EVENT = r"(?:Co-?\s*)?Main\s+Event"
+_DASH = r"[-–—]"  # hyphen, en dash, em dash
+
+_NO_BOUT_LINE_RE = re.compile(
+    rf"""^(?:{_MAIN_EVENT}\s*{_DASH}\s*)?           # "Co-Main Event -" in front (1065)
+        (?:UFC\s+)?(?:Interim\s+)?(?:Women[’']?s\s+)?(?:Interim\s+)?
+        {_DIVISIONS}
+        (?:\s+(?:(?:World\s+)?(?:Championship|Title)(?:\s+Bout)?|Bout))?
+        (?:\s*\([^)]*\))?                           # catchweight limit: nobody's
+        \s*(?::|{_MAIN_EVENT}\s*(?:{_DASH}|:))\s*   # ":" or "(Co-)Main Event -"
+    """
+    + _WEIGHTS_TAIL,
     re.VERBOSE | re.IGNORECASE,
 )
 
@@ -139,10 +189,14 @@ _BOUT_LINE_RE = re.compile(
 # runs of one or two (ufc.com uses `*` and `**` as two separate footnotes on the
 # same page). A tripwire that shares a blind spot with the thing it watches is
 # not a tripwire: it is a second copy of the bug that also reports success.
+#
+# And it happened AGAIN with the run length: `\*{0,2}` here could not see the
+# `(117)***` of event 1065 (29-ago), so that line was neither read nor counted.
+# The tripwire now takes ANY run (`\**`): it must stay looser than the parser.
 _BOUT_SHAPE_RE = re.compile(
-    r"\(\s*\d{2,3}(?:\.\d+)?\s*\*{0,2}\s*\)\s*\*{0,2}\s*"
+    r"\(\s*\d{2,3}(?:\.\d+)?\s*\**\s*\)\s*\**\s*"
     r"vs\.?\s.*?"
-    r"\(\s*\d{2,3}(?:\.\d+)?\s*\*{0,2}\s*\)",
+    r"\(\s*\d{2,3}(?:\.\d+)?\s*\**\s*\)",
     re.IGNORECASE,
 )
 
@@ -318,7 +372,9 @@ def parse_weigh_ins(html: str, counts: Counter | None = None) -> list[ParsedWeig
     for block in soup.select(".field--name-text"):
         for element in block.find_all(["h4", "p", "li"]):
             text = element.get_text(" ", strip=True).replace("\xa0", " ")
-            match = _BOUT_LINE_RE.match(text)
+            # The old template first, so every line it already read is read
+            # exactly as before (measured: 0 differences on the recent articles).
+            match = _BOUT_LINE_RE.match(text) or _NO_BOUT_LINE_RE.match(text)
             if not match:
                 if counts is not None and _BOUT_SHAPE_RE.search(text):
                     counts["bout_shaped_lines_unparsed"] += 1
@@ -566,6 +622,42 @@ def backfill(
     return counts
 
 
+def exit_status(counts: Counter) -> int:
+    """1 when a bout-shaped line could not be read, else 0.
+
+    On 6-nov (event 1095) the parser read 0 of 14 lines and the job finished
+    GREEN: the tripwire only logged. A red run is what "Notify on cron failure"
+    watches (issue + email), so this is the alarm. Measured over the 60 previous
+    runs, only that one would have gone red: 0 false alarms.
+
+    An article that is found but still empty (`article_unparseable` with no
+    bout-shaped line — the live page before the ceremony) is the normal Friday
+    morning and stays green, as does an article not published yet.
+    """
+    return 1 if counts.get("bout_shaped_lines_unparsed", 0) > 0 else 0
+
+
+def soft_warnings(counts: Counter) -> list[str]:
+    """GitHub annotations for what deserves a look but not a red run.
+
+    A bout or a corner that does not match our card (event 1091: a late
+    replacement, a name spelled differently) leaves those weights unwritten.
+    That needs a human eye, not an alarm email every pass until the card moves.
+    """
+    warnings = []
+    if counts.get("bouts_unmatched", 0):
+        warnings.append(
+            f"::warning title=Pesos sin casar::{counts['bouts_unmatched']} combate(s) del "
+            "articulo de ufc.com no casan con la cartelera de la base: sus pesos no se escriben."
+        )
+    if counts.get("corners_unlinked", 0):
+        warnings.append(
+            f"::warning title=Esquinas sin luchador::{counts['corners_unlinked']} esquina(s) sin "
+            "fighter_id en la base: sus pesos no se escriben."
+        )
+    return warnings
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Scrape official weigh-in results from ufc.com news into weigh_ins."
@@ -608,6 +700,17 @@ def main() -> None:
     print(json.dumps({key: counts.get(key, 0) for key in keys}, indent=2))
     if args.dry_run:
         print("Dry-run: nothing was written. Re-run without --dry-run to persist.")
+    for warning in soft_warnings(counts):
+        print(warning)
+    status = exit_status(counts)
+    if status:
+        print(
+            "::error title=Lineas de pesaje sin leer::ufc.com trae "
+            f"{counts['bout_shaped_lines_unparsed']} linea(s) con forma de combate que el lector "
+            "no entiende (ver los avisos 'did not parse' del log). Cambio de plantilla: revisar "
+            "_BOUT_LINE_RE/_NO_BOUT_LINE_RE en weigh_ins.py."
+        )
+    sys.exit(status)
 
 
 if __name__ == "__main__":

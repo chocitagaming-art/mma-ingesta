@@ -14,8 +14,10 @@ import re
 from collections import Counter
 from pathlib import Path
 
+import pytest
 from bs4 import BeautifulSoup
 
+from src.scrapers import weigh_ins as wi
 from src.scrapers.weigh_ins import (
     EventFight,
     ParsedWeighIn,
@@ -568,6 +570,207 @@ def test_parsed_names_never_carry_a_marker():
     for entry in parse_weigh_ins(html) + parse_weigh_ins(_REAL_ARTICLE):
         for name in (entry.red_name, entry.blue_name):
             assert re.fullmatch(r"[A-Za-zÀ-ÿ' .\-]+", name), f"marker left in {name!r}"
+
+
+# ----------------------------------------------- the template without "Bout"
+#
+# 6-nov-2026, event 1095: ufc.com stopped writing "Bout" ("Bantamweight: A (135.5)
+# vs B (135.5)", "Heavyweight Main Event - A (262) vs B (239)"). The parser read
+# 0 of 14, the job finished GREEN, and the 28 weights went in by hand. It had
+# already happened once, unseen, on 29-ago (event 1065): "Co-Main Event -
+# Women’s Strawweight: …" (curly apostrophe, no "Bout") and a line with THREE
+# asterisks that not even the tripwire counted. Both articles are fixtures, cut
+# exactly like the Oklahoma City one, and are checked with the same independent
+# oracles (_looks_like_a_bout and the footnotes), never with the module's regexes.
+
+_FIXTURES = Path(__file__).parent / "fixtures"
+_ARTICLE_1095 = (_FIXTURES / "weigh_ins_1095_cortes_acosta_walker.html").read_text(encoding="utf-8")
+_ARTICLE_1065 = (_FIXTURES / "weigh_ins_1065_shanghai.html").read_text(encoding="utf-8")
+
+
+def _weights(parsed):
+    return {(e.red_name, e.red_lbs, e.blue_name, e.blue_lbs) for e in parsed}
+
+
+def test_the_1095_article_reads_all_fourteen_bouts():
+    shaped = [line for line in _body_lines(_ARTICLE_1095) if _looks_like_a_bout(line)]
+    assert len(shaped) == 14, "the fixture should still hold 14 bout lines"
+
+    counts: Counter = Counter()
+    parsed = parse_weigh_ins(_ARTICLE_1095, counts)
+
+    assert len(parsed) == 14
+    assert counts["bout_shaped_lines_unparsed"] == 0
+    # The three shapes of the new template, with their real numbers.
+    assert {
+        ("Waldo Cortes Acosta", 262.0, "Johnny Walker", 239.0),        # "<class> Main Event -"
+        ("Tatiana Suarez", 115.5, "Virna Jandiroba", 116.0),           # "<class> Co-Main Event -"
+        ("Billy Elekana", 206.0, "Lucas Fernando", 205.0),             # "Light Heavyweight:"
+        ("Gabriel Lorenço", 234.0, "Thomas Petersen", 253.5),          # "Heavyweight:"
+        ("Jonny Parsons", 169.5, "José Souza", 171.0),
+    } <= _weights(parsed)
+    # Nobody missed weight that night: no footnote, no flag.
+    assert not any(e.red_missed or e.blue_missed for e in parsed)
+
+
+def test_the_1065_article_reads_all_thirteen_bouts():
+    shaped = [line for line in _body_lines(_ARTICLE_1065) if _looks_like_a_bout(line)]
+    assert len(shaped) == 13, "the fixture should still hold 13 bout lines"
+
+    counts: Counter = Counter()
+    parsed = parse_weigh_ins(_ARTICLE_1065, counts)
+
+    assert len(parsed) == 13
+    assert counts["bout_shaped_lines_unparsed"] == 0
+    assert {
+        ("Yan Xiaonan", 115.5, "Denise Gomes", 115.0),     # "Co-Main Event - Women’s Strawweight:"
+        ("Xiong Jingnan", 117.0, "Julia Polastri", 118.5),  # "(117)*** vs … (118.5)**"
+        ("Umar Nurmagomedov", 135.5, "Song Yadong", 136.0),  # the old template still reads
+    } <= _weights(parsed)
+
+
+def test_the_footnotes_of_the_1065_article_match_the_flagged_corners():
+    # Same second oracle as Oklahoma City: three footnotes (*, ** and ***),
+    # three flagged corners, and the RIGHT three.
+    footnotes = [line for line in _body_lines(_ARTICLE_1065) if line.lstrip().startswith("*")]
+    assert len(footnotes) == 3
+
+    parsed = parse_weigh_ins(_ARTICLE_1065)
+    flagged = sorted(
+        name
+        for entry in parsed
+        for name, missed in ((entry.red_name, entry.red_missed), (entry.blue_name, entry.blue_missed))
+        if missed
+    )
+    assert flagged == ["Andre Lima", "Julia Polastri", "Xiong Jingnan"]
+
+
+# The title lines of the new template have NOT been seen yet: the 1095 had no
+# title fight. UFC 334 (14-nov) has two, so these are the shapes the template
+# would give them, written down before Friday's article so that whichever one
+# ufc.com picks is already read — and if it picks another, the tripwire turns
+# the job red (test_unreadable_bout_lines_turn_the_job_red).
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Heavyweight Championship Main Event - Ciryl Gane (248) vs Josh Hokit (250.5)",
+        "Heavyweight Title Main Event - Ciryl Gane (248) vs Josh Hokit (250.5)",
+        "Interim Heavyweight Championship Main Event - Ciryl Gane (248) vs Josh Hokit (250.5)",
+        "UFC Heavyweight Championship Main Event - Ciryl Gane (248) vs Josh Hokit (250.5)",
+        "Heavyweight Championship: Ciryl Gane (248) vs Josh Hokit (250.5)",
+        "Heavyweight Championship Bout Main Event – Ciryl Gane (248) vs Josh Hokit (250.5)",
+        "Main Event - Heavyweight Championship: Ciryl Gane (248) vs Josh Hokit (250.5)",
+    ],
+)
+def test_title_lines_of_the_new_template_are_read(line):
+    html = f'<div class="field field--name-text"><h4>{line}</h4></div>'
+    counts: Counter = Counter()
+    parsed = parse_weigh_ins(html, counts)
+    assert _weights(parsed) == {("Ciryl Gane", 248.0, "Josh Hokit", 250.5)}
+    assert counts["bout_shaped_lines_unparsed"] == 0
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Women's Bantamweight Championship Co-Main Event - Kayla Harrison (135) vs Amanda Nunes (134.5)",
+        "Women’s Bantamweight Championship Co-Main Event - Kayla Harrison (135) vs Amanda Nunes (134.5)",
+        "Bantamweight Championship Co-Main Event - Kayla Harrison (135) vs Amanda Nunes (134.5)",
+        "Co-Main Event - Women’s Bantamweight Championship: Kayla Harrison (135) vs Amanda Nunes (134.5)",
+    ],
+)
+def test_womens_title_lines_of_the_new_template_are_read(line):
+    html = f'<div class="field field--name-text"><h4>{line}</h4></div>'
+    parsed = parse_weigh_ins(html)
+    assert _weights(parsed) == {("Kayla Harrison", 135.0, "Amanda Nunes", 134.5)}
+
+
+def test_prose_that_starts_with_a_division_is_not_a_bout():
+    # The keyword list was closed for a reason (weigh_ins.py: prose with two
+    # bracketed numbers must not get through). Dropping "Bout" must not open
+    # it: a line counts only when a division is followed by ":" or by
+    # "(Co-)Main Event -", never by free text.
+    html = """
+    <div class="field field--name-text">
+    <p>Heavyweight contenders Ciryl Gane (248) vs Josh Hokit (250.5) meet Saturday</p>
+    <p>Bantamweight is stacked: see how Grant (135.5) vs Smith (135.5) went</p>
+    <p>The Heavyweight Main Event - Gane (248) vs Hokit (250.5) - is five rounds</p>
+    <p>Main event scheduled for five rounds. All other bouts scheduled for three rounds.</p>
+    <p>MORE: Read Our Fight By Fight Preview For Saturday's Event</p>
+    <p>Watch On Paramount+ (United States) | How To Watch In Your Country</p>
+    </div>
+    """
+    assert parse_weigh_ins(html) == []
+
+
+@pytest.mark.parametrize("variant", ["(185***)", "(185)***", "(185****)", "(185)****"])
+def test_the_tripwire_sees_three_or_more_asterisks(variant):
+    # 1065: "(117)***" was invisible to the tripwire, whose `\*{0,2}` stopped at
+    # two. The tripwire must stay LOOSER than the parser, so it now takes any run.
+    html = f"""
+    <div class="field field--name-text">
+    <h4>Middleweight Skirmish - Someone New {variant} vs Someone Else (185)</h4>
+    </div>
+    """
+    counts: Counter = Counter()
+    assert parse_weigh_ins(html, counts) == []
+    assert counts["bout_shaped_lines_unparsed"] == 1, f"mute on {variant}"
+
+
+# ------------------------------------------------------------- the alarm
+#
+# The 1095 finished GREEN with 0 of 14 read: `article_unparseable` and the
+# tripwire were only logged. A bout-shaped line the parser cannot read now fails
+# the job, which "Notify on cron failure" already watches (issue + email). The
+# soft cases — a bout or a corner that does not match our card, as in the 1091 —
+# become a GitHub warning annotation, not a red run.
+
+
+def test_unreadable_bout_lines_turn_the_job_red():
+    assert wi.exit_status(Counter({"bout_shaped_lines_unparsed": 1, "bouts_parsed": 13})) == 1
+
+
+def test_a_clean_pass_stays_green():
+    assert wi.exit_status(Counter({"bouts_parsed": 14, "weigh_ins_written": 28})) == 0
+    # An article that is still empty (the live page before the ceremony) is the
+    # normal Friday-morning state, not an alarm.
+    assert wi.exit_status(Counter({"article_unparseable": 1})) == 0
+    assert wi.exit_status(Counter({"article_not_found": 1})) == 0
+
+
+def test_unmatched_bouts_and_corners_are_a_warning_not_a_failure():
+    counts = Counter({"bouts_unmatched": 2, "corners_unlinked": 1})
+    assert wi.exit_status(counts) == 0
+    warnings = wi.soft_warnings(counts)
+    assert len(warnings) == 2
+    assert all(w.startswith("::warning") for w in warnings)
+    assert wi.soft_warnings(Counter({"bouts_parsed": 14})) == []
+
+
+def test_main_exits_red_when_a_bout_line_was_not_read(monkeypatch, capsys):
+    # The wiring, not just the helper: main() must hand the status to the shell,
+    # or the job stays green exactly as on 6-nov.
+    import contextlib
+    import types
+
+    monkeypatch.setattr(wi, "configure_logging", lambda: None)
+    monkeypatch.setattr(
+        wi, "get_settings",
+        lambda: types.SimpleNamespace(database_url="x", request_delay_seconds=0, request_timeout_seconds=1),
+    )
+    monkeypatch.setattr(wi, "connect", lambda url: contextlib.nullcontext(None))
+    monkeypatch.setattr(wi.sys, "argv", ["weigh_ins"])
+
+    monkeypatch.setattr(wi, "backfill", lambda *a, **k: Counter({"bout_shaped_lines_unparsed": 2}))
+    with pytest.raises(SystemExit) as red:
+        wi.main()
+    assert red.value.code == 1
+    assert '"bout_shaped_lines_unparsed": 2' in capsys.readouterr().out
+
+    monkeypatch.setattr(wi, "backfill", lambda *a, **k: Counter({"bouts_parsed": 14}))
+    with pytest.raises(SystemExit) as green:
+        wi.main()
+    assert green.value.code == 0
 
 
 # ------------------------------------------------------------------ matching
