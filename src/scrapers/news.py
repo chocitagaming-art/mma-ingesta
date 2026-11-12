@@ -46,9 +46,13 @@ CATEGORIES = {
 # Marca stays reachable with plain requests. UFC Español is a Drupal RSS with
 # Spanish day/month abbreviations in pubDate (see _spanish_rfc822_to_english)
 # and NO images in the feed — its articles fall through to fetch_og_image.
+# 🪤 Marca froze rss/mma.xml on 6-nov-2026 (it still serves the same 50 old
+# items, so the 0-articles alarm never fires) and moved UFC to
+# rss/combates-ufc.xml — same CDN, same /combates-ufc/ article URLs, so the
+# URL dedup keeps working across the switch.
 RSS_FEEDS = (
     ("ESPN Deportes", "https://espndeportes.espn.com/espn/rss/mma/news"),
-    ("Marca", "https://e00-marca.uecdn.es/rss/mma.xml"),
+    ("Marca", "https://e00-marca.uecdn.es/rss/combates-ufc.xml"),
     ("UFC Español", "https://www.ufcespanol.com/rss/news"),
 )
 # Real-browser headers for the plain-requests fallback (feedparser's default

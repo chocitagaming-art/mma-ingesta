@@ -322,3 +322,14 @@ def test_un_og_image_roto_no_tumba_la_noticia():
         raise RuntimeError("WAF 403")
 
     assert news.pick_image_url(feed_image="https://ejemplo/foto.jpg", url="https://x/y", fetch_og=revienta) == "https://ejemplo/foto.jpg"
+
+
+def test_marca_reads_the_live_ufc_feed_not_the_frozen_mma_one():
+    # 6-nov-2026: Marca stopped updating rss/mma.xml (lastBuildDate frozen at
+    # Fri, 06 Nov 2026 16:25 +0100) and moved its UFC coverage to
+    # rss/combates-ufc.xml, the feed marca.com/combates-ufc.html now declares.
+    # The run stayed GREEN — the frozen feed still served 38 old articles — and
+    # 23 Marca stories went missing, the Nurmagomedov–Dvalishvili altercation
+    # of 11-nov among them. Pinned so nobody "restores" the dead URL.
+    marca = dict(news.RSS_FEEDS)["Marca"]
+    assert marca == "https://e00-marca.uecdn.es/rss/combates-ufc.xml"
